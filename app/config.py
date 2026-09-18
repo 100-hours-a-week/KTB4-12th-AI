@@ -8,13 +8,13 @@ class Settings(BaseSettings):
     port: int = 8000
     debug: bool = True
 
-    # Database
+    # Database (PostgreSQL + pgvector)
     database_url: str = "postgresql://ai_user:ai_password@localhost:5432/ai_chat"
 
     # Internal Auth Token
     internal_service_token: str = "local-dev-service-token"
 
-    # Main Backend
+    # Main Backend URL
     main_backend_url: str = "http://localhost:8080"
 
     # External LLM Keys

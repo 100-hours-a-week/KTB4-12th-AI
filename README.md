@@ -4,34 +4,33 @@
 
 ---
 
-## 1. 독립 기능별 작업 공간 (Architecture)
+## 1. 프로젝트 아키텍처 구조
 
-팀원 간의 Git 충돌을 방지하고 각자의 모듈을 독립적으로 개발/테스트할 수 있도록 기능별로 작업 공간을 분리했습니다.
+배포용 **공통 서비스 스켈레톤(`app/`)**과 개발자별 **개인 작업 공간(`workbench/`)**으로 구성되어 있습니다.
 
 ```text
 KTB4-12th-AI/
-├── search_catalog/           # 🔍 [질문자님 전용] 상품 검색 & 카탈로그 색인 모듈
-│   ├── search/               # 검색 코어 엔진 (SearchService, DTO)
-│   ├── catalog/              # 상품 export 수신 & pgvector 스냅샷 색인
-│   ├── console/              # 🖥️ 검색기 단독 테스트용 웹 콘솔 (http://localhost:8501)
-│   └── tests/                # 검색 전용 단위 테스트
+├── app/                          # 🏛️ [프로덕션 공통 서비스 스켈레톤] (Docker 배포 대상)
+│   ├── main.py                   # FastAPI 메인 엔트리포인트
+│   ├── config.py                 # 환경변수 설정 (Pydantic Settings)
+│   ├── search/                   # 🔍 [Dylan] 상품 검색 코어 엔진 (SearchService, DTO)
+│   ├── catalog/                  # 📦 [Dylan] 상품 export 수신 & pgvector 스냅샷 색인
+│   ├── profile/                  # 👤 [Emet] 수신자 취향/리뷰 분석 프로파일러 코어
+│   └── chat/                     # 💬 대화 상태 관리 및 SSE 스트리밍
 │
-├── profiler/                 # 👤 [동료 전용] 수신자 취향/리뷰 분석 프로파일러 모듈
-│   ├── service.py            # ProfileService (SearchService 주입 연동)
-│   └── README.md             # 동료를 위한 연동 가이드
+├── workbench/                    # 🧪 [개발자별 개인 작업실] (실험, 콘솔, 튜닝 스크립트)
+│   ├── dylan/                    # 👈 Dylan 전용 작업 공간
+│   └── emet/                     # 👈 Emet 전용 작업 공간
 │
-├── server/                   # 🚀 [통합 배포용] 프로덕션 FastAPI 서버 엔트리포인트
-│   ├── main.py
-│   └── config.py
-│
-├── docker-compose.yml        # 로컬 개발용 (AI 앱 + PostgreSQL pgvector:pg16)
-├── Dockerfile
+├── tests/                        # 공통 단위/통합 테스트
+├── docker-compose.yml            # 로컬 개발용 (AI 앱 + PostgreSQL pgvector:pg16)
+├── Dockerfile                    # 배포용 컨테이너 빌드 파일 (app/만 패키징)
 └── requirements.txt
 ```
 
 ---
 
-## 2. 모듈별 독립 실행 방법
+## 2. 모듈 실행 가이드
 
 ### (1) 로컬 개발 환경 세팅
 ```bash
@@ -40,28 +39,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### (2) 검색기 단독 웹 콘솔 실행 (질문자님 튜닝용)
-다른 서버나 복잡한 설정 없이, 검색 엔진과 콘솔 UI만 즉시 띄워서 테스트할 수 있습니다.
+### (2) 전체 FastAPI 서비스 실행
 ```bash
-python -m search_catalog.console.app
-```
-* 브라우저에서 `http://localhost:8501` 접속
-
-### (3) 전체 통합 서버 실행 (프로덕션 모드)
-```bash
-uvicorn server.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8000
 ```
 * Swagger Docs: `http://localhost:8000/docs`
 * Health Check: `http://localhost:8000/health`
 
-### (4) 로컬 Docker Compose 실행 (pgvector 포함)
+### (3) 로컬 Docker Compose 실행 (pgvector 포함)
 ```bash
 docker compose up -d
 ```
 
----
-
-## 3. 테스트 실행
+### (4) 단위 테스트 실행
 ```bash
-pytest search_catalog/tests/
+pytest tests/
 ```

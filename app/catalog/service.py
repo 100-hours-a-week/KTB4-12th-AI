@@ -3,7 +3,8 @@ from datetime import datetime
 from typing import List, Optional
 import httpx
 
-from search_catalog.catalog.types import ProductDocument, SnapshotManifest
+from app.catalog.types import ProductDocument, SnapshotManifest
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -11,15 +12,14 @@ logger = logging.getLogger(__name__)
 class CatalogService:
     """메인 백엔드의 상품 정본을 동기화하고 벡터 인덱스 스냅샷을 관리하는 서비스"""
 
-    def __init__(self, backend_url: Optional[str] = None, service_token: Optional[str] = None):
-        self.backend_url = backend_url or "http://localhost:8080"
-        self.service_token = service_token or "local-dev-service-token"
+    def __init__(self, backend_url: Optional[str] = None):
+        self.backend_url = backend_url or settings.main_backend_url
         self.active_snapshot_id: str = "v1.0.0"
 
     async def fetch_backend_export(self) -> List[ProductDocument]:
         """메인 백엔드의 상품 전체 export API 호출"""
         url = f"{self.backend_url}/internal/v1/ai/products/export"
-        headers = {"Authorization": f"Bearer {self.service_token}"}
+        headers = {"Authorization": f"Bearer {settings.internal_service_token}"}
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:

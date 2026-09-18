@@ -1,4 +1,4 @@
-from search_catalog.search.types import (
+from app.search.types import (
     ProductEvidence,
     SearchFilters,
     SearchHit,
@@ -6,7 +6,7 @@ from search_catalog.search.types import (
     SearchRequest,
     SearchResult,
 )
-from search_catalog.search.service import SearchService
+from app.search.service import SearchService
 
 __all__ = [
     "SearchFilters",

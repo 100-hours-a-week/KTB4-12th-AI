@@ -15,9 +15,8 @@ services:
       ai-db:
         condition: service_healthy
     volumes:
-      - ./search_catalog:/app/search_catalog
-      - ./profiler:/app/profiler
-      - ./server:/app/server
+      - ./app:/app/app
+      - ./workbench:/app/workbench
 
   ai-db:
     image: pgvector/pgvector:pg16

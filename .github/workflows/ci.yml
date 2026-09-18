@@ -27,4 +27,4 @@ jobs:
 
       - name: Run Tests
         run: |
-          pytest search_catalog/tests/
+          pytest tests/

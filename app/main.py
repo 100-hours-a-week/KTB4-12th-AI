@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-from server.config import settings
-from search_catalog.search.service import SearchService
-from search_catalog.search.types import SearchFilters, SearchRequest, SearchResult
+from app.config import settings
+from app.search.service import SearchService
+from app.search.types import SearchFilters, SearchRequest, SearchResult
 
 app = FastAPI(
     title="선잘알 AI Backend Service",

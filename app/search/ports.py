@@ -1,5 +1,5 @@
 from typing import Protocol, Tuple
-from search_catalog.search.types import SearchHit, SearchRequest
+from app.search.types import SearchHit, SearchRequest
 
 
 class RetrievalPort(Protocol):
