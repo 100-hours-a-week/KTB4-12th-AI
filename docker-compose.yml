@@ -1,0 +1,41 @@
+services:
+  ai-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: seonjalal-ai-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://ai_user:ai_password@ai-db:5432/ai_chat
+      - INTERNAL_SERVICE_TOKEN=local-dev-service-token
+      - MAIN_BACKEND_URL=http://host.docker.internal:8080
+    depends_on:
+      ai-db:
+        condition: service_healthy
+    volumes:
+      - ./search_catalog:/app/search_catalog
+      - ./profiler:/app/profiler
+      - ./server:/app/server
+
+  ai-db:
+    image: pgvector/pgvector:pg16
+    container_name: seonjalal-ai-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=ai_chat
+      - POSTGRES_USER=ai_user
+      - POSTGRES_PASSWORD=ai_password
+    volumes:
+      - ai_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_user -d ai_chat"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  ai_pgdata:
