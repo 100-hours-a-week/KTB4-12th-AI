@@ -1,6 +1,6 @@
 import pytest
-from search_catalog.search.service import SearchService
-from search_catalog.search.types import SearchFilters, SearchOutcome, SearchRequest
+from app.search.service import SearchService
+from app.search.types import SearchFilters, SearchOutcome, SearchRequest
 
 
 @pytest.mark.asyncio

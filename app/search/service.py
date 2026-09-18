@@ -1,12 +1,12 @@
 from typing import Optional, Tuple
-from search_catalog.search.types import (
+from app.search.types import (
     ProductEvidence,
     SearchHit,
     SearchOutcome,
     SearchRequest,
     SearchResult,
 )
-from search_catalog.search.ports import RetrievalPort
+from app.search.ports import RetrievalPort
 
 
 class MockRetrievalAdapter:
