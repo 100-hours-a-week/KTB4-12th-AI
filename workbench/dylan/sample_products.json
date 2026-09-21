@@ -1,0 +1,20 @@
+{
+  "products": [
+    {
+      "product_id": "SAMPLE:001",
+      "name": "머그컵",
+      "brand": "샘플 브랜드",
+      "category_id": "SAMPLE-KITCHEN",
+      "price_krw": 12000,
+      "description": "흰색 도자기 머그컵 1개"
+    },
+    {
+      "product_id": "SAMPLE:002",
+      "name": "수건 세트",
+      "brand": "샘플 브랜드",
+      "category_id": "SAMPLE-LIVING",
+      "price_krw": 18000,
+      "description": "면 수건 3장 세트"
+    }
+  ]
+}
