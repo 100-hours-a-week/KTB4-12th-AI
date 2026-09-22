@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>7.6 · 7.7 · 7.9 시험 콘솔</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- 플레이그라운드(AI/실험/프로파일링_추출/playground/static/index.html)와 같은 스타일·구조. 스타일은 그대로 복사한 것 -->
+<style>
+:root{--bg:#fff;--fg:#18212b;--mute:#5e6873;--line:#d9dee3;--blue:#f5f8fd;--bl:#9db0d2;--ok:#1a7f37;--bad:#b42318;--warn:#9a6700}
+@media(prefers-color-scheme:dark){:root{--bg:#14171b;--fg:#e6e9ee;--mute:#9aa4b0;--line:#2c333b;--blue:#1b2331;--bl:#3b4d6b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif}
+main{max-width:1280px;margin:0 auto;padding:20px 16px}h1{font-size:22px;margin:0 0 4px}.sub{color:var(--mute);font-size:13px;margin-bottom:12px}
+nav{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:16px}nav button{border:none;background:none;padding:8px 14px;font:inherit;color:var(--mute);cursor:pointer;border-bottom:2px solid transparent}nav button.on{color:var(--fg);border-bottom-color:var(--bl);font-weight:700}
+.tab{display:none}.tab.on{display:block}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}@media(max-width:900px){.grid{grid-template-columns:1fr}}
+section{border:1px solid var(--line);border-radius:6px;padding:14px;margin-bottom:14px}section h2{font-size:15px;margin:0 0 10px}
+label{display:block;font-size:13px;color:var(--mute);margin:8px 0 3px}textarea,input,select{width:100%;padding:7px 8px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg);font:inherit}
+textarea{min-height:64px}.row{display:grid;grid-template-columns:1fr 70px 1fr 28px;gap:6px;align-items:start;margin-bottom:6px;position:relative}
+.row .hit{position:absolute;z-index:5;top:38px;left:0;width:60%;background:var(--bg);border:1px solid var(--line);border-radius:4px;max-height:200px;overflow:auto;font-size:13px}
+.hit div{padding:5px 8px;cursor:pointer}.hit div:hover{background:var(--blue)}.picked{font-size:12px;color:var(--mute);grid-column:1/5;margin-top:-2px}
+button{padding:7px 12px;border:1px solid var(--bl);background:var(--blue);color:var(--fg);border-radius:4px;cursor:pointer;font:inherit}button.primary{font-weight:700}button.ghost{background:none;border-color:var(--line)}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}.opts{display:flex;gap:10px;flex-wrap:wrap;font-size:13px;align-items:center}.inl{display:inline;margin:0}
+.tags span{display:inline-block;margin:2px 4px 2px 0;padding:2px 8px;border-radius:12px;border:1px solid var(--line);font-size:13px}
+.tags .conf{background:var(--blue);border-color:var(--bl)}.tags .prom{border-style:dashed}.tags .dis{border-color:#e3b3b3}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}th{color:var(--mute);font-weight:600}
+.keep{color:var(--ok)}.drop{color:var(--bad)}.cand{color:var(--warn)}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap}
+details{margin-top:8px}summary{cursor:pointer;color:var(--mute);font-size:13px}.stat{font-size:13px;color:var(--mute);margin:6px 0}
+.cmp{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}.cmp section{margin:0}.cmp h3{font-size:14px;margin:0 0 6px}
+.mrow{display:grid;grid-template-columns:150px 90px 1fr 1fr 150px 70px 1fr 60px;gap:6px;align-items:center;margin-bottom:6px;font-size:13px}.mrow input,.mrow select{padding:5px 6px;font-size:13px}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+.flow section{position:relative;padding-left:52px}.flow .no{position:absolute;left:14px;top:12px;width:26px;height:26px;border-radius:50%;background:var(--bl);color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center}
+.flow .arr{color:var(--mute);font-size:13px;margin:-8px 0 8px 20px}.flow .arr b{color:var(--fg)}
+.pbar{display:inline-block;height:8px;background:var(--bl);border-radius:2px;vertical-align:middle;margin-right:4px}.pass{background:var(--ok)}
+.box{border:1px dashed var(--line);border-radius:4px;padding:8px 10px;margin:6px 0;font-size:13px}.box b{display:block;margin-bottom:3px}
+.flow .in{font-size:13px}.flow .in li{margin:2px 0}.tags .hl{outline:2px solid var(--ok)}.rm{text-decoration:line-through;opacity:.6}
+.diff{font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;line-height:1.45}.diff .add{background:#e6f4ea;color:#1a7f37}.diff .del{background:#fdecea;color:#b42318;text-decoration:line-through}.diff .hunk{color:var(--mute)}
+@media(prefers-color-scheme:dark){.diff .add{background:#173a23}.diff .del{background:#3f1d1b}}
+.dishead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0 4px}.dishead .stat{margin:0}.dishead button{padding:4px 10px;font-size:13px;white-space:nowrap;flex:none}.dissel{font-size:13px;color:var(--mute);margin:0 0 6px}.dissel span{display:inline-block;margin:2px 4px 2px 0;padding:1px 8px;border-radius:12px;border:1px solid #e3b3b3;color:var(--fg)}.dishead button:disabled{opacity:.45;cursor:default}
+.dislist{border:1px solid var(--line);border-radius:6px;max-height:264px;overflow:auto}.disrow{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-bottom:1px solid var(--line);font-size:14px;margin:0;color:var(--fg);cursor:pointer}.disrow:last-child{border-bottom:none}.disrow.off{color:var(--mute);cursor:default}.disrow .nm{display:flex;align-items:center;gap:8px}.disrow .dot{width:8px;height:8px;border-radius:50%;background:var(--line);flex:none}.disrow.on .dot{background:var(--bad)}
+.sw{appearance:none;-webkit-appearance:none;width:40px;height:22px;border-radius:11px;background:#c9d0d6;position:relative;cursor:pointer;flex:none;margin:0;transition:background .15s}.sw::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}.sw:checked{background:#18212b}.sw:checked::after{left:20px}.sw:disabled{opacity:.4;cursor:default}
+@media(prefers-color-scheme:dark){.sw{background:#3a434d}.sw:checked{background:#9db0d2}}
+.locked{opacity:.45;pointer-events:none}.verbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 8px;font-size:13px}.verbar select{width:auto}.vernote{font-size:12px;color:var(--mute);flex-basis:100%}
+.badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:12px;border:1px solid var(--line);color:var(--mute)}.badge.base{border-color:var(--ok);color:var(--ok);font-weight:700}.badge.dead{border-color:#e3b3b3;color:var(--bad)}.ax{font-weight:700;margin:6px 0 2px}
+
+.resp{border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin-top:10px}.resp .code{font-size:18px;font-weight:700}.code.ok{color:var(--ok)}.code.bad{color:var(--bad)}
+.modes label{margin-right:12px}.kv{display:grid;grid-template-columns:160px 1fr;gap:4px 10px;font-size:13px}.kv b{color:var(--mute);font-weight:600}
+</style></head><body><main>
+<h1>7.6 · 7.7 · 7.9 시험 콘솔 <small style="font-size:13px;color:var(--mute);font-weight:400">— fake Backend :8081이 Backend 역할을 한다. 7.6은 여기서 AI로 대신 보낸다</small></h1>
+<div class="sub" id="cfg">연결 확인 중…</div>
+<nav><button data-t="send" class="on">7.6 보내기</button><button data-t="recv">7.7 받은 것 <span id="recv-badge" class="badge">0</span></button><button data-t="cat">7.9 · 상태</button></nav>
+
+<!-- ============ 탭 1: 7.6 보내기 ============ -->
+<div class="tab on" id="tab-send"><div class="grid">
+<section>
+ <h2>7.6 요청 본문 — Backend가 AI로 보내는 것</h2>
+ <div class="verbar"><label class="inl">입력 버전 <select id="ver" onchange="applyVersion()"><option value="v1">v1 · 비선호만</option><option value="v2">v2 · 비선호만 (=v1)</option><option value="v3">v3 · 비선호+리뷰+취향</option></select></label>
+  <button class="ghost" onclick="randomInput()">이 버전 기준 무작위</button><span class="vernote" id="ver-note"></span></div>
+ <div class="opts"><label class="inl">recipientUserId <input id="rid" type="number" value="9001" style="width:110px"></label>
+  <label class="inl">sourceVersion <input id="sv" type="number" value="1" style="width:90px"></label>
+  <label class="inl"><input id="sv-auto" type="checkbox" style="width:auto" checked onchange="applySvAuto()"> 자동 증가 (Backend 흉내 — 같은 수신자로 보낼 때마다 +1)</label>
+  <span class="stat" id="sv-info"></span></div>
+ <label id="pref-label">취향 문장 (giftPreference) — 비우면 null · 최대 500자</label>
+ <textarea id="pref" maxlength="500" placeholder="예: 가방·지갑이나 뷰티소품 위주로 받고 싶어요."></textarea>
+ <div class="dishead"><span class="stat">명시 비선호 카테고리 (dislikedCategories) — <b>최대 5개</b> · <b id="dis-count">0/5</b></span><button class="ghost" id="dis-reset" onclick="disReset()" disabled>초기화</button></div>
+ <div class="dissel" id="dis-sel"></div><div id="dis" class="dislist"></div>
+ <label id="rows-label">리뷰 (최대 10개) — 상품명·브랜드로 검색(7.9 목록) · 별점(1~5) · 글(≤300자, 비우면 null)</label>
+ <div id="rows"></div>
+ <div class="bar"><button class="ghost" id="rows-add" onclick="addRow()">+ 리뷰 추가</button>
+  <label class="inl"><input id="raw-mode" type="checkbox" style="width:auto" onchange="toggleRaw()"> JSON 직접 편집 (틀린 본문으로 400 보기)</label>
+  <button class="ghost" id="raw-refill" style="display:none" onclick="refillRaw()">폼 → JSON 다시 채우기</button></div>
+ <textarea id="raw" class="mono" style="min-height:160px;display:none"></textarea>
+ <div class="bar"><button class="primary" onclick="send()">7.6 보내기 → AI</button><span id="send-busy" class="stat"></span><span id="raw-flag" class="badge dead" style="display:none">JSON 편집 모드로 전송 — 폼 값은 무시됨</span></div>
+</section>
+<section><h2>AI 응답</h2><div id="send-out"><div class="stat">왼쪽에서 본문을 만들고 "7.6 보내기". 202가 오면 "7.7 받은 것" 탭에서 콜백 도착을 확인.</div></div>
+ <details style="margin-top:12px"><summary>보낸 본문 (마지막)</summary><div id="sent-body" class="mono"></div></details></section>
+</div></div>
+
+<!-- ============ 탭 2: 7.7 받은 것 ============ -->
+<div class="tab" id="tab-recv">
+<section>
+ <h2>7.7 콜백 수신 목록 <span class="stat" style="display:inline">— 2초마다 갱신 · 최신이 위</span></h2>
+ <div class="bar" style="margin-top:0"><button class="ghost" onclick="loadReceived()">지금 갱신</button><button class="ghost" onclick="clearReceived()">비우기</button><span class="stat" id="recv-stat"></span></div>
+ <div id="recv-out"></div>
+</section>
+</div>
+
+<!-- ============ 탭 3: 7.9 · 상태 ============ -->
+<div class="tab" id="tab-cat">
+<div class="grid">
+<section><h2>7.9 export — AI Catalog 빌드가 가져가는 것</h2><div id="cat-out" class="kv"></div>
+ <details style="margin-top:10px"><summary>상품 목록</summary><div id="cat-list"></div></details></section>
+<section><h2>실패 주입 모드 (7.7 응답)</h2>
+ <div class="stat">AI가 7.7을 보냈을 때 fake Backend가 무엇으로 답할지. AI 로그의 DELIVERED / SUPERSEDED / FAILED / 재시도 대상 갈래를 보려면 바꾼 뒤 7.6을 다시 보낸다.</div>
+ <div class="modes" id="modes"></div>
+ <h2 style="margin-top:16px">AI 앱 상태</h2><div id="ai-out" class="kv"></div><div class="bar"><button class="ghost" onclick="loadAi()">다시 확인</button></div></section>
+</div></div>
+</main>
+<script>
+const $=s=>document.querySelector(s); let CAT={categories:[],products:[]};
+const VER={v1:{pref:false,reviews:false,note:'MVP(PB-4) — 비선호 카테고리만(≤5). 실제 v1에서는 7.6 호출이 없음(비선호 정렬은 Backend). 여기서는 "7.6이 비선호만 받았다면"'},
+           v2:{pref:false,reviews:false,note:'v2 — 추가 입력은 발신자 대화(채팅). 프로파일링 입력은 v1과 같음'},
+           v3:{pref:true,reviews:true,note:'v3 — + 리뷰(별점 필수·글 ≤300자·최신 10개) + 취향 자유 텍스트(≤500자, 없으면 null)'}};
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+b.dataset.t))});
+function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+async function init(){CAT=await (await fetch('/console/catalog')).json();renderDisList();addRow();addRow();applyVersion();renderCatalog();loadModes();loadAi();loadReceived();setInterval(loadReceived,2000);applySvAuto();$('#rid').addEventListener('input',showSvInfo);
+ $('#cfg').innerHTML=CAT.error?`<span class="drop">카탈로그 읽기 실패: ${esc(CAT.error)} — fake_backend를 profiling/ 에서 다시 띄우세요</span>`:`카탈로그 ${CAT.file} · 상품 ${CAT.count}건 · 카테고리 ${CAT.categories.length}개`}
+// ---- sourceVersion 자동 증가 (fake Backend가 수신자별로 기억)
+function applySvAuto(){const on=$('#sv-auto').checked;$('#sv').disabled=on;showSvInfo()}
+async function showSvInfo(){if(!$('#sv-auto').checked){$('#sv-info').textContent='';return}const r=await (await fetch('/console/source-versions')).json();const cur=r.versions[$('#rid').value];$('#sv-info').textContent=cur?`이 수신자의 마지막 sourceVersion ${cur} → 다음 전송은 ${cur+1}`:'처음 보내는 수신자 — 아래 값(또는 1)부터'}
+// ---- 버전
+function verOf(){return VER[$('#ver').value]}
+function applyVersion(){const v=verOf();$('#ver-note').textContent=v.note;$('#pref').disabled=!v.pref;$('#pref-label').classList.toggle('locked',!v.pref);$('#pref').classList.toggle('locked',!v.pref);
+ $('#rows').classList.toggle('locked',!v.reviews);$('#rows-label').classList.toggle('locked',!v.reviews);$('#rows-add').disabled=!v.reviews;$('#rows-add').classList.toggle('locked',!v.reviews)}
+function randomInput(){const v=verOf();const pick=(a,n)=>[...a].sort(()=>Math.random()-.5).slice(0,n);
+ disSet(pick(CAT.categories,v.reviews?[0,1,1,2,2,3,5][Math.floor(Math.random()*7)]:[1,1,2,2,3,4,5][Math.floor(Math.random()*7)]).map(c=>c.categoryId));
+ $('#pref').value=v.pref&&Math.random()<0.8?'가방·지갑이나 뷰티소품 위주로 받고 싶어요. 특히 휴대용 제품이 마음에 들어요. 가성비 쪽은 안 좋아해요.':'';
+ $('#rows').innerHTML='';if(v.reviews){for(const p of pick(CAT.products.filter(p=>p.available),1+Math.floor(Math.random()*10))){const r=[1,2,3,4,5,5,4][Math.floor(Math.random()*7)];addRow({productId:p.productId,name:p.name,rating:r,reviewText:Math.random()<0.6?(r>=4?'휴대용 때문에 골랐는데 만족합니다.':r===3?'그냥 무난해요.':'기대보다 아쉬웠어요.'):null})}}
+ $('#rid').value=9000+Math.floor(Math.random()*100);if(!$('#sv-auto').checked)$('#sv').value=1+Math.floor(Math.random()*6);showSvInfo()}
+// ---- 비선호 (C-05: 토글 · 최대 5 · 초기화)
+const DIS_MAX=5;
+function renderDisList(){const box=$('#dis');box.innerHTML=CAT.categories.map(c=>`<label class="disrow"><span class="nm"><span class="dot"></span>${esc(c.categoryName)}</span><input type="checkbox" class="sw" value="${c.categoryId}"></label>`).join('');box.addEventListener('change',disUpdate);disUpdate()}
+function disSelected(){return [...$('#dis').querySelectorAll('.sw:checked')].map(i=>+i.value)}
+function disUpdate(){const n=disSelected().length,full=n>=DIS_MAX;$('#dis').querySelectorAll('.disrow').forEach(r=>{const i=r.querySelector('.sw');i.disabled=full&&!i.checked;r.classList.toggle('on',i.checked);r.classList.toggle('off',i.disabled)});
+ $('#dis-count').textContent=n+'/'+DIS_MAX;$('#dis-count').style.color=full?'var(--bad)':'';$('#dis-reset').disabled=n===0;
+ const names=[...$('#dis').querySelectorAll('.disrow.on .nm')].map(e=>e.textContent);$('#dis-sel').innerHTML=names.length?'선택: '+names.map(t=>`<span>${esc(t)}</span>`).join(''):'선택 없음 — 목록에서 토글을 켜세요'}
+function disSet(ids){$('#dis').querySelectorAll('.sw').forEach(i=>i.checked=ids.includes(+i.value));disUpdate()}
+function disReset(){disSet([])}
+// ---- 리뷰 행 (상품 검색은 7.9 목록에서 클라이언트 필터)
+function addRow(pre){const rows=$('#rows');if(rows.children.length>=10)return;const r=document.createElement('div');r.className='row';r.innerHTML=
+ `<input class="q" placeholder="상품명/브랜드 검색"><select class="rating"><option>5</option><option>4</option><option selected>3</option><option>2</option><option>1</option></select>
+  <input class="txt" placeholder="리뷰 글 (선택, ≤300자)" maxlength="300"><button class="x" title="삭제">×</button><div class="hit" hidden></div><div class="picked">선택된 상품 없음</div>`;
+ r.dataset.pid='';rows.appendChild(r);const q=r.querySelector('.q'),hit=r.querySelector('.hit');
+ q.addEventListener('input',()=>{const v=q.value.trim().toLowerCase();if(!v){hit.hidden=true;return}const hs=CAT.products.filter(p=>(p.name+' '+p.brand).toLowerCase().includes(v)).slice(0,20);
+  hit.innerHTML=hs.map(h=>`<div data-id="${h.productId}">${esc(h.name)} <small>· ${esc(h.brand)} · ${esc(h.categoryName)}${h.available?'':' · 판매불가'}</small></div>`).join('')||'<div>없음</div>';hit.hidden=false;
+  hit.querySelectorAll('div[data-id]').forEach(d=>d.onclick=()=>{r.dataset.pid=d.dataset.id;r.querySelector('.picked').textContent='✓ '+d.textContent;q.value=d.textContent.split(' · ')[0];hit.hidden=true})});
+ r.querySelector('.x').onclick=()=>r.remove();
+ if(pre){r.dataset.pid=pre.productId;q.value=pre.name||String(pre.productId);r.querySelector('.picked').textContent='✓ '+(pre.name||pre.productId)+' (id '+pre.productId+')';r.querySelector('.rating').value=pre.rating;r.querySelector('.txt').value=pre.reviewText||''}}
+// ---- 본문 조립 · 전송
+function build(){const v=verOf();const cats=Object.fromEntries(CAT.categories.map(c=>[c.categoryId,c.categoryName]));
+ const reviews=v.reviews?[...$('#rows').children].filter(r=>r.dataset.pid).map(r=>({productId:+r.dataset.pid,rating:+r.querySelector('.rating').value,reviewText:r.querySelector('.txt').value.trim()||null})):[];
+ return {recipientUserId:+$('#rid').value,sourceVersion:+$('#sv').value,dislikedCategories:disSelected().map(i=>({categoryId:i,categoryName:cats[i]})),giftPreference:v.pref?($('#pref').value.trim()||null):null,reviews}}
+function toggleRaw(){const on=$('#raw-mode').checked;$('#raw').style.display=on?'block':'none';$('#raw-refill').style.display=on?'':'none';$('#raw-flag').style.display=on?'':'none';if(on)refillRaw()}
+function refillRaw(){$('#raw').value=JSON.stringify(build(),null,2)}
+async function send(){let body;try{body=$('#raw-mode').checked?JSON.parse($('#raw').value):build()}catch(e){$('#send-out').innerHTML=`<div class="drop">JSON 오류: ${esc(e.message)}</div>`;return}
+ $('#send-busy').textContent='AI로 전송 중…';$('#sent-body').textContent=JSON.stringify(body,null,2);
+ try{const r=await (await fetch('/console/send-7.6?auto_source_version='+($('#sv-auto').checked?'true':'false'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+  if(r.sentSourceVersion!=null){$('#sv').value=r.sentSourceVersion;body.sourceVersion=r.sentSourceVersion;$('#sent-body').textContent=JSON.stringify(body,null,2);showSvInfo()}
+  const cls=r.ok?'ok':'bad';let h=`<div class="resp"><span class="code ${cls}">${r.status??'연결 실패'}</span> <span class="stat" style="display:inline">${r.ok?'202 접수 — 분석은 백그라운드, 완료는 7.7 콜백':'접수 안 됨'} · ${r.elapsedMs} ms${r.sentSourceVersion!=null?' · 보낸 sourceVersion '+r.sentSourceVersion:''}</span>`;
+  if(r.error)h+=`<div class="drop" style="margin-top:6px">${esc(r.error)}</div>`;h+=`<div class="mono" style="margin-top:8px">${esc(JSON.stringify(r.body??'',null,2))}</div></div>`;
+  h+=`<div class="stat">읽는 법 — <b>202</b> 정상 · <b>400 INVALID_REQUEST</b> 본문 오류(어느 필드인지 message) · <b>401</b> 토큰(AI_SERVICE_TOKEN ↔ PROFILING_SERVICE_TOKEN) · <b>503</b> AI에 활성 카탈로그 없음</div>`;
+  $('#send-out').innerHTML=h}catch(e){$('#send-out').innerHTML=`<div class="drop">오류: ${esc(e.message)}</div>`}finally{$('#send-busy').textContent=''}}
+// ---- 7.7 받은 것
+let lastCount=-1;
+async function loadReceived(){try{const r=await (await fetch('/received')).json();$('#recv-badge').textContent=r.count;$('#recv-stat').textContent=`mode=${r.mode} · ${r.count}건`;
+ if(r.count===lastCount)return;lastCount=r.count;
+ if(!r.items.length){$('#recv-out').innerHTML='<div class="stat">아직 받은 콜백이 없습니다. 7.6을 보내면 AI가 처리 후 여기로 7.7을 보냅니다.</div>';return}
+ const by=Object.fromEntries(CAT.products.map(p=>[p.productId,p]));
+ let h='';
+ [...r.items].reverse().forEach((it,idx)=>{const ids=it.recommendedProductIds;
+  h+=`<section style="margin-bottom:12px"><h3 style="font-size:14px;margin:0 0 6px">${idx===0?'최신 · ':''}${esc(it.receivedAt)} — 수신자 <b>${it.recipientUserId}</b> · sourceVersion ${it.sourceVersion} · ${esc(it.profileStatus)} · 상품 ${ids.length}개 <small style="color:var(--mute)">Authorization: ${esc(it.authorization||'-')}</small></h3>
+   <details ${idx===0?'open':''}><summary>추천 상품 ${ids.length}개 (순서 = 순위)</summary><table><tr><th>#</th><th>productId</th><th>상품</th><th>브랜드</th><th>카테고리</th><th>조회수</th></tr>`;
+  ids.forEach((id,i)=>{const p=by[id];h+=p?`<tr><td>${i+1}</td><td class="mono">${id}</td><td>${esc(p.name)}</td><td>${esc(p.brand)}</td><td>${esc(p.categoryName)}</td><td>${p.viewCount??'-'}</td></tr>`
+   :`<tr><td>${i+1}</td><td class="mono">${id}</td><td colspan="4" class="drop">카탈로그에 없는 상품 (fake의 카탈로그 파일과 AI의 카탈로그가 다를 수 있음)</td></tr>`});
+  h+='</table></details></section>'});
+ $('#recv-out').innerHTML=h+'<div class="stat">태그(preferredTags·dislikedTags)가 없는 것이 맞습니다(태그는 AI가 보관). 상품 이름·카테고리는 fake Backend가 가진 카탈로그로 붙인 것이고, 콜백 본문에는 productId만 옵니다. 본문이 스키마에 어긋나면 AI 쪽이 400을 받고 여기에는 기록되지 않습니다.</div>'}catch(e){$('#recv-stat').textContent='갱신 실패: '+e.message}}
+async function clearReceived(){await fetch('/received',{method:'DELETE'});lastCount=-1;loadReceived()}
+// ---- 7.9 · 상태
+function renderCatalog(){const byCat={};for(const p of CAT.products)byCat[p.categoryName]=(byCat[p.categoryName]||0)+1;
+ $('#cat-out').innerHTML=`<b>경로</b><span>GET /internal/v1/ai/products/export (Bearer 필요)</span><b>파일</b><span class="mono">${esc(CAT.file)}</span><b>상품</b><span>${CAT.count}건 · 판매중 ${CAT.products.filter(p=>p.available).length}</span><b>카테고리</b><span>${CAT.categories.length}개</span>`;
+ $('#cat-list').innerHTML='<table><tr><th>productId</th><th>상품</th><th>브랜드</th><th>카테고리</th><th>판매</th></tr>'+CAT.products.map(p=>`<tr><td>${p.productId}</td><td>${esc(p.name)}</td><td>${esc(p.brand)}</td><td>${esc(p.categoryName)}</td><td>${p.available?'':'<span class=drop>불가</span>'}</td></tr>`).join('')+'</table>'}
+async function loadModes(){const r=await (await fetch('/console/mode')).json();$('#modes').innerHTML=r.modes.map(m=>`<label class="inl"><input type="radio" name="mode" value="${m}" style="width:auto" ${m===r.mode?'checked':''} onchange="setMode('${m}')"> <b>${m}</b> ${({ok:'200 저장됨 → DELIVERED','409':'STALE_SOURCE_VERSION → SUPERSEDED (폐기)','400':'INVALID_REQUEST → FAILED (재시도 없음)','500':'INTERNAL_SERVER_ERROR → 재시도 대상',timeout:'60초 무응답 → 타임아웃 → 재시도 대상'})[m]||''}</label><br>`).join('')}
+async function setMode(m){await fetch('/console/mode',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({mode:m})});loadReceived()}
+async function loadAi(){const r=await (await fetch('/console/health-ai')).json();
+ $('#ai-out').innerHTML=r.ok?`<b>AI</b><span class="ok">연결됨 ${esc(r.url)}</span><b>카탈로그</b><span>${r.body.catalog.active?`활성 · version ${r.body.catalog.version} · 상품 ${r.body.catalog.products}`:'<span class=drop>없음 → 7.6은 503</span>'}</span>`
+  :`<b>AI</b><span class="bad">연결 안 됨 ${esc(r.url)} — ${esc(r.error||r.status)}</span><b>실행</b><span class="mono">uv run uvicorn profiling.main:app --port 8000</span>`}
+init();
+</script></body></html>
