@@ -8,7 +8,7 @@
 
 ## 먼저 코드만 확인하기
 
-Python 3.13 이상과 uv를 사용한다. 검색 경계 테스트에는 상품 데이터·모델·Node가 필요 없다.
+Python 3.13 이상과 uv를 사용한다. 검색 경계 테스트에는 실제 상품 데이터·Jina 모델·Node가 필요 없다. Kiwi와 그 모델 패키지는 아래 uv 명령으로 함께 설치한다.
 
 ```sh
 cd product-search
@@ -19,6 +19,7 @@ uv run pytest -q
 | 파일 | 역할 |
 |---|---|
 | `search/models.py` | 검색어·필터·선호·상품 조회 요청 계약 |
+| `search/tokenization.py` | Kiwi 문서/질의 토큰화, 품사 필터, 모델명 보존 |
 | `search/service.py` | 필터, BM25F, dense cosine, RRF, 결과·상품 상세 |
 | `search/embedding.py` | Node 실행기, 대기열, 질의 캐시·중복 요청 공유 |
 | `search/bootstrap.py` | 모델·카탈로그 시작/종료와 공용 인스턴스 생성 |
@@ -76,6 +77,8 @@ curl -sS http://127.0.0.1:4325/api/search \
 필터: `minPrice`, `maxPrice`, `categoryIds`, `excludeCategoryIds`, `brands`, `excludeBrands`, `productTypes`, `excludeProductIds`, `availability`. 같은 목록은 OR, 다른 필드는 AND이며 제외가 우선이다. 가격 경계를 포함한다. 카테고리 필터는 `CAT-…` 소분류 ID이며 대분류는 해당 소분류 목록으로 변환한다. 브랜드는 NFKC·대소문자·공백 정규화 후 정확 일치다. 미지원 필드·알 수 없는 분류/브랜드·잘못된 가격은 422다.
 
 모드는 `hybrid`, `lexical`, `dense`. 빈 질의는 임베딩 없이 분류가 고르게 섞인 목록을 제공한다. limit 1~100, offset 0~5000. `eligibleCount`는 조건에 맞는 전체 건수, `candidateCount`는 두 검색에서 모은 후보 수다. 일반 검색은 검색 방식별 상위 100개를 합쳐 후보 최대 200개이므로 무제한 전체 검색결과 페이징이 아니다.
+
+키워드 토큰은 Kiwi 0.23.2 / 모델 0.23.0의 CoNg로 분석한다. NFKC·casefold 후 명사·동사·형용사·어근·부사·영문·숫자 형태소를 남기고 조사·어미는 제외한다. 영문·숫자 모델명 원형도 보존한다. 문서와 질의는 같은 정책을 쓰고, 임의의 두 글자 조각은 만들지 않는다. 인덱싱은 중복 필드를 묶어 Kiwi worker 2개로 일괄 분석하며 질의 토큰 LRU는 4,096개다. API metadata의 `lexicalTokenizer`에서 적용 버전을 확인할 수 있다. [Kiwi 공식 문서](https://github.com/bab2min/kiwipiepy)
 
 BM25F는 상품명 4, 브랜드 3, 분류·종류 2, 설명·속성 1, 가공 태그 0.5의 초기 가중치다. dense는 이름·브랜드·분류·종류·속성·설명을 사용하며 가공 태그는 넣지 않는다. 768차원 float32 벡터를 정규화해 exact cosine으로 검색한다. RRF 상수 30, 선호 분류 ×1.10, 비선호 분류 ×0.75는 아직 평가로 최적화하지 않은 초기 설정이다. 비선호는 제외가 아니며 점수는 추천 확률이 아니다.
 

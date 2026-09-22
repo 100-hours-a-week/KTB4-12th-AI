@@ -7,22 +7,12 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import re
 import time
-import unicodedata
 import numpy as np
 from .models import SearchRequest
+from .tokenization import normalize, tokens, batch_tokens, TOKENIZER_ID, TOKENIZER_INFO
 
-ALGORITHM = "bm25f-4-3-2-1-05+jina768-exact+rrf30/1"
-
-
-def normalize(text):
-    return " ".join(unicodedata.normalize("NFKC", str(text)).casefold().split())
-
-
-def tokens(text):
-    words = re.findall(r"[^\W_]+", normalize(text), flags=re.UNICODE)
-    return words + [w[i:i+2] for w in words if len(w) > 2 for i in range(len(w)-1)]
+ALGORITHM = f"bm25f-{TOKENIZER_ID}-4-3-2-1-05+jina768-exact+rrf30/2"
 
 
 class SearchService:
@@ -70,7 +60,9 @@ class SearchService:
                 p['description'] + ' ' + ' '.join(f'{k} {v}' for k, v in p['attributes'].items()), ' '.join(p['tags'])]
 
     def _build_lexical(self):
-        fields = [[Counter(tokens(text)) for text in self._fields(p)] for p in self.products]
+        analyzed = batch_tokens(text for p in self.products for text in self._fields(p))
+        fields = [[Counter(terms) for terms in analyzed[i:i+5]] for i in range(0, len(analyzed), 5)]
+        self.field_terms = [tuple(frozenset(field) for field in product_fields) for product_fields in fields]
         lengths = np.asarray([[sum(f.values()) for f in p] for p in fields], dtype=np.float32)
         averages = np.maximum(lengths.mean(axis=0), 1)
         postings = defaultdict(dict)
@@ -116,10 +108,11 @@ class SearchService:
         lexical_scores = np.zeros(len(self.products), dtype=np.float32)
         dense_scores = np.zeros(len(self.products), dtype=np.float32)
         query = normalize(request.query)
+        query_terms = Counter(tokens(query)) if query else Counter()
         lexical, dense, fused = [], [], {}
         if query:
             if request.mode != 'dense':
-                for token, count in Counter(tokens(query)).items():
+                for token, count in query_terms.items():
                     posting = self.postings.get(token)
                     if posting is not None:
                         idx, weights = posting
@@ -145,7 +138,7 @@ class SearchService:
         lex_ranks = {i:r for r,i in enumerate(lexical,1)}
         den_ranks = {i:r for r,i in enumerate(dense,1)}
         fields_labels = ['상품명','브랜드','분류·종류','설명·속성','태그']
-        qt = set(re.findall(r"[^\W_]+", query))
+        qt = set(query_terms)
         hits = []
         for rank, i in enumerate(order[request.offset:request.offset+request.limit], request.offset+1):
             assert mask[i], "hard_filter_violation"
@@ -154,7 +147,7 @@ class SearchService:
             summary.update({'rank':rank,'score':round(fused.get(i,0.),7),
                 'lexicalScore':round(float(lexical_scores[i]),4),'denseScore':round(float(dense_scores[i]),5) if vector is not None else None,
                 'lexicalRank':lex_ranks.get(i),'denseRank':den_ranks.get(i),
-                'matchedFields':[label for label,text in zip(fields_labels,self._fields(p)) if any(t in normalize(text) for t in qt)]})
+                'matchedFields':[label for label,terms in zip(fields_labels,self.field_terms[i]) if qt.intersection(terms)]})
             hits.append(summary)
         return {'hits':hits, 'eligibleCount':int(mask.sum()), 'candidateCount':len(order),
                 'hasMore':request.offset+len(hits)<len(order), 'status':'OK' if hits else 'NO_MATCH',
@@ -217,6 +210,7 @@ class SearchService:
         categories=[{'id':c['category_id'],'name':c['category'],'group':c['category_group'],'count':counts[c['category_id']]} for c in self.catalog['taxonomy']['categories']]
         brands=Counter(p['brand'] for p in self.products)
         return {'snapshotId':self.snapshot_id,'algorithm':ALGORITHM,'productCount':len(self.products),
+            'lexicalTokenizer':dict(TOKENIZER_INFO),
             'categories':categories,'brands':[{'name':b,'count':n} for b,n in sorted(brands.items())],
             'productTypes':[{'id':t,'count':n} for t,n in Counter(self.types.tolist()).items()],
             'model':self.manifest['model'],'dimensions':768,'maxTokens':self.manifest['max_tokens'],

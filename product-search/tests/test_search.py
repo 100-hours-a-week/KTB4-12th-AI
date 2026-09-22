@@ -111,3 +111,16 @@ async def test_pagination_is_stable_without_duplicates(service):
 def test_corrupt_vectors_are_rejected(service,tmp_path):
     with (tmp_path/'vectors.f32').open('r+b') as f:f.write(b'xxxx')
     with pytest.raises(ValueError,match='hash_mismatch'):SearchService(tmp_path)
+
+
+async def test_kiwi_particles_keep_results_scores_and_matching_fields(service):
+    base=await service.search({'query':'텀블러','mode':'lexical'})
+    inflected=await service.search({'query':'텀블러를','mode':'lexical'})
+    assert base['hits']==inflected['hits']
+    assert base['hits'] and '상품명' in inflected['hits'][0]['matchedFields']
+    assert service.get_metadata()['lexicalTokenizer']['name']=='kiwi'
+
+
+async def test_nonmatching_character_fragment_does_not_retrieve_a_tumbler(service):
+    result=await service.search({'query':'블러','mode':'lexical'})
+    assert result['hits']==[]
