@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3400" height="2152" viewBox="0 0 1700 1076" role="img">
+<defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#3b6fb6"/></marker>
+<marker id="g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#9aa4ad"/></marker>
+<marker id="w" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#c0392b"/></marker>
+<style>text{font-family:"Apple SD Gothic Neo","Noto Sans KR",Arial,sans-serif;fill:#18212b}.title{font-size:30px;font-weight:700;letter-spacing:-.6px}
+.h{font-size:15px;font-weight:700}.h2{font-size:13px;font-weight:700;fill:#3f4a54}.sub{font-size:12px;fill:#5e6873}.msg{font-size:13px}
+.mono{font-family:Menlo,ui-monospace,monospace;font-size:11px;fill:#3f4a54}.monob{font-family:Menlo,ui-monospace,monospace;font-size:11px;font-weight:700;fill:#18212b}
+.small{font-size:13px;fill:#5e6873}.num{font-size:11px;font-weight:700;fill:#fff}.port{font-family:Menlo,ui-monospace,monospace;font-size:12px;font-weight:700;fill:#3b6fb6}
+.call{fill:none;stroke:#3b6fb6;stroke-width:1.7;marker-end:url(#a)}.grey{fill:none;stroke:#9aa4ad;stroke-width:1.4;stroke-dasharray:5 4;marker-end:url(#g)}.write{fill:none;stroke:#c0392b;stroke-width:1.8;marker-end:url(#w)}
+.impl{fill:none;stroke:#3b6fb6;stroke-width:1.3;stroke-dasharray:6 4;marker-end:url(#a)}
+.box{fill:#fff;stroke:#bcc5cd;stroke-width:1.3}.stage{fill:#fff;stroke:#3b6fb6;stroke-width:1.6}.band{fill:#eef3fa;stroke:#9db0d2;stroke-width:1.2}.old{fill:#f7f8fa;stroke:#d5dbe0;stroke-width:1.2}
+.db{fill:#fff7f2;stroke:#e0a080;stroke-width:1.4}.ext{fill:#f7f8fa;stroke:#bcc5cd;stroke-width:1.2}.v3{fill:#fffbe6;stroke:#e6d98a;stroke-width:1;stroke-dasharray:4 3}.rule{stroke:#d9dee3;stroke-width:1}</style></defs><rect width="1700" height="1076" fill="white"/>
+<text x="40" y="44" class="title">프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-22 코드 기준)</text>
+<text x="40" y="70" class="small">위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.</text>
+<rect x="40" y="90" width="1620" height="104" rx="6" class="band"/>
+<text x="52" y="110" class="h">조립 — main.py  lifespan()  (프로세스 시작 1회, app.state에 둠)</text>
+<text x="52" y="130" class="mono">get_settings() (config/settings.py, PROFILING_*)  →  FileCatalogReader(CATALOG_FILE)  →  Supervisor(PROFILING_SLOTS=1)  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)</text>
+<text x="52" y="144" class="mono">STORE=db: _connect_db(DATABASE_URL — select 1 · alembic_version 확인, 실패면 RuntimeError로 앱 안 뜸) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine)    |    STORE=memory: MemoryProfileRunStore() · recipient_store=None</text>
+<text x="52" y="158" class="mono">카탈로그 로드 실패 → _NoCatalog 대역 (7.6은 503, 앱은 뜸)    ·    종료: backend.close() · engine.dispose()    ·    GET /health → catalog · store(_store_health) · supervisor.stats()</text>
+<text x="52" y="172" class="mono">오류 봉투: on_validation_error(422→400 INVALID_REQUEST) · on_http_error(401/403/503) · on_unhandled(500) — 모두 _error_response() {message, error:{code, traceId}}</text>
+<rect x="40" y="232" width="385" height="348" rx="6" class="stage"/>
+<text x="52" y="254" class="h">1  접수</text>
+<text x="52" y="272" class="sub">transport/profile_intake.py</text>
+<text x="52" y="288" class="mono">extract_and_pool()  — HTTP 안에서, 202까지</text>
+<line x1="40" y1="296" x2="425" y2="296" stroke="#9db0d2"/>
+<rect x="450" y="232" width="385" height="348" rx="6" class="stage"/>
+<text x="462" y="254" class="h">2  실행 슬롯</text>
+<text x="462" y="272" class="sub">runtime/supervisor.py</text>
+<text x="462" y="288" class="mono">Supervisor.submit() → _run()  — 응답 뒤 백그라운드</text>
+<line x1="450" y1="296" x2="835" y2="296" stroke="#9db0d2"/>
+<rect x="860" y="232" width="385" height="348" rx="6" class="stage"/>
+<text x="872" y="254" class="h">3  처리</text>
+<text x="872" y="272" class="sub">profile/pipeline.py</text>
+<text x="872" y="288" class="mono">run_and_callback() → profile(rq, catalog, store, …)</text>
+<line x1="860" y1="296" x2="1245" y2="296" stroke="#9db0d2"/>
+<rect x="1270" y="232" width="385" height="348" rx="6" class="stage"/>
+<text x="1282" y="254" class="h">4  콜백·기록</text>
+<text x="1282" y="272" class="sub">transport/profile_intake.py + adapters/backend_port_http.py</text>
+<text x="1282" y="288" class="mono">run_and_callback() 뒷부분</text>
+<line x1="1270" y1="296" x2="1655" y2="296" stroke="#9db0d2"/>
+<text x="52" y="316" class="monob">POST /api/internal/v1/ai/profile/extract-and-pool</text>
+<text x="52" y="330" class="mono">① body → ProfileExtractRequest  (schemas.py, camelCase)</text>
+<text x="52" y="344" class="sub">     위반 → 400 INVALID_REQUEST (main.on_validation_error)</text>
+<text x="52" y="358" class="mono">② require_service_token()  Bearer ≠ SERVICE_TOKEN → 401</text>
+<text x="52" y="372" class="mono">③ catalog.active()  없으면 → 503 SERVICE_UNAVAILABLE</text>
+<text x="52" y="386" class="mono">④ rq = pipeline.to_internal(body)   camel → snake</text>
+<text x="52" y="400" class="mono">⑤ supervisor.submit(bg, run_and_callback, rq, catalog,</text>
+<text x="52" y="414" class="mono">        store, backend, POOL_SIZE, recipient_store)</text>
+<text x="52" y="428" class="monob">⑥ 202 SuccessResponse[ProfileAccepted] · PENDING</text>
+<text x="52" y="442" class="mono"></text>
+<text x="52" y="456" class="sub">의존성(Depends): get_catalog · get_store · get_recipient_store</text>
+<text x="52" y="470" class="sub">· get_backend · get_supervisor  ← app.state</text>
+<text x="52" y="484" class="sub">_error() → HTTPException → main.on_http_error 봉투</text>
+<text x="52" y="498" class="sub">7.6 응답 뒤에는 Backend와의 HTTP가 끝난다</text>
+<text x="462" y="316" class="monob">submit(bg, fn, *args)</text>
+<text x="462" y="330" class="mono">  _submitted += 1 · bg.add_task(_run, fn, *args)</text>
+<text x="462" y="344" class="sub">  → FastAPI BackgroundTasks: 응답 전송 뒤 같은 프로세스에서</text>
+<text x="462" y="358" class="monob">_run(fn, *args)</text>
+<text x="462" y="372" class="mono">  with Semaphore(profiling_slots=1):   ← 슬롯. 차 있으면 대기</text>
+<text x="462" y="386" class="mono">      _running += 1 · fn(*args) · finally _running -= 1</text>
+<text x="462" y="400" class="mono">stats() → {slots, running, submitted}   (/health)</text>
+<text x="462" y="414" class="mono"></text>
+<text x="462" y="428" class="sub">fn = run_and_callback  → 3단계로</text>
+<text x="462" y="442" class="sub">기한(deadline)·취소는 아직 없음 (3단계 §12.1 240초는 다음)</text>
+<text x="872" y="316" class="mono">h = input_hash(rq)   sha256(비선호 ID순 정렬한 rq)</text>
+<text x="872" y="330" class="monob">0  store.save(ProfileOutcome(RUNNING, input_hash=h))</text>
+<text x="872" y="344" class="monob">1  catalog_version_id, products = catalog.active()</text>
+<text x="872" y="358" class="mono">2  needs_model(rq) → v1: False (취향 None·리뷰 [])</text>
+<text x="872" y="372" class="mono">   validation = ValidationResult(disliked_tags=이름들)</text>
+<text x="872" y="386" class="monob">3  search = build_pool(rq, products, pool_size, version)</text>
+<text x="872" y="400" class="sub">   판매중 · 비선호(ID 또는 이름) 제외 · viewCount↓ id↑ · 30개</text>
+<text x="872" y="414" class="mono">4  outcome = ProfileOutcome(RESULT_READY, …)</text>
+<text x="872" y="428" class="monob">5  store.save(outcome)      ← 콜백 본문이 DB에 먼저</text>
+<text x="872" y="442" class="monob">6  recipient_store.upsert(from_outcome(rq, outcome))</text>
+<text x="872" y="456" class="sub">   recipient_profile.py: from_outcome → cap_tags(12·8)</text>
+<text x="872" y="470" class="mono">실패 → _fail(rq, store, reason) → FAILED, 콜백 없음</text>
+<text x="872" y="484" class="monob">return outcome</text>
+<rect x="872" y="516" width="361" height="52" rx="3" class="v3"/>
+<text x="880" y="532" class="mono">v3 자리(needs_model=True): 조인 → ProfileModel.analyze()</text>
+<text x="880" y="546" class="mono">→ 검증기(관문 1~5) → Search.search() — Protocol만 있음</text>
+<text x="880" y="560" class="sub">지금은 경고 로그 후 v1 경로로 처리</text>
+<text x="1282" y="316" class="mono">if status != RESULT_READY: return  (FAILED = 침묵)</text>
+<text x="1282" y="330" class="monob">result = backend.send_profile_callback(outcome)</text>
+<text x="1282" y="344" class="mono">  to_callback(outcome) → callback_body()</text>
+<text x="1282" y="358" class="mono">    → ProfileCallbackRequest  snake → camel · 태그 없음</text>
+<text x="1282" y="372" class="mono">  httpx POST /api/internal/v1/recipients/{id}/profile</text>
+<text x="1282" y="386" class="sub">    Bearer SERVICE_TOKEN · timeout CALLBACK_TIMEOUT_S</text>
+<text x="1282" y="400" class="mono">  _status_from_response(code) → RunStatus</text>
+<text x="1282" y="414" class="sub">    200 DELIVERED · 409 SUPERSEDED · 4xx FAILED</text>
+<text x="1282" y="428" class="sub">    5xx·네트워크 RESULT_READY (미전달 = 재전송 대상)</text>
+<text x="1282" y="442" class="mono">  _error_code(res)  로그용 · 예외는 밖으로 안 냄</text>
+<text x="1282" y="456" class="monob">store.save(status=result, callback_attempts+1)</text>
+<text x="1282" y="470" class="mono"></text>
+<text x="1282" y="484" class="sub">재시도·백오프는 아직 없음 (#23)</text>
+<path d="M355 220 H520" class="call"/>
+<text x="437.5" y="214" class="sub" text-anchor="middle">run_and_callback + rq: ProfileRequest</text>
+<path d="M765 220 H930" class="call"/>
+<text x="847.5" y="214" class="sub" text-anchor="middle">fn(*args)</text>
+<path d="M1175 220 H1340" class="call"/>
+<text x="1257.5" y="214" class="sub" text-anchor="middle">outcome: ProfileOutcome (RESULT_READY)</text>
+<rect x="40" y="650" width="1620" height="40" rx="6" class="band"/>
+<text x="52" y="666" class="h2">profile/ports.py — 업무가 바깥에 요구하는 모양 (typing.Protocol · @runtime_checkable). 업무 코드는 이 파일만 import한다</text>
+<text x="232.5" y="683" class="port" text-anchor="middle">CatalogReader  active() · by_id()</text>
+<text x="642.5" y="683" class="port" text-anchor="middle">ProfileRunStore  save() · get()</text>
+<text x="1052.5" y="683" class="port" text-anchor="middle">RecipientProfileStore  upsert() · get() · delete()</text>
+<text x="1462.5" y="683" class="port" text-anchor="middle">BackendPort  send_profile_callback()</text>
+<path d="M100 580 V650" class="call"/>
+<text x="108" y="606" class="sub">③ catalog.active()</text>
+<path d="M1000 580 V596 H725 V650" class="call"/>
+<text x="1006" y="592" class="sub">0·5 store.save()</text>
+<path d="M1330 580 V610 H785 V650" class="call"/>
+<text x="1336" y="606" class="sub">store.save(콜백 결과)</text>
+<path d="M900 580 V624 H365 V650" class="call"/>
+<text x="906" y="620" class="sub">1 catalog.active()</text>
+<path d="M1160 580 V650" class="call"/>
+<text x="1168" y="592" class="sub">6 recipient_store.upsert()</text>
+<path d="M1490 580 V650" class="call"/>
+<text x="1498" y="606" class="sub">send_profile_callback()</text>
+<rect x="40" y="724" width="385" height="126" rx="5" class="box"/>
+<text x="52" y="744" class="h2">FileCatalogReader</text>
+<text x="201.39999999999998" y="744" class="sub">«구현»</text>
+<text x="52" y="760" class="sub">adapters/catalog_reader_file.py</text>
+<text x="52" y="778" class="mono">__init__(path): JSON 로드 → _product_dicts() 로 형식 판별</text>
+<text x="52" y="792" class="mono">  _is_raw_format · _adapt_raw_product → ProductRecord 검증</text>
+<text x="52" y="806" class="mono">  잘못된 행 제외 · productId 중복 제거</text>
+<text x="52" y="820" class="mono">active() → (FILE_CATALOG_VERSION_ID 고정 UUID, 상품 전체)</text>
+<text x="52" y="834" class="mono">by_id(product_id) → ProductRecord | None  (v3 리뷰 조인)</text>
+<path d="M232.5 690 V724" class="impl"/>
+<rect x="450" y="724" width="385" height="126" rx="5" class="box"/>
+<text x="462" y="744" class="h2">DbProfileRunStore</text>
+<text x="611.4" y="744" class="sub">«구현»</text>
+<text x="462" y="760" class="sub">adapters/profile_run_store_db.py</text>
+<text x="462" y="778" class="mono">save(outcome): INSERT … ON CONFLICT (rid, sv) DO UPDATE</text>
+<text x="462" y="792" class="mono">  status·input_hash·attempt+1(RUNNING)·payload coalesce</text>
+<text x="462" y="806" class="mono">  callback_attempts greatest · error · callback_body()</text>
+<text x="462" y="820" class="mono">get(rid) → 최신 1행 → ProfileOutcome</text>
+<text x="462" y="834" class="mono">payload_hash() · delete_recipient()</text>
+<path d="M642.5 690 V724" class="impl"/>
+<rect x="860" y="724" width="385" height="126" rx="5" class="box"/>
+<text x="872" y="744" class="h2">DbRecipientProfileStore</text>
+<text x="1070.6" y="744" class="sub">«구현»</text>
+<text x="872" y="760" class="sub">adapters/recipient_profile_store_db.py</text>
+<text x="872" y="778" class="mono">upsert(profile): INSERT … ON CONFLICT (rid) DO UPDATE</text>
+<text x="872" y="792" class="mono">  WHERE 기존.source_version &lt;= 새 버전 (낮으면 무시)</text>
+<text x="872" y="806" class="mono">get(rid) → RecipientProfile</text>
+<text x="872" y="820" class="mono">delete(rid) → bool</text>
+<text x="872" y="834" class="mono">v1 저장: source_version · disliked_categories · 태그</text>
+<path d="M1052.5 690 V724" class="impl"/>
+<rect x="1270" y="724" width="385" height="126" rx="5" class="box"/>
+<text x="1282" y="744" class="h2">HttpBackendPort</text>
+<text x="1415.0" y="744" class="sub">«구현»</text>
+<text x="1282" y="760" class="sub">adapters/backend_port_http.py</text>
+<text x="1282" y="778" class="mono">send_profile_callback(outcome) → RunStatus</text>
+<text x="1282" y="792" class="mono">  to_callback → callback_body (7.7 본문, 태그 없음)</text>
+<text x="1282" y="806" class="mono">  _status_from_response · _error_code</text>
+<text x="1282" y="820" class="mono">close() — lifespan 종료 시</text>
+<text x="1282" y="834" class="mono">(STORE=memory: MemoryProfileRunStore — dict + Lock)</text>
+<path d="M1462.5 690 V724" class="impl"/>
+<rect x="40" y="888" width="385" height="76" rx="5" class="ext"/>
+<text x="52" y="910" class="h2">파일  tests/fixtures/catalog_sample.json</text>
+<text x="52" y="930" class="sub">111건 · 56카테고리 · viewCount(임의). 전체 4,231건은 .env로</text>
+<text x="52" y="945" class="sub">팀원 ai_search.catalog_* 테이블이 오면 교체</text>
+<rect x="450" y="888" width="385" height="76" rx="5" class="db"/>
+<text x="462" y="910" class="h2">PostgreSQL  ai_chat → ai_profile.profile_runs</text>
+<text x="462" y="930" class="sub">실행 1건 = 1행 · (recipient_user_id, source_version) UNIQUE</text>
+<text x="462" y="945" class="sub">status CHECK · callback_payload jsonb · alembic 0002</text>
+<rect x="860" y="888" width="385" height="76" rx="5" class="db"/>
+<text x="872" y="910" class="h2">PostgreSQL  ai_chat → ai_profile.recipient_profiles</text>
+<text x="872" y="930" class="sub">수신자 1명 = 1행 · recipient_user_id PK (시퀀스 없음)</text>
+<text x="872" y="945" class="sub">preferred/disliked_tags · disliked_categories jsonb · 0001</text>
+<rect x="1270" y="888" width="385" height="76" rx="5" class="ext"/>
+<text x="1282" y="910" class="h2">Backend  (로컬: tools/fake_backend  :8081)</text>
+<text x="1282" y="930" class="sub">POST 7.7 수신 (실패 주입 ok/409/400/500/timeout)</text>
+<text x="1282" y="945" class="sub">GET 7.9 export · 시험 콘솔 /console</text>
+<path d="M232.5 850 V888" class="grey"/>
+<text x="240.5" y="874" class="sub">읽기(시작 1회)</text>
+<path d="M642.5 850 V888" class="write"/>
+<text x="650.5" y="874" class="sub">UPSERT (0·5·콜백 뒤)</text>
+<path d="M1052.5 850 V888" class="write"/>
+<text x="1060.5" y="874" class="sub">UPSERT (6)</text>
+<path d="M1462.5 850 V888" class="grey"/>
+<text x="1470.5" y="874" class="sub">HTTP POST 7.7</text>
+<line x1="40" y1="990" x2="1660" y2="990" class="rule"/>
+<text x="40" y="1012" class="h2">자료형</text>
+<text x="110" y="1012" class="sub">ProfileExtractRequest(camel) → to_internal → ProfileRequest(snake) → ProfileOutcome(= profile_runs 행) → callback_body → ProfileCallbackRequest(camel) → RunStatus.   RecipientProfile(= recipient_profiles 행).   변환 함수는 to_internal · callback_body 둘뿐.</text>
+<text x="40" y="1034" class="h2">실패 경로</text>
+<text x="110" y="1034" class="sub">400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.</text>
+<text x="40" y="1056" class="h2">시험</text>
+<text x="110" y="1056" class="sub">단위(tests/unit, STORE=memory): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계, TestClient로 1~4 e2e   ·   통합(tests/integration): 진짜 PostgreSQL로 어댑터·앱 전체   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql</text>
+</svg>

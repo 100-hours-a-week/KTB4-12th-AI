@@ -21,7 +21,7 @@ import time
 import httpx
 from pydantic import ValidationError
 
-from profiling.profile.types import ProfileOutcome, RunStatus
+from profiling.profile.types import CallbackResult, ErrorCode, ProfileOutcome, RunStatus
 from profiling.transport.schemas import ErrorResponse, ProfileCallbackRequest
 
 log = logging.getLogger(__name__)
@@ -97,37 +97,42 @@ class HttpBackendPort:
 
     # ---- ports.BackendPort --------------------------------------------------
 
-    def send_profile_callback(self, outcome: ProfileOutcome) -> RunStatus:
+    def send_profile_callback(self, outcome: ProfileOutcome) -> CallbackResult:
         rid, sv = outcome.recipient_user_id, outcome.source_version
         try:
             body = to_callback(outcome)
         except ValueError as e:
             log.error("7.7 콜백 본문 생성 실패 recipient=%s source_version=%s: %s", rid, sv, e)
-            return RunStatus.FAILED
+            return CallbackResult(status=RunStatus.FAILED, code=ErrorCode.PIPELINE_ERROR, message=f"콜백 본문 생성 실패: {e}")
 
         path = CALLBACK_PATH.format(recipientUserId=rid)
         t0 = time.perf_counter()
         try:
             res = self._client.post(path, content=body.model_dump_json())
         except httpx.RequestError as e:  # 타임아웃·연결 실패·DNS — 네트워크 층
-            log.warning("7.7 콜백 recipient=%s source_version=%s → 네트워크 오류 %s: %s (재시도 대상)",
-                        rid, sv, type(e).__name__, e)
-            return RunStatus.RESULT_READY
+            log.warning("7.7 콜백 recipient=%s source_version=%s → %s 네트워크 오류 %s: %s (재시도 대상)",
+                        rid, sv, ErrorCode.CALLBACK_UNREACHABLE, type(e).__name__, e)
+            return CallbackResult(status=RunStatus.RESULT_READY, code=ErrorCode.CALLBACK_UNREACHABLE, message=f"{type(e).__name__}: {e}")
 
         status = _status_from_response(res.status_code)
         elapsed = time.perf_counter() - t0
         n = len(body.recommendedProductIds)
         if status is RunStatus.DELIVERED:
             log.info("7.7 콜백 recipient=%s source_version=%s → %s DELIVERED ids=%d (%.2fs)", rid, sv, res.status_code, n, elapsed)
-        elif status is RunStatus.SUPERSEDED:
+            return CallbackResult(status=status, http_status=res.status_code)
+        detail = _error_code(res)
+        if status is RunStatus.SUPERSEDED:
             log.info("7.7 콜백 recipient=%s source_version=%s → 409 SUPERSEDED (더 새 버전 있음, 폐기) (%.2fs)", rid, sv, elapsed)
-        elif status is RunStatus.FAILED:
-            log.error("7.7 콜백 recipient=%s source_version=%s → %s FAILED code=%s (재시도 없음) (%.2fs)",
-                      rid, sv, res.status_code, _error_code(res), elapsed)
-        else:
-            log.warning("7.7 콜백 recipient=%s source_version=%s → %s code=%s (재시도 대상) (%.2fs)",
-                        rid, sv, res.status_code, _error_code(res), elapsed)
-        return status
+            return CallbackResult(status=status, http_status=409, code=ErrorCode.CALLBACK_STALE, message=f"409 {detail}")
+        if status is RunStatus.FAILED:
+            # 4xx = Backend가 우리 요청을 거부. 400이면 본문 필드, 401/403이면 토큰 — 어느 쪽이든 "계약이 안 맞음"이라 코드 하나로 묶고 message에 상세
+            log.error("7.7 콜백 recipient=%s source_version=%s → %s %s code=%s (재시도 없음) (%.2fs)",
+                      rid, sv, res.status_code, ErrorCode.CONTRACT_7_7_REJECTED, detail, elapsed)
+            return CallbackResult(status=status, http_status=res.status_code, code=ErrorCode.CONTRACT_7_7_REJECTED,
+                                  message=f"{res.status_code} {detail}")
+        log.warning("7.7 콜백 recipient=%s source_version=%s → %s %s code=%s (재시도 대상) (%.2fs)",
+                    rid, sv, res.status_code, ErrorCode.CALLBACK_UNREACHABLE, detail, elapsed)
+        return CallbackResult(status=status, http_status=res.status_code, code=ErrorCode.CALLBACK_UNREACHABLE, message=f"{res.status_code} {detail}")
 
     # ---- 수명 ------------------------------------------------------------------
 

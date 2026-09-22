@@ -47,7 +47,7 @@ UPSERT = sa.text("""
 
 
 def test_upsert_keeps_newer_version(conn) -> None:
-    conn.execute(UPSERT, {"rid": 1, "sv": 3, "pref": '["휴대용"]', "dis": '["도서·음반"]', "cats": '[{"categoryId":701,"categoryName":"도서·음반"}]'})
+    conn.execute(UPSERT, {"rid": 1, "sv": 3, "pref": '["휴대용"]', "dis": '["도서·음반"]', "cats": '[{"category_id":701,"category_name":"도서·음반"}]'})
     conn.execute(UPSERT, {"rid": 1, "sv": 2, "pref": '["옛것"]', "dis": "[]", "cats": "[]"})       # 순서 역전 → 무시
     row = conn.execute(sa.text("select source_version, preferred_tags from ai_profile.recipient_profiles where recipient_user_id=1")).one()
     assert row == (3, ["휴대용"])

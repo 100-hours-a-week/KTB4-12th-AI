@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # 1) 상수 · 타입 별칭 — 클래스 필드가 아님. 응답 본문에 들어가는 값의 "허용 범위"를 정의한다.
@@ -71,9 +71,14 @@ class ErrorResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+## 7.6 본문의 모르는 필드는 거부하지 않고 받아 둔다(extra="allow") — Backend가 필드를 추가해도 연동이 안 깨지게.
+## 대신 transport가 unknown_fields()로 찾아 ErrorCode.CONTRACT_7_6_UNKNOWN_FIELD 경고를 남긴다. 필수 누락·타입 오류만 400.
+_ALLOW = ConfigDict(extra="allow")
+
+
 ## 비선호 카테고리
 class DislikedCategoryDto(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _ALLOW
 
     categoryId: int = Field(gt=0, description="안전한 양의 정수; 감점 대상 판정 키")
     categoryName: str = Field(description="LLM이 의미를 이해하는 용도")
@@ -81,22 +86,37 @@ class DislikedCategoryDto(BaseModel):
 
 ## 리뷰
 class ReviewDto(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _ALLOW
 
     productId: int = Field(gt=0)
     rating: int = Field(ge=1, le=5)
     reviewText: str | None = Field(default=None, description="리뷰 본문. 글이 없으면 null (별점 필수·글 선택)")
 
 
-## 프로파일 추출 요청 — giftPreference만 null 허용, 나머지는 값이 없어도 []·0으로 온다
+## 프로파일 추출 요청 — v1은 recipientUserId·sourceVersion·dislikedCategories 세 필드.
+## giftPreference·reviews는 v3 입력이라 선택(없으면 null·[])으로 둔다 — 계약 원문은 "키 생략 불가"지만 v1 BE가 안 쓰는 키를 요구하지 않기 위한 결정(09-22).
+## 보내면 그대로 받는다(v3 대비).
 class ProfileExtractRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _ALLOW
 
     recipientUserId: int = Field(gt=0)
     sourceVersion: int = Field(ge=0, description="호출 시점의 최신 값. 등록 데이터가 없으면 0")
     dislikedCategories: list[DislikedCategoryDto] = Field(description="없으면 []; 필드 생략 불가")
-    giftPreference: str | None = Field(description="취향 자유 텍스트; 없으면 null")
-    reviews: list[ReviewDto] = Field(max_length=10, description="작성일 최신순 최대 10개; 없으면 []")
+    giftPreference: str | None = Field(default=None, description="취향 자유 텍스트(v3). v1은 보내지 않음 → null")
+    reviews: list[ReviewDto] = Field(default_factory=list, max_length=10, description="작성일 최신순 최대 10개(v3). v1은 보내지 않음 → []")
+
+
+def unknown_fields(body: ProfileExtractRequest) -> dict[str, list[str]]:
+    """7.6 본문에서 계약에 없는 필드 이름 — {"": [최상위], "dislikedCategories": [...], "reviews": [...]}. 없으면 {}.
+    transport가 접수 로그에 남긴다(무시하고 진행). 하위 목록은 항목들을 합쳐 이름만 모은다."""
+    out: dict[str, list[str]] = {}
+    if body.model_extra:
+        out[""] = sorted(body.model_extra)
+    for name, items in (("dislikedCategories", body.dislikedCategories), ("reviews", body.reviews)):
+        names = sorted({k for it in items if it.model_extra for k in it.model_extra})
+        if names:
+            out[name] = names
+    return out
 
 
 ## 프로파일 접수 응답 data (202) — 요청 값을 그대로 돌려주고 profileStatus는 항상 PENDING
@@ -137,9 +157,10 @@ class ProfileCallbackAccepted(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-## 상품 레코드 — data.products[] 한 건. description만 null 허용
+## 상품 레코드 — data.products[] 한 건. description만 null 허용.
+## 모르는 필드는 무시(extra="ignore") — Backend가 필드를 더 보내도 상품이 버려지지 않게. 무엇이 왔는지는 가져오기 CLI(tools/catalog/fetch_export.py)가 보고한다.
 class ProductRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     productId: int = Field(gt=0)
     name: str
@@ -150,8 +171,13 @@ class ProductRecord(BaseModel):
     price: int = Field(ge=0, description="현재 가격. export 시점의 값이며 결제 근거가 아님")
     available: bool = Field(description="quantity > 0. 재고 0인 상품도 false로 포함됨")
     updatedAt: datetime = Field(description="상품·카테고리 updated_at 중 늦은 값 (UTC ISO 8601)")
-    viewCount: int = Field(default=0, ge=0, description="조회수 — v1 추천 풀 정렬 기준(내림차순). Backend가 초기에는 임의 값을 넣어 보냄(09-22 합의). "
-                                                       "필드명은 Backend 확정 전 임시 — 바뀌면 여기 한 곳. 없으면 0")
+    viewCount: int = Field(default=0, ge=0, validation_alias=AliasChoices("viewCount", "views", "view_count"),
+                           description="조회수 — v1 추천 풀 정렬 기준(내림차순). Backend가 초기에는 임의 값을 넣어 보냄(09-22 합의). "
+                                       "Backend 열 이름이 views라 viewCount·views·view_count 어느 이름으로 와도 받는다. 없으면 0")
+
+
+PRODUCT_FIELDS = frozenset(ProductRecord.model_fields)                                   # 계약 필드 이름 (CLI 보고용)
+PRODUCT_FIELD_ALIASES = frozenset({"views", "view_count"})                                # viewCount의 다른 이름 — 모르는 필드로 세지 않음
 
 
 ## 상품 export 응답 data — 삭제되지 않고 카테고리가 유효한 전체 상품, productId 오름차순. 비면 products: []

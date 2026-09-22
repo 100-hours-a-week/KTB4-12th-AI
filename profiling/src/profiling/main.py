@@ -137,8 +137,11 @@ async def on_validation_error(request: Request, exc: RequestValidationError) -> 
     """Pydantic 검증 실패 — FastAPI 기본은 422이지만 문서 1은 400 INVALID_REQUEST.
     첫 번째 오류의 위치·사유를 message에 넣어 Backend가 무엇을 고칠지 알 수 있게 한다."""
     first = exc.errors()[0] if exc.errors() else {}
-    loc = ".".join(str(p) for p in first.get("loc", []) if p != "body")
-    msg = f"요청 형식이 올바르지 않습니다: {loc} — {first.get('msg', '')}".strip()
+    if first.get("type") == "json_invalid":                       # 본문이 JSON이 아님 — 필드 위치가 없다
+        msg = "요청 본문이 JSON이 아닙니다."
+    else:
+        loc = ".".join(str(p) for p in first.get("loc", []) if p != "body")
+        msg = f"요청 형식이 올바르지 않습니다: {loc} — {first.get('msg', '')}".strip()
     log.warning("400 INVALID_REQUEST %s %s", request.url.path, msg)
     return _error_response(400, "INVALID_REQUEST", msg)
 

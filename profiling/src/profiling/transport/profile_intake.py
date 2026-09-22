@@ -28,12 +28,13 @@ from profiling.profile.ports import (
     ProfileRunStore,
     RecipientProfileStore,
 )
-from profiling.profile.types import ProfileRequest, RunStatus
+from profiling.profile.types import ErrorCode, ProfileRequest, RunStatus
 from profiling.runtime.supervisor import Supervisor
 from profiling.transport.schemas import (
     ProfileAccepted,
     ProfileExtractRequest,
     SuccessResponse,
+    unknown_fields,
 )
 
 log = logging.getLogger(__name__)
@@ -120,12 +121,14 @@ def run_and_callback(
         log.warning("profile 결과 %s recipient=%s reason=%s — 콜백 없음", outcome.status, rid, outcome.failure_reason)
         return
 
-    result = backend.send_profile_callback(outcome)
-    log.info("7.7 콜백 결과 recipient=%s source_version=%s → %s", rid, rq.source_version, result)
+    res = backend.send_profile_callback(outcome)
+    log.info("7.7 콜백 결과 recipient=%s source_version=%s → %s%s", rid, rq.source_version, res.status,
+             f" ({res.code}: {res.message})" if res.code else "")
     try:
-        store.save(outcome.model_copy(update={"status": result, "callback_attempts": outcome.callback_attempts + 1}))
+        store.save(outcome.model_copy(update={"status": res.status, "callback_attempts": outcome.callback_attempts + 1,
+                                              "failure_code": res.code, "failure_reason": res.message}))
     except Exception:
-        log.exception("7.7 콜백 결과 저장 실패 recipient=%s source_version=%s (콜백은 %s)", rid, rq.source_version, result)
+        log.exception("7.7 콜백 결과 저장 실패 recipient=%s source_version=%s (콜백은 %s)", rid, rq.source_version, res.status)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +168,11 @@ async def extract_and_pool(
         catalog.active()
     except NoActiveCatalog as e:
         raise _error(503, "SERVICE_UNAVAILABLE", "활성 카탈로그가 없습니다.") from e
+
+    unknown = unknown_fields(body)
+    if unknown:  # 계약에 없는 필드 — 거부하지 않고 기록만. Backend가 필드를 추가했거나 이름이 어긋난 신호
+        log.warning("%s recipient=%s source_version=%s unknown=%s — 무시하고 진행", ErrorCode.CONTRACT_7_6_UNKNOWN_FIELD,
+                    body.recipientUserId, body.sourceVersion, unknown)
 
     rq = pipeline.to_internal(body)
     supervisor.submit(bg, run_and_callback, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store)   # 슬롯 안에서 실행 (Supervisor)

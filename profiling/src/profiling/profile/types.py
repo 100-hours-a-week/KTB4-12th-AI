@@ -185,6 +185,32 @@ class RunStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class ErrorCode(StrEnum):
+    """AI 내부 오류 분류 — 실행 기록(profile_runs.error.code)과 로그에 남긴다.
+
+    HTTP 상태 코드는 계약(문서 1: 400 INVALID_REQUEST 등)대로 두고, "무엇이 안 맞았는지"는 이 코드로 구분한다.
+    CONTRACT_* 는 Backend와의 필드 계약 불일치 — 연동 초기에 가장 흔한 사고라 따로 이름을 둔다.
+    """
+
+    CONTRACT_7_6_UNKNOWN_FIELD = "CONTRACT_7_6_UNKNOWN_FIELD"   # BE→AI 7.6 본문에 계약에 없는 필드. 무시하고 경고만(400 아님)
+    CONTRACT_7_7_REJECTED = "CONTRACT_7_7_REJECTED"             # AI→BE 7.7이 4xx(400·401·403)로 거부됨. 본문·토큰 계약 불일치 의심. 재시도 없음
+    CONTRACT_7_9_SCHEMA = "CONTRACT_7_9_SCHEMA"                 # BE→AI 7.9 export 필드 불일치(필수 누락·타입). 가져오기 CLI가 저장을 거부
+    CALLBACK_STALE = "CALLBACK_STALE"                           # 7.7 409 — Backend에 더 새 버전이 있어 폐기(SUPERSEDED). 정상 경로
+    CALLBACK_UNREACHABLE = "CALLBACK_UNREACHABLE"               # 7.7 5xx·타임아웃·연결 실패 — 미전달, 재전송 대상(RESULT_READY 유지)
+    NO_ACTIVE_CATALOG = "NO_ACTIVE_CATALOG"                     # 활성 카탈로그 없음
+    STORE_FAILED = "STORE_FAILED"                               # 실행 기록·프로필 저장 실패(DB)
+    PIPELINE_ERROR = "PIPELINE_ERROR"                           # 그 밖의 처리 중 예외
+
+
+class CallbackResult(BaseModel):
+    """BackendPort.send_profile_callback()의 결과 — 실행 기록의 다음 상태 + 왜 그런지."""
+
+    status: RunStatus
+    http_status: int | None = None
+    code: ErrorCode | None = None          # DELIVERED면 None
+    message: str | None = None             # Backend 응답의 error.code·message 등 사람이 읽을 한 줄
+
+
 class ProfileOutcome(BaseModel):
     """`profile()` 한 건의 결과 — 저장·콜백의 입력. 실행 기록(ai_profile.profile_runs) 한 행과 1:1.
 
@@ -198,7 +224,8 @@ class ProfileOutcome(BaseModel):
     input_hash: str | None = None       # 정규화한 7.6 본문 해시 (pipeline.input_hash). DB 저장 시 필수 — 같은 키·다른 입력 감지용
     validation: ValidationResult | None = None
     search: SearchResult | None = None
-    failure_reason: str | None = None
+    failure_code: ErrorCode | None = None   # 실패·미전달의 분류 (profile_runs.error.code)
+    failure_reason: str | None = None       # 사람이 읽을 사유 (profile_runs.error.reason)
     callback_attempts: int = 0          # 7.7 시도 횟수. run_and_callback이 콜백 뒤 +1 해서 저장
     prompt_version: str | None = None
     validator_version: str | None = None

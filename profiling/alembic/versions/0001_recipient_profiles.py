@@ -39,7 +39,7 @@ def upgrade() -> None:
         sa.Column("disliked_tags", pg.JSONB, nullable=False, server_default=sa.text("'[]'::jsonb"),
                   comment="비선호 태그 string[] (Backend 명시 비선호 이름이 앞 + 분석 결과, ≤8)"),
         sa.Column("disliked_categories", pg.JSONB, nullable=False, server_default=sa.text("'[]'::jsonb"),
-                  comment="7.6에서 받은 명시 비선호 카테고리 [{categoryId, categoryName}] — 분석 시점 사본"),
+                  comment="7.6에서 받은 명시 비선호 카테고리 [{category_id, category_name}] (내부 이름) — 분석 시점 사본"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         schema=SCHEMA,

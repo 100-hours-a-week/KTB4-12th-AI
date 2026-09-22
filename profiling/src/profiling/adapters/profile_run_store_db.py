@@ -14,7 +14,7 @@ MemoryProfileRunStore와 같은 계약(ports.ProfileRunStore)이라 main.py의 �
   attempt           RUNNING으로 다시 들어올 때만 +1
   callback_*        새 값이 있으면 덮고 없으면 기존 유지 (coalesce) — DELIVERED 갱신 때 payload가 지워지지 않게
   callback_attempts 큰 쪽 (run_and_callback이 +1 해서 보낸다)
-  error             outcome.failure_reason 그대로 (RESULT_READY면 NULL로 지워짐)
+  error             {"code": failure_code, "reason": failure_reason} (RESULT_READY면 NULL로 지워짐 · 미전달이면 CALLBACK_UNREACHABLE 남음)
 DB의 CHECK(ck_profile_runs_result_has_payload)가 "결과 없이 결과 상태" 전이를 거부하므로, 어댑터 버그가 있어도 잘못된 행은 남지 않는다.
 
 get(recipient_user_id)는 그 수신자의 **가장 최신 실행**(source_version 큰 것, 같으면 updated_at 늦은 것) 한 건을 ProfileOutcome으로 되돌린다.
@@ -34,7 +34,7 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 
 from profiling.adapters.backend_port_http import callback_body
-from profiling.profile.types import ProfileOutcome, RunStatus, SearchResult
+from profiling.profile.types import ErrorCode, ProfileOutcome, RunStatus, SearchResult
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +83,9 @@ class DbProfileRunStore:
         payload: dict[str, Any] | None = None
         if outcome.search is not None:                                   # RESULT_READY 이후에는 항상 있음
             payload = callback_body(outcome).model_dump()
-        error = {"reason": outcome.failure_reason} if outcome.failure_reason else None
+        error = None
+        if outcome.failure_code or outcome.failure_reason:
+            error = {"code": outcome.failure_code.value if outcome.failure_code else None, "reason": outcome.failure_reason}
 
         params = {
             "rid": outcome.recipient_user_id, "sv": outcome.source_version,
@@ -112,6 +114,7 @@ class DbProfileRunStore:
             recipient_user_id=row["recipient_user_id"], source_version=row["source_version"],
             status=RunStatus(row["status"]), input_hash=row["input_hash"],
             validation=None, search=search,
+            failure_code=ErrorCode(row["error"]["code"]) if (row["error"] or {}).get("code") else None,
             failure_reason=(row["error"] or {}).get("reason"), callback_attempts=row["callback_attempts"],
         )
 

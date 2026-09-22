@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3200" height="2220" viewBox="0 0 1600 1110" role="img">
+<defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#3b6fb6"/></marker>
+<marker id="g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#9aa4ad"/></marker>
+<marker id="w" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#c0392b"/></marker>
+<style>text{font-family:"Apple SD Gothic Neo","Noto Sans KR",Arial,sans-serif;fill:#18212b}.title{font-size:30px;font-weight:700;letter-spacing:-.6px}
+.h{font-size:15px;font-weight:700}.h2{font-size:13.5px;font-weight:700;fill:#3f4a54}.sub{font-size:12px;fill:#5e6873}.msg{font-size:13px}.mono{font-family:Menlo,ui-monospace,monospace;font-size:11px;fill:#3f4a54}
+.small{font-size:13px;fill:#5e6873}.num{font-size:12px;font-weight:700;fill:#fff}.col{font-family:Menlo,ui-monospace,monospace;font-size:10.5px;fill:#3f4a54}.colk{font-family:Menlo,ui-monospace,monospace;font-size:10.5px;font-weight:700;fill:#18212b}
+.call{fill:none;stroke:#3b6fb6;stroke-width:1.7;marker-end:url(#a)}.grey{fill:none;stroke:#9aa4ad;stroke-width:1.4;stroke-dasharray:5 4;marker-end:url(#g)}.write{fill:none;stroke:#c0392b;stroke-width:2;marker-end:url(#w)}
+.box{fill:#fff;stroke:#bcc5cd;stroke-width:1.3}.new{fill:#f5f8fd;stroke:#3b6fb6;stroke-width:1.6}.old{fill:#f7f8fa;stroke:#d5dbe0;stroke-width:1.2}.db{fill:#fff7f2;stroke:#e0a080;stroke-width:1.4}.tbl{fill:#fff;stroke:#c0392b;stroke-width:1.3}
+.rule{stroke:#d9dee3;stroke-width:1}</style></defs><rect width="1600" height="1110" fill="white"/>
+<text x="40" y="46" class="title">DB 전환 — 실행 기록·수신자 프로필을 메모리에서 PostgreSQL 두 테이블로 (v1)</text>
+<text x="40" y="72" class="small">파랑 테두리 = 이번에 새로 생기거나 바뀐 코드 · 회색 = 그대로 · 빨강 = DB에 쓰는 순간. 번호는 요청 한 건 안의 순서(빨강 번호 = DB 쓰기). 카탈로그는 아직 파일(팀원 DB 전까지).</text>
+<rect x="40" y="96" width="1520" height="118" rx="6" class="old"/>
+<text x="56" y="118" class="h">무엇이 바뀌었나</text>
+<text x="70" y="142" class="h2">실행 기록 (ProfileRunStore)</text>
+<text x="70" y="162" class="mono">전: MemoryProfileRunStore — dict[int, ProfileOutcome]</text>
+<text x="94" y="177" class="sub">재시작하면 사라짐 · 콜백 뒤 상태 갱신 없음</text>
+<text x="70" y="195" class="mono">후: DbProfileRunStore → ai_profile.profile_runs</text>
+<text x="94" y="210" class="sub">(수신자, 버전)당 1행 · RUNNING→RESULT_READY→DELIVERED · 콜백 본문 보관</text>
+<text x="590" y="142" class="h2">수신자 프로필 (RecipientProfileStore)</text>
+<text x="590" y="162" class="mono">전: 없음 (목 파일만, pipeline 미연결)</text>
+<text x="614" y="177" class="sub">Chat이 읽을 태그 저장소가 없었음</text>
+<text x="590" y="195" class="mono">후: DbRecipientProfileStore → ai_profile.recipient_profiles</text>
+<text x="614" y="210" class="sub">수신자당 1행 · 낮은 버전은 DB가 무시 · v1은 비선호 카테고리만</text>
+<text x="1130" y="142" class="h2">카탈로그 (CatalogReader)</text>
+<text x="1130" y="162" class="mono">전: FileCatalogReader — catalog_sample.json</text>
+<text x="1130" y="195" class="mono">후: 그대로 (파일)</text>
+<text x="1154" y="210" class="sub">팀원 ai_search.catalog_* 테이블이 생기면 교체</text>
+<rect x="40" y="240" width="270" height="640" rx="6" class="box"/>
+<text x="52" y="264" class="h">transport/profile_intake.py</text>
+<text x="52" y="282" class="sub">run_and_callback() — Supervisor 슬롯 안</text>
+<rect x="330" y="240" width="400" height="640" rx="6" class="box"/>
+<text x="342" y="264" class="h">profile/pipeline.py</text>
+<text x="342" y="282" class="sub">profile(rq, catalog, store, recipient_store)</text>
+<rect x="800" y="240" width="320" height="640" rx="6" class="box"/>
+<text x="812" y="264" class="h">adapters/ + main.py</text>
+<text x="812" y="282" class="sub">포트(ports.py) 구현과 조립</text>
+<rect x="1160" y="240" width="400" height="640" rx="6" class="db"/>
+<text x="1172" y="264" class="h">PostgreSQL  ai_chat</text>
+<text x="1172" y="282" class="sub">docker compose · alembic 0001·0002 · 스키마 ai_profile</text>
+<rect x="52" y="310" width="246" height="56" rx="4" class="box"/>
+<text x="62" y="329" class="h2">7.6 접수 → 202</text>
+<text x="62" y="346" class="mono">rq = to_internal(body)</text>
+<text x="62" y="360" class="mono">supervisor.submit(run_and_callback)</text>
+<rect x="52" y="390" width="246" height="40" rx="4" class="new"/>
+<text x="62" y="406" class="mono">profile(rq, …, recipient_store=)</text>
+<text x="62" y="422" class="sub">← outcome (RESULT_READY | FAILED)</text>
+<rect x="52" y="720" width="246" height="40" rx="4" class="box"/>
+<text x="62" y="736" class="mono">send_profile_callback(outcome)</text>
+<text x="62" y="752" class="sub">→ RunStatus (DELIVERED · SUPERSEDED · …)</text>
+<rect x="52" y="800" width="246" height="40" rx="4" class="new"/>
+<text x="62" y="816" class="mono">store.save(outcome ← status=result,</text>
+<text x="62" y="831" class="mono">                callback_attempts + 1)</text>
+<rect x="342" y="310" width="376" height="39" rx="4" class="new"/>
+<text x="352" y="327" class="mono">0  h = input_hash(rq)  ·  store.save(RUNNING, input_hash=h)</text>
+<text x="352" y="342" class="sub">실패 → FAILED, 콜백 없음 (기록 없는 결과는 보내지 않는다)</text>
+<rect x="342" y="370" width="376" height="39" rx="4" class="box"/>
+<text x="352" y="387" class="mono">1  catalog.active()  → (version, products)</text>
+<text x="352" y="402" class="sub">없으면 FAILED</text>
+<rect x="342" y="430" width="376" height="24" rx="4" class="box"/>
+<text x="352" y="447" class="mono">2  validation = 비선호 카테고리 이름만 disliked_tags 에</text>
+<rect x="342" y="470" width="376" height="24" rx="4" class="box"/>
+<text x="352" y="487" class="mono">3  search = build_pool(비선호 제외 · 판매중 · 조회수순 30)</text>
+<rect x="342" y="510" width="376" height="39" rx="4" class="new"/>
+<text x="352" y="527" class="mono">4·5  outcome = ProfileOutcome(RESULT_READY, search)</text>
+<text x="352" y="542" class="sub">input_hash=h 포함 · store.save(outcome)   실패 → FAILED, 콜백 없음</text>
+<rect x="342" y="570" width="376" height="54" rx="4" class="new"/>
+<text x="352" y="587" class="mono">6  recipient_store.upsert(from_outcome(rq, outcome))</text>
+<text x="352" y="602" class="sub">실패 → FAILED로 되돌림 (콜백은 나갔는데 Chat이 읽을 행이 없는 상태 방지)</text>
+<text x="352" y="617" class="sub">recipient_store=None(메모리 모드)이면 건너뜀</text>
+<rect x="342" y="650" width="376" height="24" rx="4" class="box"/>
+<text x="352" y="667" class="mono">return outcome   →  transport가 RESULT_READY면 콜백</text>
+<rect x="812" y="310" width="296" height="124" rx="4" class="new"/>
+<text x="822" y="330" class="h2">DbProfileRunStore</text>
+<text x="822" y="346" class="sub">profile_run_store_db.py  «ProfileRunStore 구현»</text>
+<text x="822" y="364" class="mono">save(outcome) INSERT…ON CONFLICT(rid,sv)</text>
+<text x="822" y="379" class="mono">  status·input_hash · attempt +1 (RUNNING)</text>
+<text x="822" y="394" class="mono">  callback_payload·hash = coalesce(새, 기존)</text>
+<text x="822" y="409" class="mono">  callback_attempts = greatest · error</text>
+<text x="822" y="424" class="mono">get(rid) → 최신 버전 1행 → ProfileOutcome</text>
+<rect x="812" y="445" width="296" height="46" rx="4" class="old"/>
+<text x="822" y="464" class="h2">FileCatalogReader  (그대로)</text>
+<text x="822" y="481" class="mono">active() → (고정 UUID …0001, 111건)</text>
+<rect x="812" y="570" width="296" height="102" rx="4" class="new"/>
+<text x="822" y="590" class="h2">DbRecipientProfileStore</text>
+<text x="822" y="606" class="sub">recipient_profile_store_db.py</text>
+<text x="822" y="620" class="sub">«RecipientProfileStore 구현»</text>
+<text x="822" y="638" class="mono">upsert(profile)  ON CONFLICT (rid) DO UPDATE</text>
+<text x="822" y="653" class="mono">  WHERE 기존.source_version &lt;= 새 버전</text>
+<text x="822" y="668" class="mono">get(rid) · delete(rid)</text>
+<rect x="812" y="720" width="296" height="46" rx="4" class="old"/>
+<text x="822" y="739" class="h2">HttpBackendPort  (그대로)</text>
+<text x="822" y="756" class="mono">POST 7.7 → 200/409/4xx/5xx → RunStatus</text>
+<rect x="812" y="782" width="296" height="92" rx="4" class="new"/>
+<text x="822" y="800" class="h2">main.py  lifespan (조립)</text>
+<text x="822" y="816" class="mono">STORE=db → create_engine(DATABASE_URL)</text>
+<text x="822" y="829" class="mono">  연결·alembic 버전 확인 — 실패면 앱이 뜨지 않음</text>
+<text x="822" y="842" class="mono">  store = DbProfileRunStore(engine)</text>
+<text x="822" y="855" class="mono">  recipient_store = DbRecipientProfileStore(…)</text>
+<text x="822" y="868" class="mono">STORE=memory → Memory… · recipient_store=None</text>
+<rect x="1172" y="310" width="376" height="186" rx="4" class="tbl"/>
+<text x="1182" y="328" class="h2">ai_profile.profile_runs   (0002)</text>
+<text x="1182" y="343" class="sub">실행 1건 = 1행 · 감사·재전송 기록 (작업 큐 아님)</text>
+<text x="1184" y="360" class="colk">id uuid PK · (recipient_user_id, source_version) UNIQUE</text>
+<text x="1184" y="374" class="col">input_hash          7.6 본문 sha256 — 같은 키·다른 입력 감지</text>
+<text x="1184" y="388" class="colk">status              RUNNING·RESULT_READY·DELIVERED·SUPERSEDED·FAILED</text>
+<text x="1184" y="402" class="col">attempt             RUNNING 재진입마다 +1</text>
+<text x="1184" y="416" class="col">catalog_version_id  uuid, 감사용 (FK 없음)</text>
+<text x="1184" y="430" class="colk">callback_payload    jsonb — 7.7 본문(recommendedProductIds)</text>
+<text x="1184" y="444" class="col">callback_hash       payload sha256 · callback_attempts 시도 수</text>
+<text x="1184" y="458" class="col">error               jsonb {"reason": …}  (FAILED)</text>
+<text x="1184" y="472" class="col">created_at · updated_at</text>
+<text x="1184" y="486" class="colk">CHECK  결과 상태면 callback_payload·hash NOT NULL</text>
+<rect x="1172" y="570" width="376" height="144" rx="4" class="tbl"/>
+<text x="1182" y="588" class="h2">ai_profile.recipient_profiles   (0001)</text>
+<text x="1182" y="603" class="sub">수신자 1명 = 1행 · Chat이 태그를 읽는 곳 (DR-035)</text>
+<text x="1184" y="620" class="colk">recipient_user_id   bigint PK — Backend ID 그대로 (시퀀스 없음)</text>
+<text x="1184" y="634" class="colk">source_version      낮은 버전으로 덮어쓰지 않음</text>
+<text x="1184" y="648" class="col">preferred_tags      jsonb  v1: []</text>
+<text x="1184" y="662" class="col">disliked_tags       jsonb  v1: 비선호 카테고리 이름</text>
+<text x="1184" y="676" class="colk">disliked_categories jsonb  [{category_id, category_name}]</text>
+<text x="1184" y="690" class="col">created_at · updated_at</text>
+<text x="1184" y="704" class="col">(v3 0003) profile_run_id FK · axes · recommended_ids …</text>
+<path d="M298 410 H342" class="call"/>
+<path d="M718 330 H812" class="call"/>
+<circle cx="738" cy="318" r="10" fill="#c0392b"/><text x="738" y="322" text-anchor="middle" class="num">1</text>
+<path d="M718 390 H746 V468 H812" class="grey"/>
+<circle cx="738" cy="378" r="10" fill="#9aa4ad"/><text x="738" y="382" text-anchor="middle" class="num">2</text>
+<path d="M718 530 H774 V410 H812" class="call"/>
+<circle cx="738" cy="518" r="10" fill="#c0392b"/><text x="738" y="522" text-anchor="middle" class="num">3</text>
+<path d="M718 590 H812" class="call"/>
+<circle cx="738" cy="578" r="10" fill="#c0392b"/><text x="738" y="582" text-anchor="middle" class="num">4</text>
+<path d="M298 740 H812" class="grey"/>
+<circle cx="530" cy="728" r="10" fill="#9aa4ad"/><text x="530" y="732" text-anchor="middle" class="num">5</text>
+<text x="546" y="732" class="sub">7.7 POST</text>
+<path d="M298 820 H320 V298 H960.0 V310" class="call"/>
+<circle cx="652" cy="286" r="10" fill="#c0392b"/><text x="652" y="290" text-anchor="middle" class="num">6</text>
+<text x="668" y="290" class="sub">콜백 결과 저장</text>
+<path d="M1108 370 H1172" class="write"/>
+<text x="1140.0" y="362" class="h2" text-anchor="middle">①③⑥</text>
+<path d="M1108 626 H1172" class="write"/>
+<text x="1140.0" y="618" class="h2" text-anchor="middle">④</text>
+<line x1="40" y1="898" x2="1560" y2="898" class="rule"/>
+<text x="40" y="922" class="h2">DB에 쓰는 순간</text>
+<text x="150" y="922" class="sub">①  INSERT profile_runs (RUNNING, input_hash)      ③  UPDATE RESULT_READY + callback_payload·hash·catalog_version_id  — 콜백보다 먼저 커밋      ④  UPSERT recipient_profiles (WHERE 버전 가드)      ⑥  UPDATE status(콜백 결과)·callback_attempts+1</text>
+<text x="40" y="948" class="h2">실패했을 때</text>
+<text x="150" y="948" class="sub">①·③ 저장 실패 → FAILED, 콜백 없음(기록 없는 결과를 보내지 않는다)      ④ 실패 → 실행 기록을 FAILED로 되돌림      ⑤ 5xx·네트워크 → RESULT_READY 유지 = 재전송 대상(재시도 자체는 #23)      AI는 실패를 알리지 않고 Backend가 판정</text>
+<text x="40" y="976" class="h2">확인</text>
+<text x="150" y="976" class="mono">GET /health → "store": {"backend": "db", "connected": true, "migration": "0002"}     ·     STORE=memory 로 띄우면 이전 동작(메모리 · 프로필 저장 없음) — 단위 테스트가 이 모드</text>
+<text x="150" y="994" class="mono">docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_id, source_version, status, attempt, callback_attempts, updated_at from ai_profile.profile_runs order by updated_at desc limit 5"</text>
+</svg>

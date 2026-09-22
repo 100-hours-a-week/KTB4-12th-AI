@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from profiling.profile.recipient_profile import RecipientProfile
-from profiling.profile.types import ProfileOutcome, RunStatus
+from profiling.profile.types import CallbackResult, ProfileOutcome
 from profiling.transport.schemas import ProductRecord
 
 # ---------------------------------------------------------------------------
@@ -69,10 +69,11 @@ class ProfileRunStore(Protocol):
 class BackendPort(Protocol):
     """Backend 정본으로 나가는 HTTP. 구현: adapters/backend_port_http.HttpBackendPort."""
 
-    def send_profile_callback(self, outcome: ProfileOutcome) -> RunStatus:
-        """7.7 POST 한 번 → 실행 기록의 다음 상태(3단계 §10.2). 예외를 밖으로 내지 않는다.
+    def send_profile_callback(self, outcome: ProfileOutcome) -> CallbackResult:
+        """7.7 POST 한 번 → 실행 기록의 다음 상태 + 사유(3단계 §10.2). 예외를 밖으로 내지 않는다.
 
-        DELIVERED(200) · SUPERSEDED(409, 폐기) · FAILED(4xx, 재시도 없음) · RESULT_READY(5xx·네트워크, 아직 전달 못 함 = 재시도 대상).
+        status: DELIVERED(200) · SUPERSEDED(409, 폐기) · FAILED(4xx, 재시도 없음) · RESULT_READY(5xx·네트워크, 아직 전달 못 함 = 재시도 대상).
+        code: CALLBACK_STALE(409) · CONTRACT_7_7_REJECTED(4xx) · CALLBACK_UNREACHABLE(5xx·네트워크) · DELIVERED면 None.
         오늘은 1회만 보낸다. 재시도·백오프(#23)는 RESULT_READY를 받은 쪽이 아니라 이 adapter 안에서.
         """
         ...

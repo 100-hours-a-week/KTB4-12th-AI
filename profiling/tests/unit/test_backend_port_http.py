@@ -9,7 +9,7 @@ import pytest
 from profiling.adapters import backend_port_http as backend_mod
 from profiling.adapters.backend_port_http import HttpBackendPort, to_callback
 from profiling.profile.ports import BackendPort
-from profiling.profile.types import ProfileOutcome, RunStatus, SearchResult
+from profiling.profile.types import ErrorCode, ProfileOutcome, RunStatus, SearchResult
 from tools.fake_backend import app as fake
 
 CV = UUID(int=1)   # 시험용 카탈로그 버전 ID
@@ -49,15 +49,15 @@ def _backend(handler) -> HttpBackendPort:
     return HttpBackendPort("http://backend.test", "tok", 1.0, transport=httpx.MockTransport(handler))
 
 
-@pytest.mark.parametrize("status_code,expected", [
-    (200, RunStatus.DELIVERED),
-    (409, RunStatus.SUPERSEDED),
-    (400, RunStatus.FAILED),
-    (401, RunStatus.FAILED),
-    (500, RunStatus.RESULT_READY),
-    (503, RunStatus.RESULT_READY),
+@pytest.mark.parametrize("status_code,expected,code", [
+    (200, RunStatus.DELIVERED, None),
+    (409, RunStatus.SUPERSEDED, ErrorCode.CALLBACK_STALE),
+    (400, RunStatus.FAILED, ErrorCode.CONTRACT_7_7_REJECTED),          # 본문 계약 불일치
+    (401, RunStatus.FAILED, ErrorCode.CONTRACT_7_7_REJECTED),          # 토큰 — 같은 분류, message에 상세
+    (500, RunStatus.RESULT_READY, ErrorCode.CALLBACK_UNREACHABLE),
+    (503, RunStatus.RESULT_READY, ErrorCode.CALLBACK_UNREACHABLE),
 ])
-def test_status_mapping(status_code: int, expected: RunStatus) -> None:
+def test_status_mapping(status_code: int, expected: RunStatus, code: ErrorCode | None) -> None:
     seen: dict = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -67,7 +67,10 @@ def test_status_mapping(status_code: int, expected: RunStatus) -> None:
 
     b = _backend(handler)
     assert isinstance(b, BackendPort)
-    assert b.send_profile_callback(_outcome()) is expected
+    res = b.send_profile_callback(_outcome())
+    assert res.status is expected and res.http_status == status_code and res.code is code
+    if code is not None:
+        assert str(status_code) in res.message and ("STALE_SOURCE_VERSION" if status_code == 409 else "E") in res.message   # Backend의 error.code가 사유에
     assert seen["url"] == "http://backend.test/api/internal/v1/recipients/9073/profile"   # 경로에 수신자 ID
     assert seen["auth"] == "Bearer tok"
     assert seen["body"]["recipientUserId"] == 9073 and seen["body"]["recommendedProductIds"] == [101, 102, 103]
@@ -78,14 +81,16 @@ def test_network_error_is_retryable() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         raise httpx.ConnectTimeout("timeout", request=req)
 
-    assert _backend(handler).send_profile_callback(_outcome()) is RunStatus.RESULT_READY
+    res = _backend(handler).send_profile_callback(_outcome())
+    assert res.status is RunStatus.RESULT_READY and res.code is ErrorCode.CALLBACK_UNREACHABLE and "ConnectTimeout" in res.message
 
 
 def test_bad_outcome_is_failed_without_http() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         raise AssertionError("HTTP가 나가면 안 된다")
 
-    assert _backend(handler).send_profile_callback(_outcome(status=RunStatus.FAILED)) is RunStatus.FAILED
+    res = _backend(handler).send_profile_callback(_outcome(status=RunStatus.FAILED))
+    assert res.status is RunStatus.FAILED and res.code is ErrorCode.PIPELINE_ERROR
 
 
 def test_ids_30_pass_through_in_order() -> None:

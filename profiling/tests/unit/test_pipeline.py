@@ -36,12 +36,30 @@ class FakeCatalog:
 class FakeStore:
     def __init__(self):
         self.saved = {}
+        self.history = []                      # save() 순서 — RUNNING → RESULT_READY 를 확인하기 위해
 
     def save(self, outcome):
         self.saved[outcome.recipient_user_id] = outcome
+        self.history.append(outcome.status)
 
     def get(self, rid):
         return self.saved.get(rid)
+
+
+class FakeRecipientStore:
+    def __init__(self, fail=False):
+        self.rows, self.fail = {}, fail
+
+    def upsert(self, profile):
+        if self.fail:
+            raise RuntimeError("profiles down")
+        self.rows[profile.recipient_user_id] = profile
+
+    def get(self, rid):
+        return self.rows.get(rid)
+
+    def delete(self, rid):
+        return self.rows.pop(rid, None) is not None
 
 
 # 카테고리 3종 × 판매중/불가 섞어 40개: 100번대=뷰티, 200번대=주방, 300번대=완구
@@ -143,3 +161,32 @@ def test_profile_store_failure_is_failed() -> None:
             raise RuntimeError("db down")
     out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=BrokenStore())
     assert out.status is RunStatus.FAILED and "저장 실패" in out.failure_reason
+
+
+def test_profile_records_running_then_result_with_same_hash() -> None:
+    store = FakeStore()
+    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store)
+    assert store.history == [RunStatus.RUNNING, RunStatus.RESULT_READY]          # 접수 기록이 결과보다 먼저
+    assert out.input_hash == pipeline.input_hash(_rq(disliked=[(100, "뷰티")])) and len(out.input_hash) == 64
+
+
+def test_input_hash_ignores_disliked_order_but_not_content() -> None:
+    a = pipeline.input_hash(_rq(disliked=[(100, "뷰티"), (200, "주방")]))
+    assert a == pipeline.input_hash(_rq(disliked=[(200, "주방"), (100, "뷰티")]))   # 순서만 다름 → 같은 입력
+    assert a != pipeline.input_hash(_rq(disliked=[(100, "뷰티")]))                  # 내용 다름 → 다른 입력
+
+
+def test_profile_upserts_recipient_profile() -> None:
+    store, rstore = FakeStore(), FakeRecipientStore()
+    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=rstore)
+    row = rstore.get(9073)
+    assert out.status is RunStatus.RESULT_READY and row is not None
+    assert row.source_version == 3 and [c.category_name for c in row.disliked_categories] == ["뷰티"]
+    assert row.disliked_tags == ["뷰티"] and row.preferred_tags == [] and row.recommended_product_ids == out.search.product_ids
+
+
+def test_profile_recipient_store_failure_is_failed_no_callback() -> None:
+    store = FakeStore()
+    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore(fail=True))
+    assert out.status is RunStatus.FAILED and "프로필 저장 실패" in out.failure_reason
+    assert store.history[-1] is RunStatus.FAILED                                  # 실행 기록도 FAILED로 되돌림

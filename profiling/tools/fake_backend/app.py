@@ -6,6 +6,7 @@
 
 실행:  uv run uvicorn tools.fake_backend.app:app --port 8081        (profiling 앱은 8000)
 환경:  AI_BASE_URL(기본 http://localhost:8000) · AI_SERVICE_TOKEN(기본 dev-token) · FAKE_BACKEND_CATALOG(기본 tests/fixtures/catalog_sample.json)
+       AI DB 확인(/console/db)은 AI 앱과 같은 PROFILING_DATABASE_URL(설정)을 읽는다 — 시험 도구라 DB를 직접 본다
 확인:  브라우저 http://localhost:8081/console  ·  curl localhost:8081/received
 
 실패 주입 (개발 이슈 #23 재시도 시험용):  FAKE_BACKEND_MODE = ok(기본) | 409 | 400 | 500 | timeout
@@ -30,11 +31,13 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
+import sqlalchemy as sa
 from fastapi import Body, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from profiling.adapters.catalog_reader_file import FileCatalogReader
+from profiling.config.settings import get_settings
 from profiling.profile.ports import NoActiveCatalog
 from profiling.transport.schemas import (
     ErrorBody,
@@ -153,9 +156,11 @@ def _catalog_products() -> list[dict[str, Any]]:
 
 @app.get(EXPORT_PATH)
 def export_products(authorization: str | None = Header(default=None)) -> JSONResponse:
-    """7.9. 서비스 토큰이 없으면 401 — AI Catalog 빌드가 토큰을 붙이는지 확인하는 용도."""
+    """7.9. 서비스 토큰이 없거나 AI_SERVICE_TOKEN과 다르면 401 — AI Catalog CLI가 올바른 토큰을 붙이는지 확인하는 용도."""
     if not authorization or not authorization.startswith("Bearer "):
         return _error(401, "UNAUTHORIZED", "서비스 토큰이 없습니다.")
+    if authorization.removeprefix("Bearer ").strip() != AI_SERVICE_TOKEN:
+        return _error(401, "UNAUTHORIZED", "서비스 토큰이 올바르지 않습니다.")
     products = _catalog_products()
     data = ProductExportData(generatedAt=datetime.now(UTC), products=products)
     log.info("7.9 export 제공 products=%d", len(products))
@@ -217,7 +222,8 @@ def console_send_extract(body: Annotated[dict, Body()], auto_source_version: boo
         payload = res.text
     log.info("콘솔 7.6 전달 recipient=%s sourceVersion=%s → %s", rid, body.get("sourceVersion"), res.status_code)
     return {"ok": res.status_code == 202, "status": res.status_code, "body": payload, "elapsedMs": round((time.perf_counter() - t0) * 1000),
-            "sentSourceVersion": body.get("sourceVersion"), "sent": {"url": f"{AI_BASE_URL}{EXTRACT_AND_POOL_PATH}", "authorization": "Bearer ***"}}
+            "sentSourceVersion": body.get("sourceVersion"), "mode": MODE,
+            "sent": {"url": f"{AI_BASE_URL}{EXTRACT_AND_POOL_PATH}", "authorization": "Bearer ***"}}
 
 
 @app.get("/console/source-versions")
@@ -259,3 +265,79 @@ def console_mode_put(body: Annotated[dict, Body()]) -> dict:
     MODE = mode
     log.info("콘솔: 실패 주입 모드 = %s", MODE)
     return {"mode": MODE, "modes": MODES}
+
+
+# ---------------------------------------------------------------------------
+# AI DB 들여다보기 — 콘솔 "DB" 탭. 7.6을 보낸 뒤 profile_runs(실행 기록)·recipient_profiles(수신자 프로필)에 무엇이 남았는지.
+# AI 앱과 같은 DATABASE_URL을 읽어 직접 SELECT 한다(시험 도구라서). 운영 Backend가 하는 일이 아니다.
+# ---------------------------------------------------------------------------
+
+_engine: sa.Engine | None = None
+
+
+def _db() -> sa.Engine:
+    global _engine
+    if _engine is None:
+        _engine = sa.create_engine(get_settings().DATABASE_URL, pool_pre_ping=True, future=True)
+    return _engine
+
+
+def _db_target() -> str:
+    return get_settings().DATABASE_URL.split("@")[-1]
+
+
+_RUNS = sa.text("""
+    select id, recipient_user_id, source_version, status, attempt, callback_attempts, input_hash, catalog_version_id,
+           callback_payload, error, created_at, updated_at
+    from ai_profile.profile_runs
+    where (cast(:rid as bigint) is null or recipient_user_id = cast(:rid as bigint))
+    order by updated_at desc limit :limit""")
+_PROFILES = sa.text("""
+    select recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories, created_at, updated_at
+    from ai_profile.recipient_profiles
+    where (cast(:rid as bigint) is null or recipient_user_id = cast(:rid as bigint))
+    order by updated_at desc limit :limit""")
+
+
+@app.get("/console/db")
+def console_db(recipient: int | None = None, limit: int = 20) -> dict:
+    """AI DB 두 테이블의 최근 행. recipient를 주면 그 수신자만. DB가 꺼져 있으면 ok=false와 이유."""
+    limit = max(1, min(limit, 200))
+    try:
+        with _db().connect() as conn:
+            migration = conn.execute(sa.text("select version_num from alembic_version")).scalar()
+            runs = conn.execute(_RUNS, {"rid": recipient, "limit": limit}).mappings().all()
+            profiles = conn.execute(_PROFILES, {"rid": recipient, "limit": limit}).mappings().all()
+    except sa.exc.SQLAlchemyError as e:
+        return {"ok": False, "url": _db_target(), "error": f"{type(e).__name__}: {str(e).splitlines()[0][:160]}",
+                "hint": "docker compose up -d && uv run alembic upgrade head"}
+    return {
+        "ok": True, "url": _db_target(), "migration": migration, "queriedAt": datetime.now(UTC).isoformat(timespec="seconds"),
+        "runs": [{
+            "id": str(r["id"]), "recipientUserId": r["recipient_user_id"], "sourceVersion": r["source_version"], "status": r["status"],
+            "attempt": r["attempt"], "callbackAttempts": r["callback_attempts"], "inputHash": r["input_hash"],
+            "catalogVersionId": str(r["catalog_version_id"]) if r["catalog_version_id"] else None,
+            "recommendedProductIds": (r["callback_payload"] or {}).get("recommendedProductIds"),
+            "errorCode": (r["error"] or {}).get("code"), "error": (r["error"] or {}).get("reason"),
+            "createdAt": r["created_at"].isoformat(timespec="seconds"), "updatedAt": r["updated_at"].isoformat(timespec="seconds"),
+        } for r in runs],
+        "profiles": [{
+            "recipientUserId": r["recipient_user_id"], "sourceVersion": r["source_version"],
+            "preferredTags": r["preferred_tags"], "dislikedTags": r["disliked_tags"], "dislikedCategories": r["disliked_categories"],
+            "createdAt": r["created_at"].isoformat(timespec="seconds"), "updatedAt": r["updated_at"].isoformat(timespec="seconds"),
+        } for r in profiles],
+    }
+
+
+@app.delete("/console/db")
+def console_db_delete(recipient: int) -> dict:
+    """시험 정리 — 한 수신자의 실행 기록·프로필 행을 지운다. recipient 필수(전체 삭제는 없음)."""
+    try:
+        with _db().begin() as conn:
+            n_runs = conn.execute(sa.text("delete from ai_profile.profile_runs where recipient_user_id = :rid"), {"rid": recipient}).rowcount
+            n_prof = conn.execute(sa.text("delete from ai_profile.recipient_profiles where recipient_user_id = :rid"), {"rid": recipient}).rowcount
+    except sa.exc.SQLAlchemyError as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"}
+    log.info("콘솔: DB 정리 recipient=%s runs=%d profiles=%d", recipient, n_runs, n_prof)
+    return {"ok": True, "deletedRuns": n_runs, "deletedProfiles": n_prof}
+

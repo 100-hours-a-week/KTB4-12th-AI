@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><title>7.6 · 7.7 · 7.9 시험 콘솔</title>
+<html lang="ko"><head><meta charset="utf-8"><title>7.6 · 7.7 · 7.9 · DB 시험 콘솔</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <!-- 플레이그라운드(AI/실험/프로파일링_추출/playground/static/index.html)와 같은 스타일·구조. 스타일은 그대로 복사한 것 -->
 <style>
@@ -41,10 +41,13 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mute);font-size:13px}.
 
 .resp{border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin-top:10px}.resp .code{font-size:18px;font-weight:700}.code.ok{color:var(--ok)}.code.bad{color:var(--bad)}
 .modes label{margin-right:12px}.kv{display:grid;grid-template-columns:160px 1fr;gap:4px 10px;font-size:13px}.kv b{color:var(--mute);font-weight:600}
+.st{display:inline-block;padding:1px 7px;border-radius:10px;font-size:12px;font-weight:700}.st.DELIVERED{background:#e6f4ea;color:var(--ok)}.st.RESULT_READY,.st.RUNNING{background:#fff4d6;color:var(--warn)}.st.FAILED{background:#fdecea;color:var(--bad)}.st.SUPERSEDED{background:var(--blue);color:var(--mute)}
+@media(prefers-color-scheme:dark){.st.DELIVERED{background:#173a23}.st.RESULT_READY,.st.RUNNING{background:#3d3212}.st.FAILED{background:#3f1d1b}}
+tr.hl td{background:var(--blue)}.chk{list-style:none;padding:0;margin:0;font-size:13px}.chk li{padding:4px 0;border-bottom:1px solid var(--line)}.chk li:last-child{border:none}.chk .m{display:inline-block;width:22px;font-weight:700}.chk .d{color:var(--mute);margin-left:6px}
 </style></head><body><main>
 <h1>7.6 · 7.7 · 7.9 시험 콘솔 <small style="font-size:13px;color:var(--mute);font-weight:400">— fake Backend :8081이 Backend 역할을 한다. 7.6은 여기서 AI로 대신 보낸다</small></h1>
 <div class="sub" id="cfg">연결 확인 중…</div>
-<nav><button data-t="send" class="on">7.6 보내기</button><button data-t="recv">7.7 받은 것 <span id="recv-badge" class="badge">0</span></button><button data-t="cat">7.9 · 상태</button></nav>
+<nav><button data-t="send" class="on">7.6 보내기</button><button data-t="recv">7.7 받은 것 <span id="recv-badge" class="badge">0</span></button><button data-t="db">DB <span id="db-badge" class="badge">–</span></button><button data-t="cat">7.9 · 상태</button></nav>
 
 <!-- ============ 탭 1: 7.6 보내기 ============ -->
 <div class="tab on" id="tab-send"><div class="grid">
@@ -81,7 +84,23 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--mute);font-size:13px}.
 </section>
 </div>
 
-<!-- ============ 탭 3: 7.9 · 상태 ============ -->
+<!-- ============ 탭 3: DB — AI 저장소 확인 ============ -->
+<div class="tab" id="tab-db">
+<section>
+ <h2>AI DB — 7.6을 보낸 뒤 무엇이 남았나 <span class="stat" style="display:inline" id="db-conn">확인 중…</span></h2>
+ <div class="bar" style="margin-top:0"><label class="inl">수신자 <input id="db-rid" type="number" style="width:110px" placeholder="비우면 전체"></label>
+  <label class="inl"><input id="db-auto" type="checkbox" style="width:auto" checked> 2초마다 갱신</label>
+  <button class="ghost" onclick="loadDb()">지금 갱신</button><button class="ghost" onclick="dbDelete()">이 수신자 행 삭제</button><span class="stat" id="db-stat"></span></div>
+ <div class="stat">AI 앱과 같은 DB(<span id="db-url" class="mono"></span>)를 fake가 직접 읽는다. 실행 기록은 <b>(수신자, sourceVersion)마다 1행</b>이고 상태가 RUNNING → RESULT_READY → DELIVERED로 바뀐다. 프로필은 <b>수신자당 1행</b>이고 더 낮은 버전으로는 덮어쓰지 않는다.</div>
+</section>
+<section><h2>검증 — 마지막으로 보낸 7.6 기준</h2><div id="db-check"><div class="stat">7.6을 보내면 그 요청이 DB에 제대로 남았는지 여기서 항목별로 확인한다.</div></div></section>
+<div class="grid">
+<section><h2>ai_profile.profile_runs — 실행 기록</h2><div id="db-runs"></div></section>
+<section><h2>ai_profile.recipient_profiles — 수신자 프로필</h2><div id="db-prof"></div></section>
+</div>
+</div>
+
+<!-- ============ 탭 4: 7.9 · 상태 ============ -->
 <div class="tab" id="tab-cat">
 <div class="grid">
 <section><h2>7.9 export — AI Catalog 빌드가 가져가는 것</h2><div id="cat-out" class="kv"></div>
@@ -100,6 +119,7 @@ const VER={v1:{pref:false,reviews:false,note:'MVP(PB-4) — 비선호 카테고�
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.id==='tab-'+b.dataset.t))});
 function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 async function init(){CAT=await (await fetch('/console/catalog')).json();renderDisList();addRow();addRow();applyVersion();renderCatalog();loadModes();loadAi();loadReceived();setInterval(loadReceived,2000);applySvAuto();$('#rid').addEventListener('input',showSvInfo);
+ loadDb();setInterval(()=>{if($('#db-auto').checked&&$('#tab-db').classList.contains('on'))loadDb()},2000);$('#db-rid').addEventListener('change',loadDb);
  $('#cfg').innerHTML=CAT.error?`<span class="drop">카탈로그 읽기 실패: ${esc(CAT.error)} — fake_backend를 profiling/ 에서 다시 띄우세요</span>`:`카탈로그 ${CAT.file} · 상품 ${CAT.count}건 · 카테고리 ${CAT.categories.length}개`}
 // ---- sourceVersion 자동 증가 (fake Backend가 수신자별로 기억)
 function applySvAuto(){const on=$('#sv-auto').checked;$('#sv').disabled=on;showSvInfo()}
@@ -142,13 +162,14 @@ async function send(){let body;try{body=$('#raw-mode').checked?JSON.parse($('#ra
  $('#send-busy').textContent='AI로 전송 중…';$('#sent-body').textContent=JSON.stringify(body,null,2);
  try{const r=await (await fetch('/console/send-7.6?auto_source_version='+($('#sv-auto').checked?'true':'false'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
   if(r.sentSourceVersion!=null){$('#sv').value=r.sentSourceVersion;body.sourceVersion=r.sentSourceVersion;$('#sent-body').textContent=JSON.stringify(body,null,2);showSvInfo()}
+  if(r.ok){LAST={rid:body.recipientUserId,sv:body.sourceVersion,disliked:(body.dislikedCategories||[]).map(c=>c.categoryId),mode:r.mode||'ok',at:new Date().toISOString()};$('#db-rid').value=body.recipientUserId;setTimeout(loadDb,700)}
   const cls=r.ok?'ok':'bad';let h=`<div class="resp"><span class="code ${cls}">${r.status??'연결 실패'}</span> <span class="stat" style="display:inline">${r.ok?'202 접수 — 분석은 백그라운드, 완료는 7.7 콜백':'접수 안 됨'} · ${r.elapsedMs} ms${r.sentSourceVersion!=null?' · 보낸 sourceVersion '+r.sentSourceVersion:''}</span>`;
   if(r.error)h+=`<div class="drop" style="margin-top:6px">${esc(r.error)}</div>`;h+=`<div class="mono" style="margin-top:8px">${esc(JSON.stringify(r.body??'',null,2))}</div></div>`;
   h+=`<div class="stat">읽는 법 — <b>202</b> 정상 · <b>400 INVALID_REQUEST</b> 본문 오류(어느 필드인지 message) · <b>401</b> 토큰(AI_SERVICE_TOKEN ↔ PROFILING_SERVICE_TOKEN) · <b>503</b> AI에 활성 카탈로그 없음</div>`;
   $('#send-out').innerHTML=h}catch(e){$('#send-out').innerHTML=`<div class="drop">오류: ${esc(e.message)}</div>`}finally{$('#send-busy').textContent=''}}
 // ---- 7.7 받은 것
 let lastCount=-1;
-async function loadReceived(){try{const r=await (await fetch('/received')).json();$('#recv-badge').textContent=r.count;$('#recv-stat').textContent=`mode=${r.mode} · ${r.count}건`;
+async function loadReceived(){try{const r=await (await fetch('/received')).json();RECV=r.items;$('#recv-badge').textContent=r.count;$('#recv-stat').textContent=`mode=${r.mode} · ${r.count}건`;
  if(r.count===lastCount)return;lastCount=r.count;
  if(!r.items.length){$('#recv-out').innerHTML='<div class="stat">아직 받은 콜백이 없습니다. 7.6을 보내면 AI가 처리 후 여기로 7.7을 보냅니다.</div>';return}
  const by=Object.fromEntries(CAT.products.map(p=>[p.productId,p]));
@@ -167,6 +188,40 @@ function renderCatalog(){const byCat={};for(const p of CAT.products)byCat[p.cate
  $('#cat-list').innerHTML='<table><tr><th>productId</th><th>상품</th><th>브랜드</th><th>카테고리</th><th>판매</th></tr>'+CAT.products.map(p=>`<tr><td>${p.productId}</td><td>${esc(p.name)}</td><td>${esc(p.brand)}</td><td>${esc(p.categoryName)}</td><td>${p.available?'':'<span class=drop>불가</span>'}</td></tr>`).join('')+'</table>'}
 async function loadModes(){const r=await (await fetch('/console/mode')).json();$('#modes').innerHTML=r.modes.map(m=>`<label class="inl"><input type="radio" name="mode" value="${m}" style="width:auto" ${m===r.mode?'checked':''} onchange="setMode('${m}')"> <b>${m}</b> ${({ok:'200 저장됨 → DELIVERED','409':'STALE_SOURCE_VERSION → SUPERSEDED (폐기)','400':'INVALID_REQUEST → FAILED (재시도 없음)','500':'INTERNAL_SERVER_ERROR → 재시도 대상',timeout:'60초 무응답 → 타임아웃 → 재시도 대상'})[m]||''}</label><br>`).join('')}
 async function setMode(m){await fetch('/console/mode',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({mode:m})});loadReceived()}
+// ---- DB — AI 저장소 확인
+let LAST=null,RECV=[];
+const EXPECT={ok:'DELIVERED','409':'SUPERSEDED','400':'FAILED','500':'RESULT_READY',timeout:'RESULT_READY'};
+const catName=id=>(CAT.categories.find(c=>c.categoryId===id)||{}).categoryName||('#'+id);
+function st(s){return `<span class="st ${esc(s)}">${esc(s)}</span>`}
+function same(a,b){return Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((v,i)=>v===b[i])}
+async function loadDb(){const rid=$('#db-rid').value.trim();let r;try{r=await (await fetch('/console/db?limit=30'+(rid?'&recipient='+encodeURIComponent(rid):''))).json()}catch(e){$('#db-conn').innerHTML=`<span class="bad">읽기 실패 ${esc(e.message)}</span>`;return}
+ $('#db-url').textContent=r.url||'';
+ if(!r.ok){$('#db-badge').textContent='✗';$('#db-badge').className='badge dead';$('#db-conn').innerHTML=`<span class="bad">DB 연결 안 됨 — ${esc(r.error)}</span>`;$('#db-stat').innerHTML=`<span class="mono">${esc(r.hint||'')}</span>`;$('#db-runs').innerHTML='';$('#db-prof').innerHTML='';return}
+ $('#db-badge').textContent=r.runs.length;$('#db-badge').className='badge base';$('#db-conn').innerHTML=`<span class="ok">연결됨</span> · migration ${esc(r.migration)} · ${esc(r.queriedAt)}`;$('#db-stat').textContent=rid?`수신자 ${rid}의 행만`:'전체(최근 30행)';
+ $('#db-runs').innerHTML=r.runs.length?'<table><tr><th>수신자</th><th>sv</th><th>status</th><th>attempt</th><th>콜백</th><th>상품</th><th>오류</th><th>input_hash</th><th>catalog</th><th>갱신</th></tr>'+r.runs.map(x=>{const hl=LAST&&x.recipientUserId===LAST.rid&&x.sourceVersion===LAST.sv;
+   return `<tr class="${hl?'hl':''}"><td>${x.recipientUserId}</td><td>${x.sourceVersion}</td><td>${st(x.status)}</td><td>${x.attempt}</td><td>${x.callbackAttempts}</td><td>${x.recommendedProductIds?x.recommendedProductIds.length:'-'}</td><td>${x.errorCode?`<span class="st FAILED" title="${esc(x.error||'')}">${esc(x.errorCode)}</span>`:(x.error?`<span class="drop">${esc(x.error)}</span>`:'')}</td><td class="mono" title="${esc(x.inputHash)}">${esc((x.inputHash||'').slice(0,8))}</td><td class="mono" title="${esc(x.catalogVersionId||'')}">${esc((x.catalogVersionId||'').slice(-4))}</td><td class="mono">${esc(x.updatedAt.replace('T',' ').slice(5,19))}</td></tr>`}).join('')+'</table>':'<div class="stat">행 없음 — 7.6을 보내면 접수 즉시 RUNNING 행이 생긴다.</div>';
+ $('#db-prof').innerHTML=r.profiles.length?'<table><tr><th>수신자</th><th>sv</th><th>비선호 카테고리</th><th>비선호 태그</th><th>선호 태그</th><th>갱신</th></tr>'+r.profiles.map(x=>{const hl=LAST&&x.recipientUserId===LAST.rid;
+   return `<tr class="${hl?'hl':''}"><td>${x.recipientUserId}</td><td>${x.sourceVersion}</td><td class="tags">${(x.dislikedCategories||[]).map(c=>`<span class="dis">${esc(c.category_name)} <small>#${c.category_id}</small></span>`).join('')||'-'}</td><td class="tags">${(x.dislikedTags||[]).map(t=>`<span>${esc(t)}</span>`).join('')||'-'}</td><td class="tags">${(x.preferredTags||[]).map(t=>`<span>${esc(t)}</span>`).join('')||'<span class="stat">[] (v1)</span>'}</td><td class="mono">${esc(x.updatedAt.replace('T',' ').slice(5,19))}</td></tr>`}).join('')+'</table>':'<div class="stat">행 없음 — RESULT_READY 직후 upsert된다.</div>';
+ renderCheck(r)}
+function renderCheck(r){if(!LAST){return}const run=r.runs.find(x=>x.recipientUserId===LAST.rid&&x.sourceVersion===LAST.sv),prof=r.profiles.find(x=>x.recipientUserId===LAST.rid);
+ const recv=[...RECV].reverse().find(it=>it.recipientUserId===LAST.rid&&it.sourceVersion===LAST.sv);const exp=EXPECT[LAST.mode]||'DELIVERED';const rows=[];
+ const add=(ok,name,detail)=>rows.push({ok,name,detail});
+ add(!!run,'실행 기록 행이 있다 (profile_runs, 수신자·sourceVersion 일치)',run?`id ${run.id.slice(0,8)}… · attempt ${run.attempt}`:'아직 없음 — 접수(202) 직후 RUNNING으로 생겨야 함');
+ if(run){add(run.status===exp,`상태 = ${exp} (실패 주입 모드 ${LAST.mode} 기준)`,(run.status===exp?st(run.status):run.status==='RUNNING'?'아직 처리 중 — 잠시 뒤 다시':`지금 ${st(run.status)}`)+(run.errorCode?` · 사유 <b>${esc(run.errorCode)}</b> ${esc(run.error||'')}`:''));
+  add(run.callbackAttempts===1,'콜백 시도 1회',`callback_attempts = ${run.callbackAttempts}`+(exp==='RESULT_READY'?' (5xx·timeout이면 재전송 대상으로 남음)':''));
+  add(!!run.inputHash&&run.inputHash.length===64,'input_hash 저장됨(sha256)',(run.inputHash||'').slice(0,16)+'…');
+  add(!!run.catalogVersionId,'catalog_version_id 저장됨',run.catalogVersionId||'없음');
+  add(!!run.recommendedProductIds&&run.recommendedProductIds.length>0&&run.recommendedProductIds.length<=30,'콜백 본문(30개 이하) 저장됨',run.recommendedProductIds?`${run.recommendedProductIds.length}개`:'없음');
+  if(LAST.mode==='ok')add(!!recv&&same(run.recommendedProductIds,recv.recommendedProductIds),'저장된 본문 = 7.7로 실제 받은 목록 (순서까지)',recv?(same(run.recommendedProductIds,recv.recommendedProductIds)?'일치':'불일치 — 재전송 시 다른 결과가 갈 수 있음'):'7.7 아직 안 옴');
+  else add(true,'7.7 수신 확인은 생략 (모드 '+LAST.mode+')','fake가 '+LAST.mode+'로 응답');}
+ const lower=prof&&prof.sourceVersion>LAST.sv;
+ add(!!prof&&(prof.sourceVersion===LAST.sv||lower),'프로필 행이 있고 sourceVersion이 보낸 값 이상',prof?`저장 ${prof.sourceVersion} / 보낸 ${LAST.sv}`+(lower?' — 더 새 버전이 있어 이번 것은 무시됨(정상)':''):'없음 — RESULT_READY 직후 upsert되어야 함');
+ if(prof&&!lower){const got=(prof.dislikedCategories||[]).map(c=>c.category_id).sort((a,b)=>a-b),want=[...LAST.disliked].sort((a,b)=>a-b);
+  add(same(got,want),'프로필의 비선호 카테고리 = 보낸 것',`저장 [${got.map(catName).join(', ')}] / 보낸 [${want.map(catName).join(', ')}]`);
+  const tagsOk=same([...(prof.dislikedTags||[])].sort(),[...want.map(catName)].sort());add(tagsOk,'비선호 태그 = 비선호 카테고리 이름 (v1 규칙)',(prof.dislikedTags||[]).join(', ')||'[]');}
+ const pass=rows.filter(x=>x.ok).length;
+ $('#db-check').innerHTML=`<div class="stat">보낸 것: 수신자 <b>${LAST.rid}</b> · sourceVersion <b>${LAST.sv}</b> · 비선호 ${LAST.disliked.length}개 · 모드 ${esc(LAST.mode)} · ${esc(LAST.at.slice(11,19))} — <b class="${pass===rows.length?'ok':'bad'}">${pass}/${rows.length}</b></div><ul class="chk">`+rows.map(x=>`<li><span class="m ${x.ok?'ok':'bad'}">${x.ok?'✓':'✗'}</span>${esc(x.name)}<span class="d">${x.detail}</span></li>`).join('')+'</ul>'}
+async function dbDelete(){const rid=$('#db-rid').value.trim();if(!rid){alert('수신자 번호를 넣으세요');return}if(!confirm(`수신자 ${rid}의 실행 기록·프로필 행을 DB에서 지웁니다.`))return;const r=await (await fetch('/console/db?recipient='+encodeURIComponent(rid),{method:'DELETE'})).json();$('#db-stat').textContent=r.ok?`삭제: 실행 기록 ${r.deletedRuns}행 · 프로필 ${r.deletedProfiles}행`:'삭제 실패: '+r.error;if(LAST&&String(LAST.rid)===rid)LAST=null;loadDb()}
 async function loadAi(){const r=await (await fetch('/console/health-ai')).json();
  $('#ai-out').innerHTML=r.ok?`<b>AI</b><span class="ok">연결됨 ${esc(r.url)}</span><b>카탈로그</b><span>${r.body.catalog.active?`활성 · version ${r.body.catalog.version} · 상품 ${r.body.catalog.products}`:'<span class=drop>없음 → 7.6은 503</span>'}</span>`
   :`<b>AI</b><span class="bad">연결 안 됨 ${esc(r.url)} — ${esc(r.error||r.status)}</span><b>실행</b><span class="mono">uv run uvicorn profiling.main:app --port 8000</span>`}

@@ -24,6 +24,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from profiling.profile.ports import NoActiveCatalog
+from profiling.profile.types import ErrorCode
 from profiling.transport.schemas import ProductRecord
 
 log = logging.getLogger(__name__)
@@ -117,6 +118,9 @@ class FileCatalogReader:
         self.version_label = str(doc.get("schema_version") or doc.get("category_version") or "") if isinstance(doc, dict) else ""
         log.info("FileCatalogReader 로드 %s: 상품 %d건 (형식 오류 %d · 중복 %d · 판매중 %d) label=%s",
                  self.path.name, len(products), n_invalid, n_dup, sum(p.available for p in products), self.version_label or "-")
+        if n_invalid:
+            log.warning("%s %s: 상품 %d건이 7.9 필드 계약에 안 맞아 버림 — tools/catalog/fetch_export.py 로 어느 필드인지 확인",
+                        ErrorCode.CONTRACT_7_9_SCHEMA, self.path.name, n_invalid)
 
     # ---- ports.CatalogReader ------------------------------------------------
 

@@ -33,6 +33,7 @@ from profiling.profile.ports import (
 from profiling.profile.recipient_profile import from_outcome
 from profiling.profile.types import (
     DislikedCategory,
+    ErrorCode,
     ProfileOutcome,
     ProfileRequest,
     Review,
@@ -137,13 +138,13 @@ def profile(
                                   validator_version=VALIDATOR_VERSION_V1))
     except Exception as e:
         log.exception("profile recipient=%s source_version=%s 실행 기록(RUNNING) 저장 실패", rid, sv)
-        return _fail(rq, store, f"저장 실패: {type(e).__name__}: {e}", save=False)
+        return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {type(e).__name__}: {e}", save=False)
 
     # 1) 활성 카탈로그 — 한 요청 안에서 한 번만 잡아 끝까지 같은 버전을 쓴다 (4단계 snapshot 원칙)
     try:
         catalog_version_id, products = catalog.active()
     except NoActiveCatalog as e:
-        return _fail(rq, store, f"활성 카탈로그 없음: {e}")
+        return _fail(rq, store, ErrorCode.NO_ACTIVE_CATALOG, f"활성 카탈로그 없음: {e}")
 
     try:
         # 2) 검증 결과 — v1은 검증기를 돌리지 않는다. Backend 명시 비선호 이름만 disliked_tags에 (병합 규칙: Backend 목록이 앞)
@@ -168,14 +169,14 @@ def profile(
         )
     except Exception as e:  # 업무 단계의 어떤 오류도 FAILED로 기록 — 백그라운드에서 조용히 죽지 않게
         log.exception("profile recipient=%s source_version=%s 실패", rid, sv)
-        return _fail(rq, store, f"{type(e).__name__}: {e}")
+        return _fail(rq, store, ErrorCode.PIPELINE_ERROR, f"{type(e).__name__}: {e}")
 
     # 5) 실행 기록 갱신 — RESULT_READY + 콜백 본문. 저장 실패는 결과를 FAILED로 (콜백을 보냈는데 우리 쪽에 기록이 없는 상태를 만들지 않기 위해)
     try:
         store.save(outcome)
     except Exception as e:
         log.exception("profile recipient=%s 저장 실패", rid)
-        return _fail(rq, store, f"저장 실패: {type(e).__name__}: {e}", save=False)
+        return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {type(e).__name__}: {e}", save=False)
 
     # 6) 수신자 프로필 — 한 사람당 한 행. 낮은 버전이 늦게 오면 DB가 무시한다(should_replace와 같은 규칙을 SQL로).
     #    실패하면 FAILED로 되돌린다: 콜백은 나갔는데 Chat이 읽을 프로필이 없는 상태를 만들지 않기 위해.
@@ -184,21 +185,21 @@ def profile(
             recipient_store.upsert(from_outcome(rq, outcome))
         except Exception as e:
             log.exception("profile recipient=%s 수신자 프로필 저장 실패", rid)
-            return _fail(rq, store, f"프로필 저장 실패: {type(e).__name__}: {e}")
+            return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {type(e).__name__}: {e}")
 
     log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d catalog_version=%s rule=%s",
              rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), catalog_version_id, POOL_RULE_V1)
     return outcome
 
 
-def _fail(rq: ProfileRequest, store: ProfileRunStore, reason: str, *, save: bool = True) -> ProfileOutcome:
-    """FAILED 결과를 만들고(가능하면) 저장한다. 콜백은 보내지 않는다."""
+def _fail(rq: ProfileRequest, store: ProfileRunStore, code: ErrorCode, reason: str, *, save: bool = True) -> ProfileOutcome:
+    """FAILED 결과(분류 코드 + 사유)를 만들고(가능하면) 저장한다. 콜백은 보내지 않는다."""
     outcome = ProfileOutcome(recipient_user_id=rq.recipient_user_id, source_version=rq.source_version, status=RunStatus.FAILED,
-                             input_hash=input_hash(rq), failure_reason=reason, validator_version=VALIDATOR_VERSION_V1)
+                             input_hash=input_hash(rq), failure_code=code, failure_reason=reason, validator_version=VALIDATOR_VERSION_V1)
     if save:
         try:
             store.save(outcome)
         except Exception:
             log.exception("profile recipient=%s FAILED 기록 저장도 실패", rq.recipient_user_id)
-    log.warning("profile recipient=%s source_version=%s → FAILED: %s", rq.recipient_user_id, rq.source_version, reason)
+    log.warning("profile recipient=%s source_version=%s → FAILED %s: %s", rq.recipient_user_id, rq.source_version, code, reason)
     return outcome
