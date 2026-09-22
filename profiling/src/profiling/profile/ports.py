@@ -29,7 +29,7 @@ class NoActiveCatalog(Exception):
 
 
 # ---------------------------------------------------------------------------
-# 오늘(v1) 쓰는 포트 3개
+# 포트 4개 — v1에서 모두 쓴다 (v3의 ProfileModel·Embedder는 그때 여기에 추가)
 # ---------------------------------------------------------------------------
 
 
@@ -89,29 +89,3 @@ class RecipientProfileStore(Protocol):
     def get(self, recipient_user_id: int) -> RecipientProfile | None: ...
 
     def delete(self, recipient_user_id: int) -> bool: ...
-
-
-# ---------------------------------------------------------------------------
-# v3에서 쓰는 포트 — 지금은 자리만. pipeline.needs_model()이 True인 분기에서 호출된다.
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class ProfileModel(Protocol):
-    """태그 추출 모델. 구현 후보: 규칙 추출기(실험 13, 모델 없음) · Ollama(gemma) · (Jev, 09-25 만료).
-    이름은 팀원 Model adapter의 `ProfileModel.analyze`와 같게 둔다."""
-
-    def analyze(self, prompt: str, schema: dict, seed: int) -> dict:
-        """모델 1회 호출 → JSON 초안(dict). 파싱 실패·타임아웃은 여기서 예외로 올리고 pipeline이 재시도 예산을 관리한다.
-        반환을 dict로 둔 이유: 3축(likes/dislikes/key_features)·평면(flat) 등 스키마가 실험에 따라 달라서 types.ExtractDraft로의
-        변환은 pipeline 쪽에서 한다."""
-        ...
-
-
-@runtime_checkable
-class Embedder(Protocol):
-    """문서·질의 임베딩(BGE-m3-ko, 1024차원). Search도 같은 것을 쓴다(개발 이슈 #8)."""
-
-    def embed_docs(self, texts: list[str]) -> list[list[float]]: ...
-
-    def embed_query(self, text: str) -> list[float]: ...
