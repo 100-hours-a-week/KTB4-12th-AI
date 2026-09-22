@@ -1,0 +1,13 @@
+[project]
+name = "seonjalal-product-search"
+version = "0.1.0"
+description = "Shared product retrieval and compact team QA console"
+requires-python = ">=3.13"
+dependencies = ["fastapi>=0.141,<0.142", "uvicorn[standard]>=0.53,<0.54", "numpy>=2.5,<2.6", "pillow>=12.3,<13"]
+
+[dependency-groups]
+dev = ["httpx>=0.28", "pytest>=9", "pytest-asyncio>=1.4"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
