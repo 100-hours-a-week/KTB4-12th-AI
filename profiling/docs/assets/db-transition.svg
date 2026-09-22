@@ -27,10 +27,10 @@
 <text x="1130" y="195" class="mono">후: 그대로 (파일)</text>
 <text x="1154" y="210" class="sub">팀원 ai_search.catalog_* 테이블이 생기면 교체</text>
 <rect x="40" y="240" width="270" height="640" rx="6" class="box"/>
-<text x="52" y="264" class="h">transport/profile_intake.py</text>
+<text x="52" y="264" class="h">intake.py</text>
 <text x="52" y="282" class="sub">run_and_callback() — Supervisor 슬롯 안</text>
 <rect x="330" y="240" width="400" height="640" rx="6" class="box"/>
-<text x="342" y="264" class="h">profile/pipeline.py</text>
+<text x="342" y="264" class="h">pipeline.py</text>
 <text x="342" y="282" class="sub">profile(rq, catalog, store, recipient_store)</text>
 <rect x="800" y="240" width="320" height="640" rx="6" class="box"/>
 <text x="812" y="264" class="h">adapters/ + main.py</text>

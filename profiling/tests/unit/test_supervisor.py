@@ -5,7 +5,7 @@ import time
 
 from fastapi import BackgroundTasks
 
-from profiling.runtime.supervisor import Supervisor
+from profiling.supervisor import Supervisor
 
 
 def test_slots_limit_concurrency() -> None:

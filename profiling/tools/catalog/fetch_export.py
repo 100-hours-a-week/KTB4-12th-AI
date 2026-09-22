@@ -34,15 +34,15 @@ import httpx
 import sqlalchemy as sa
 from pydantic import ValidationError
 
-from profiling.adapters.catalog_reader_file import FileCatalogReader
-from profiling.config.settings import get_settings
-from profiling.profile.ports import NoActiveCatalog
-from profiling.profile.types import ErrorCode
-from profiling.transport.schemas import (
+from profiling.catalog import FileCatalogReader
+from profiling.ports import NoActiveCatalog
+from profiling.schemas import (
     PRODUCT_FIELD_ALIASES,
     PRODUCT_FIELDS,
     ProductRecord,
 )
+from profiling.settings import get_settings
+from profiling.types import ErrorCode
 
 EXPORT_PATH = "/internal/v1/ai/products/export"
 REQUIRED_FIELDS = frozenset(n for n, f in ProductRecord.model_fields.items() if f.is_required())

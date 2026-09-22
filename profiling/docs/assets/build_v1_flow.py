@@ -11,11 +11,11 @@ def t(x,y,s,c='msg',anchor=None):
     an=f' text-anchor="{anchor}"' if anchor else ''
     parts.append(f'<text x="{x}" y="{y}" class="{c}"{an}>{escape(s)}</text>')
 # lifelines
-L=[('Backend',['(내일: 실제 · 오늘: curl)']),('transport/profile_intake.py',['Transport · 7.6 접수','run_and_callback() (Supervisor 슬롯)']),('profile/pipeline.py',['to_internal · needs_model','build_pool · profile()']),
-   ('adapters/catalog_reader_file.py',['CatalogReader (파일)']),('adapters/profile_run_store_memory.py',['ProfileRunStore (메모리)']),('adapters/backend_port_http.py',['BackendPort (HTTP)']),('tools/fake_backend',['7.7 수신'])]
+L=[('Backend',['(내일: 실제 · 오늘: curl)']),('intake.py',['Transport · 7.6 접수','run_and_callback() (Supervisor 슬롯)']),('pipeline.py',['to_internal · needs_model','build_pool · profile()']),
+   ('catalog.py',['CatalogReader (파일)']),('stores.py',['ProfileRunStore (메모리)']),('backend.py',['BackendPort (HTTP)']),('tools/fake_backend',['7.7 수신'])]
 xs=[110,350,600,830,1020,1210,1380]
 t(40,48,'v1 프로파일링 한 건 — 파일 사이의 호출 순서 (7.6 접수 → 202 → 백그라운드 → 7.7 콜백)','title')
-t(40,74,'실선 파랑 = 호출, 점선 회색 = 반환. 노란 상자 = 그 시점에 쓰는 자료형(transport/schemas.py = 바깥 계약 camelCase · profile/types.py = 내부 snake_case). 조립(main.py)은 맨 아래.','small')
+t(40,74,'실선 파랑 = 호출, 점선 회색 = 반환. 노란 상자 = 그 시점에 쓰는 자료형(schemas.py = 바깥 계약 camelCase · types.py = 내부 snake_case). 조립(main.py)은 맨 아래.','small')
 TOP=100; BOT=905
 for (n,subs),x in zip(L,xs):
     w=190 if x not in (110,1330) else 150

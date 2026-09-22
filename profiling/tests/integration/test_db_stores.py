@@ -9,26 +9,24 @@ import pytest
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
-from profiling.adapters.catalog_reader_file import (
+from profiling import intake, pipeline
+from profiling.catalog import (
     FILE_CATALOG_VERSION_ID,
     FileCatalogReader,
 )
-from profiling.adapters.profile_run_store_db import DbProfileRunStore
-from profiling.adapters.recipient_profile_store_db import DbRecipientProfileStore
-from profiling.config.settings import get_settings
-from profiling.profile import pipeline
-from profiling.profile.ports import ProfileRunStore, RecipientProfileStore
-from profiling.profile.recipient_profile import RecipientProfile
-from profiling.profile.types import (
+from profiling.ports import ProfileRunStore, RecipientProfileStore
+from profiling.settings import get_settings
+from profiling.stores import DbProfileRunStore, DbRecipientProfileStore
+from profiling.types import (
     CallbackResult,
     DislikedCategory,
     ErrorCode,
     ProfileOutcome,
     ProfileRequest,
+    RecipientProfile,
     RunStatus,
     SearchResult,
 )
-from profiling.transport import profile_intake
 
 RID = 990_001
 FIXTURE = "tests/fixtures/catalog_sample.json"
@@ -184,7 +182,7 @@ def test_app_end_to_end_with_db(engine, monkeypatch) -> None:
             app.state.backend = fake
             body = {"recipientUserId": rid, "sourceVersion": 7, "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품"}],
                     "giftPreference": None, "reviews": []}
-            res = client.post(profile_intake.EXTRACT_AND_POOL_PATH, json=body)
+            res = client.post(intake.EXTRACT_AND_POOL_PATH, json=body)
             assert res.status_code == 202 and len(fake.sent) == 1
 
             run = app.state.store.get(rid)                       # 콜백 200 → DELIVERED 가 DB에

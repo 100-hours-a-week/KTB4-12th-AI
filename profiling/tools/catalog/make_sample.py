@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-from profiling.adapters.catalog_reader_file import FileCatalogReader
+from profiling.catalog import FileCatalogReader
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--source", default="../../../KTB4_12team/data/gift-catalog-20260915-v1/catalog_enriched.json")

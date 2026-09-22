@@ -1,7 +1,7 @@
 """7.6 접수 라우터 — POST /api/internal/v1/ai/profile/extract-and-pool.
 
 Transport 역할만 한다: 인증 → 스키마 검증 → 활성 카탈로그 확인 → 202 → 백그라운드로 pipeline.
-업무 로직(무엇을 뽑고 어떻게 고르는지)은 profile/pipeline.py에 있고, 바깥(파일·HTTP)은 adapters에 있다.
+업무 로직(무엇을 뽑고 어떻게 고르는지)은 pipeline.py에 있고, 바깥(파일·DB·HTTP)은 catalog.py · stores.py · backend.py에 있다.
 이 파일은 그 둘을 "요청 한 건" 단위로 잇는다.
 
 규칙 출처: 모델 API 설계 v3.2.7 §7.6 · 6단계 1.2
@@ -19,23 +19,23 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 
-from profiling.config.settings import Settings, get_settings
-from profiling.profile import pipeline
-from profiling.profile.ports import (
+from profiling import pipeline
+from profiling.ports import (
     BackendPort,
     CatalogReader,
     NoActiveCatalog,
     ProfileRunStore,
     RecipientProfileStore,
 )
-from profiling.profile.types import ErrorCode, ProfileRequest, RunStatus
-from profiling.runtime.supervisor import Supervisor
-from profiling.transport.schemas import (
+from profiling.schemas import (
     ProfileAccepted,
     ProfileExtractRequest,
     SuccessResponse,
     unknown_fields,
 )
+from profiling.settings import Settings, get_settings
+from profiling.supervisor import Supervisor
+from profiling.types import ErrorCode, ProfileRequest, RunStatus
 
 log = logging.getLogger(__name__)
 

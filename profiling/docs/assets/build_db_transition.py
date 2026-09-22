@@ -62,8 +62,8 @@ X0, W0 = 40, 270      # transport
 X1, W1 = 330, 400     # pipeline
 X2, W2 = 800, 320     # adapters
 X3, W3 = 1160, 400    # DB
-for x, w, name, sub, cls_ in [(X0, W0, 'transport/profile_intake.py', 'run_and_callback() — Supervisor 슬롯 안', 'box'),
-                              (X1, W1, 'profile/pipeline.py', 'profile(rq, catalog, store, recipient_store)', 'box'),
+for x, w, name, sub, cls_ in [(X0, W0, 'intake.py', 'run_and_callback() — Supervisor 슬롯 안', 'box'),
+                              (X1, W1, 'pipeline.py', 'profile(rq, catalog, store, recipient_store)', 'box'),
                               (X2, W2, 'adapters/ + main.py', '포트(ports.py) 구현과 조립', 'box'),
                               (X3, W3, 'PostgreSQL  ai_chat', 'docker compose · alembic 0001·0002 · 스키마 ai_profile', 'db')]:
     box(x, TOP, w, LH, cls_, 6)

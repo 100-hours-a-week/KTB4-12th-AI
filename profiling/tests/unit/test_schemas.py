@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from profiling.transport.schemas import (
+from profiling.schemas import (
     ProductRecord,
     ProfileCallbackRequest,
     ProfileExtractRequest,

@@ -16,34 +16,33 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 **Ports & Adapters(헥사고날).** 업무 코드는 바깥(HTTP·파일·DB)을 모르고, 바깥이 업무의 "포트(모양)"에 맞춰 들어온다. 의존 방향은 항상 안쪽.
 
 ```
-   Backend ──HTTP 7.6──▶ [Transport profile_intake] ──▶ [Supervisor 슬롯] ──▶ ┌─────────── 업무 (안쪽) ───────────┐
-                                                                            │  profile/pipeline.py   절차        │
-   파일  ◀── [FileCatalogReader]        ◀── CatalogReader ───────────────────┤  profile/types.py      내부 자료형  │
-   DB    ◀── [DbProfileRunStore]        ◀── ProfileRunStore ─────────────────┤  profile/ports.py      요구하는 모양 │
-   DB    ◀── [DbRecipientProfileStore]  ◀── RecipientProfileStore ───────────┤  profile/recipient_profile.py 프로필 │
-   Backend ◀─ [HttpBackendPort] 7.7     ◀── BackendPort ────────────────────┤                                     │
-                                                                            └─────────────────────────────────────┘
-   조립: main.py 한 곳에서만 구체 adapter를 만들어 app.state에 둔다.  계약: transport/schemas.py (camelCase, 문서 1 그대로)
-   이름은 3단계 도표와 같다: Transport · Profile · ProfileRunStore · RecipientProfileStore · BackendPort · CatalogReader · Supervisor · ProfileModel
+   Backend ──HTTP 7.6──▶ [intake.py] ──▶ [Supervisor 슬롯] ──▶ ┌─────────── 업무 (안쪽) ───────────┐
+                                                             │  pipeline.py  절차                │
+   파일    ◀── [FileCatalogReader]        ◀── CatalogReader ──┤  types.py     내부 자료형·프로필 행 │
+   DB      ◀── [DbProfileRunStore]        ◀── ProfileRunStore ┤  ports.py     바깥에 요구하는 모양  │
+   DB      ◀── [DbRecipientProfileStore]  ◀── RecipientProfileStore ─────────────────────────────┤
+   Backend ◀── [HttpBackendPort] 7.7      ◀── BackendPort ────────────────────────────────────────┤
+                                                             └───────────────────────────────────┘
+   조립: main.py 한 곳에서만 구체 구현을 만들어 app.state에 둔다.   계약: schemas.py (camelCase, 문서 1 그대로)
+   이름은 3단계 도표와 같다: Transport · Profile · ProfileRunStore · RecipientProfileStore · BackendPort · CatalogReader · Supervisor
 ```
 
 ```
 profiling/
 ├─ src/profiling/
+│  ├─ __init__.py             공개 표면 — profile() · ProfileRequest/Outcome · RunStatus · ErrorCode · Settings
 │  ├─ main.py                 조립(Composition Root) · DB 연결 확인(STORE=db, 실패면 앱 안 뜸) · 오류 봉투(422→400, 401/503, 500) · GET /health
-│  ├─ transport/schemas.py         7.6·7.7·7.9 DTO — 바깥 계약. camelCase · extra=forbid · 범위 검증
-│  ├─ transport/profile_intake.py  POST /api/internal/v1/ai/profile/extract-and-pool — 토큰 → 503 확인 → 202 → Supervisor → 7.7
-│  ├─ runtime/supervisor.py        Supervisor — 프로파일링 슬롯(동시 1). 기한·취소는 다음
-│  ├─ profile/types.py        내부 자료형(snake_case): ProfileRequest · ValidationResult · SearchResult · ProfileOutcome(=profile_runs 행) · RunStatus
-│  ├─ profile/ports.py        Protocol: CatalogReader · ProfileRunStore · RecipientProfileStore · BackendPort · (v3) ProfileModel · Embedder
-│  ├─ profile/pipeline.py     to_internal → input_hash → needs_model → build_pool → profile()  (예외는 FAILED로, 밖으로 안 던짐)
-│  ├─ profile/recipient_profile.py   RecipientProfile(=recipient_profiles 행) · from_outcome · should_replace · cap_tags · (v3) merge/hint
-│  ├─ adapters/catalog_reader_file.py   FileCatalogReader — 7.9 export 형식·동료 공유본 원형 자동 판별, 검증·중복 제거
-│  ├─ adapters/profile_run_store_db.py       DbProfileRunStore — profile_runs UPSERT 한 문장(상태별 규칙) · get()=최신 버전
-│  ├─ adapters/recipient_profile_store_db.py DbRecipientProfileStore — recipient_profiles UPSERT(버전 가드) · get · delete
-│  ├─ adapters/profile_run_store_memory.py   MemoryProfileRunStore — dict + Lock (STORE=memory · 단위 테스트)
-│  ├─ adapters/backend_port_http.py        HttpBackendPort — 7.7 POST → RunStatus(DELIVERED·SUPERSEDED·FAILED·RESULT_READY)
-│  └─ config/settings.py      Settings(BaseSettings, PROFILING_*) · get_settings()
+│  ├─ schemas.py              7.6·7.7·7.9 DTO — 바깥 계약. camelCase · 범위 검증 · 모르는 필드는 무시하고 경고
+│  ├─ intake.py               POST /api/internal/v1/ai/profile/extract-and-pool — 토큰 → 503 확인 → 202 → Supervisor → 7.7
+│  ├─ supervisor.py           Supervisor — 프로파일링 슬롯(동시 1). 기한·취소는 다음
+│  ├─ types.py                내부 자료형(snake_case): ProfileRequest · ValidationResult · SearchResult · ProfileOutcome(=profile_runs 행) · RunStatus · ErrorCode
+│  │                          + RecipientProfile(=recipient_profiles 행) · from_outcome · should_replace · cap_tags
+│  ├─ ports.py                Protocol 4개: CatalogReader · ProfileRunStore · RecipientProfileStore · BackendPort
+│  ├─ pipeline.py             to_internal → input_hash → needs_model → build_pool → profile()  (예외는 FAILED로, 밖으로 안 던짐)
+│  ├─ catalog.py              FileCatalogReader — 7.9 export 형식·동료 공유본 원형 자동 판별, 검증·중복 제거
+│  ├─ stores.py               DbProfileRunStore(profile_runs UPSERT 한 문장) · DbRecipientProfileStore(버전 가드) · 메모리 판 2개(STORE=memory)
+│  ├─ backend.py              HttpBackendPort — 7.7 POST → CallbackResult(DELIVERED·SUPERSEDED·FAILED·RESULT_READY)
+│  └─ settings.py             Settings(BaseSettings, PROFILING_*) · get_settings()
 ├─ tools/
 │  ├─ fake_backend/           가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔(/console, AI DB 확인·검증 탭 포함)
 │  ├─ catalog/fetch_export.py 7.9 가져오기 · 계약 점검(CONTRACT_7_9_SCHEMA) · 상품 ID 대조(파일·ai_search.products) · 저장
@@ -66,8 +65,8 @@ profiling/
 ```
 
 ### 이름 규칙
-- **HTTP 경계만 camelCase** (`transport/schemas.py`, fake_backend) — 문서 1과 1:1.
-- **Python 내부는 snake_case** (`profile/*`, `adapters/*`, 함수·변수 전부).
+- **HTTP 경계만 camelCase** (`schemas.py`, fake_backend) — 문서 1과 1:1.
+- **Python 내부는 snake_case** (`types.py`·`pipeline.py`·`stores.py` 등 나머지 전부, 함수·변수 포함).
 - 두 세계의 변환은 **두 함수뿐**: `pipeline.to_internal()`(7.6 → 내부) · `backend.to_callback()`(내부 → 7.7). 업무 코드에서 camelCase가 보이면 규칙 위반.
 - 7.6 DTO 변수는 `body`, 내부 요청은 `rq`, 결과는 `outcome`. 세부는 [이름_대조표.md](이름_대조표.md).
 
@@ -114,7 +113,7 @@ uv run pytest -q                            # 64 passed, 3 skipped (DB 꺼져 �
 uv run ruff check src tests tools alembic   # lint
 ```
 
-**팀원 골격과의 차이 (합칠 때 바꿀 것)** — 팀원 레포 골격은 루트 `app/` 레이아웃 · pip/requirements · Python 3.11 · env 이름 `DATABASE_URL`·`INTERNAL_SERVICE_TOKEN`·`MAIN_BACKEND_URL`. 지금은 각자 로컬로 개발하고, 합칠 때 `profiling/src/profiling/*` → `app/{profile,catalog,adapters,config}` 이동 + `settings.py` env 이름 통일 + 루트 단일 `pyproject`로 전환한다(환경 PR 초안은 브랜치 `chore/uv-environment`). 근거·규칙은 [docs/환경_설정.md](docs/환경_설정.md).
+**팀원 골격과의 차이 (합칠 때 바꿀 것)** — 팀원 레포 골격은 루트 `app/` 레이아웃 · pip/requirements · Python 3.11 · env 이름 `DATABASE_URL`·`INTERNAL_SERVICE_TOKEN`·`MAIN_BACKEND_URL`. 지금은 각자 로컬로 개발하고, 합칠 때 `profiling/src/profiling/*` → `app/profiling/*` 이동 + `settings.py` env 이름 통일 + 루트 단일 `pyproject`로 전환한다(환경 PR 초안은 브랜치 `chore/uv-environment`). 근거·규칙은 [docs/환경_설정.md](docs/환경_설정.md).
 
 ---
 
@@ -172,8 +171,8 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 |---|---|---|---|
 | `test_schemas.py` | 7.6·7.7 DTO 경계 | Pydantic `ValidationError` — 11개 리뷰·rating 0/6·extra 필드·태그 포함 콜백 거부 | 5 |
 | `test_pipeline.py` | `to_internal`·`needs_model`·`input_hash`·`build_pool`·`profile()` | `FakeCatalog`·`FakeStore`·`FakeRecipientStore`(ports 모양). 비선호 제외·조회수 정렬·상한·FAILED 경로·저장 실패·RUNNING→RESULT_READY 순서·프로필 upsert | 16 |
-| `test_adapters_file_memory.py` | `FileCatalogReader`·`MemoryProfileRunStore` | tmp JSON 두 형식 · 중복/오류 제외 · `isinstance(…, Protocol)` 모양 검사 | 4 |
-| `test_backend_port_http.py` | `to_callback`·`HttpBackendPort` | `httpx.MockTransport` — 상태 코드 6종 → `CallbackResult(status, code)`, 헤더·경로·본문, 네트워크 오류 | 12 |
+| `test_catalog_stores.py` | `FileCatalogReader`·`MemoryProfileRunStore` | tmp JSON 두 형식 · 중복/오류 제외 · `isinstance(…, Protocol)` 모양 검사 | 4 |
+| `test_backend.py` | `to_callback`·`HttpBackendPort` | `httpx.MockTransport` — 상태 코드 6종 → `CallbackResult(status, code)`, 헤더·경로·본문, 네트워크 오류 | 12 |
 | `test_fetch_export.py` | `tools/catalog/fetch_export` | 계약 점검(모르는 필드·별칭·필수 누락) · ID 대조 · 저장 정규화 · 종료 코드 | 7 |
 | `test_catalog_fixture.py` | 예시 카탈로그 | 111건·56카테고리·null 1·판매불가 2, `/health` | 2 |
 | `test_e2e_transport.py` | **끝에서 끝** (메모리) | `TestClient(app)` — lifespan → 7.6 202 → Supervisor 슬롯 → 가짜 BackendPort가 7.7 받음 → 실행 기록 DELIVERED. 400은 백그라운드로 안 감 | 1 |
@@ -192,11 +191,11 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
-| 1 | ~~DB adapter~~ **완료(09-22)** — `DbProfileRunStore`·`DbRecipientProfileStore`, [docs/DB_전환_설명.md](docs/DB_전환_설명.md). 남은 v1 조각: 접수 단계 중복 판정(`store.get()` — RUNNING이면 새 분석 없음·결과 있으면 재전송만) · `MemoryRecipientProfileStore` | `profile_intake.extract_and_pool` 앞부분 · `adapters/recipient_profile_store_memory.py` | 어댑터·ports |
+| 1 | ~~DB adapter~~ **완료(09-22)** — `DbProfileRunStore`·`DbRecipientProfileStore`, [docs/DB_전환_설명.md](docs/DB_전환_설명.md). 남은 v1 조각: 접수 단계 중복 판정(`store.get()` — RUNNING이면 새 분석 없음·결과 있으면 재전송만) · `MemoryRecipientProfileStore` | `profile_intake.extract_and_pool` 앞부분 · `stores.py` | 어댑터·ports |
 | 2 | 7.7 재시도(5xx 최대 3회)·409→SUPERSEDED·실행 기록 상태 갱신 | `HttpBackendPort.send_profile_callback` 안 · Transport가 `store.save(status)` | 포트 시그니처(이미 `RunStatus`) |
 | 3 | Catalog 빌드 CLI — 7.9 수신·검증·버전 저장·활성 포인터 | `catalog/` · fake 7.9는 이미 있음 | |
 | 4 | 팀원 Search 연동 | `pipeline.build_pool` 호출 한 줄 | 나머지 |
-| 5 | v3 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) | `pipeline.profile` 2)단계 · `adapters/model_*.py` | 접수·저장·콜백 |
+| 5 | v3 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) | `pipeline.profile` 2)단계 · `model.py` | 접수·저장·콜백 |
 | 5′ | **v3 마이그레이션 0003** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/0003_*.py` (`add_column`) · `recipient_profile.py` 필드 · 통합 테스트 | 0001·0002 |
 | 6 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
 

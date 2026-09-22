@@ -1,8 +1,8 @@
-"""포트 — 업무 모듈(profile)이 바깥에 요구하는 "모양". 구현은 adapters/에 있고, 조립은 main.py에서만 한다.
+"""포트 — 업무 코드(pipeline.py)가 바깥에 요구하는 "모양". 구현은 catalog.py · stores.py · backend.py 에 있고, 조립은 main.py에서만 한다.
 
 typing.Protocol 이라 상속이 필요 없다: 메서드 이름·인자·반환이 같으면 어떤 클래스든 이 자리에 꽂힌다
-(adapters의 실제 구현, tests/의 가짜, 팀원의 adapter 전부). 업무 코드(pipeline.py)는 이 파일만 import하고
-adapters를 import하지 않는다 — 그래야 파일→DB, 메모리→PostgreSQL로 바꿔도 pipeline이 안 바뀐다.
+(catalog.py·stores.py·backend.py의 실제 구현, tests/의 가짜, 팀원의 어댑터 전부). pipeline.py는 이 파일만 import하고
+구현 모듈을 import하지 않는다 — 그래야 파일→DB, 메모리→PostgreSQL로 바꿔도 pipeline이 안 바뀐다.
 
 이름은 팀원 3단계 구현 상세 §4와 맞춘다. 확정 전이라 오늘은 여기 이름이 기준이고, 합칠 때 그쪽 이름으로 바꾼다
 (후보: CatalogReader.active → Catalog.acquire()/SnapshotHandle, ProfileModel.analyze는 팀원 문서 이름 그대로).
@@ -15,9 +15,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from profiling.profile.recipient_profile import RecipientProfile
-from profiling.profile.types import CallbackResult, ProfileOutcome
-from profiling.transport.schemas import ProductRecord
+from profiling.schemas import ProductRecord
+from profiling.types import CallbackResult, ProfileOutcome, RecipientProfile
 
 # ---------------------------------------------------------------------------
 # 예외 — 포트가 던지고 Transport(api/)가 HTTP 상태로 바꾼다
@@ -35,7 +34,7 @@ class NoActiveCatalog(Exception):
 
 @runtime_checkable
 class CatalogReader(Protocol):
-    """활성 카탈로그 한 벌을 준다. 구현: adapters/catalog_reader_file.FileCatalogReader (오늘) → DB adapter (내일)."""
+    """활성 카탈로그 한 벌을 준다. 구현: catalog.FileCatalogReader (오늘) → DB adapter (내일)."""
 
     def active(self) -> tuple[int, list[ProductRecord]]:
         """(catalog_version_id, 활성 버전의 상품 전체). 활성 버전이 없으면 NoActiveCatalog.
@@ -51,7 +50,7 @@ class CatalogReader(Protocol):
 
 @runtime_checkable
 class ProfileRunStore(Protocol):
-    """프로파일링 결과 보관. 구현: adapters/profile_run_store_memory.MemoryProfileRunStore (오늘) → DB adapter profile_runs·recipient_profiles (내일)."""
+    """프로파일링 결과 보관. 구현: stores.DbProfileRunStore · stores.MemoryProfileRunStore."""
 
     def save(self, outcome: ProfileOutcome) -> None:
         """실행 기록 + 수신자 프로필 upsert. 같은 recipient_user_id면 덮어쓴다.
@@ -67,7 +66,7 @@ class ProfileRunStore(Protocol):
 
 @runtime_checkable
 class BackendPort(Protocol):
-    """Backend 정본으로 나가는 HTTP. 구현: adapters/backend_port_http.HttpBackendPort."""
+    """Backend 정본으로 나가는 HTTP. 구현: backend.HttpBackendPort."""
 
     def send_profile_callback(self, outcome: ProfileOutcome) -> CallbackResult:
         """7.7 POST 한 번 → 실행 기록의 다음 상태 + 사유(3단계 §10.2). 예외를 밖으로 내지 않는다.
@@ -81,7 +80,7 @@ class BackendPort(Protocol):
 
 @runtime_checkable
 class RecipientProfileStore(Protocol):
-    """수신자 프로필(태그) 보관 — ai_profile.recipient_profiles. 구현: adapters/recipient_profile_store_memory (목) → DB adapter.
+    """수신자 프로필(태그) 보관 — ai_profile.recipient_profiles. 구현: stores.DbRecipientProfileStore · stores.MemoryRecipientProfileStore(목).
     ProfileRunStore(실행 기록·전달 상태)와 분리: 실행 기록은 시도마다 한 행, 프로필은 수신자당 한 행(최신 분석이 덮어씀)."""
 
     def upsert(self, profile: RecipientProfile) -> None: ...

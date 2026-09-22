@@ -1,4 +1,4 @@
-"""프로파일링 클래스 다이어그램 — transport/schemas.py(바깥 계약) · profile/types.py(내부 자료형) · profile/ports.py(모양) · adapters(구현) · api/main(조립).
+"""프로파일링 클래스 다이어그램 — schemas.py(바깥 계약) · types.py(내부 자료형) · ports.py(모양) · adapters(구현) · api/main(조립).
 python3 build_class_diagram.py → class-diagram.svg (PNG는 Chrome 헤드리스). 필드는 현재 코드 기준 — 바뀌면 여기도 고친다."""
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -34,8 +34,8 @@ def line(d,c): parts.append(f'<path d="{d}" class="{c}"/>')
 t(40,46,'프로파일링 클래스 다이어그램 — 계약 · 내부 자료형 · 포트 · adapter · 조립','title')
 t(40,72,'«…구현» = Protocol 구현(상속 없음, 모양만 일치)   회색 실선 → = 사용/호출   회색 ◇ = 보유   황토 점선 → = 변환 함수(camelCase ↔ snake_case)','small')
 
-# ---------------- transport/schemas.py (바깥 계약)  x 40..510
-pkg(40,92,470,630,'transport/schemas.py — 바깥 계약 (camelCase · forbid)')
+# ---------------- schemas.py (바깥 계약)  x 40..510
+pkg(40,92,470,630,'schemas.py — 바깥 계약 (camelCase · forbid)')
 cls(56,124,250,'ProfileExtractRequest',['recipientUserId: int >0','sourceVersion: int ≥0','dislikedCategories: list[…]  (≤5?)','giftPreference: str | None','reviews: list[ReviewDto] ≤10'],stereo='«7.6 요청»',blue=True)
 cls(56,258,150,'DislikedCategoryDto',['categoryId: int >0','categoryName: str'],blue=True)
 cls(222,258,150,'ReviewDto',['productId: int >0','rating: int 1..5','reviewText: str|None'],blue=True)
@@ -46,8 +46,8 @@ cls(330,585,164,'ProductRecord',['productId · name · brand','description: str|
 cls(222,500,272,'SuccessResponse[T]  /  ErrorResponse',['message: str','data: T   |   error: ErrorBody{code, traceId}'],blue=True)
 line('M131 258 V246','has'); line('M297 258 V246','has')   # ExtractRequest ◇ Dto들
 
-# ---------------- profile/types.py (내부)  x 560..990
-pkg(560,92,430,630,'profile/types.py — 내부 자료형 (snake_case)')
+# ---------------- types.py (내부)  x 560..990
+pkg(560,92,430,630,'types.py — 내부 자료형 (snake_case)')
 cls(576,124,190,'ProfileRequest',['recipient_user_id: int','source_version: int','gift_preference: str | None','disliked_categories: list','reviews: list[Review]'])
 cls(790,124,180,'DislikedCategory',['category_id: int','category_name: str'])
 cls(790,196,180,'Review',['product_id · rating','review_text: str | None'])
@@ -63,8 +63,8 @@ line('M766 470 H778 V300 H783','has'); line('M766 485 H778 V395 H783','has')  # 
 line('M306 150 H570','conv'); t(438,143,'pipeline.to_internal()','small','middle')
 line('M576 470 H312','conv'); t(444,463,'backend.to_callback()','small','middle')
 
-# ---------------- profile/ports.py  x 1040..1560
-pkg(1040,92,520,392,'profile/ports.py — 포트 (typing.Protocol)')
+# ---------------- ports.py  x 1040..1560
+pkg(1040,92,520,392,'ports.py — 포트 (typing.Protocol)')
 cls(1056,124,330,'CatalogReader',[],['active() → (version_id, list[ProductRecord])','by_id(product_id) → ProductRecord | None'],stereo='«Protocol»',yellow=True)
 cls(1400,124,144,'NoActiveCatalog',['(Exception)','7.6에서 503으로'])
 cls(1056,222,330,'ProfileRunStore',[],['save(outcome: ProfileOutcome) → None','get(recipient_user_id) → ProfileOutcome | None'],stereo='«Protocol»',yellow=True)
@@ -79,8 +79,8 @@ cls(1056,542,150,'FileCatalogReader',['path: Path','_products: list','_by_id: di
 cls(1216,542,180,'MemoryProfileRunStore',['_items: dict[int,Outcome]','_lock: threading.Lock'],['save()','get()'],stereo='«ProfileRunStore 구현»')
 cls(1406,542,140,'HttpBackendPort',['base_url · token','timeout_s','_client: httpx.Client'],['send_profile_callback()','close()'],stereo='«BackendPort 구현»')
 
-# ---------------- profile/pipeline.py  x 560..990
-pkg(560,730,430,190,'profile/pipeline.py — 업무 (함수 모듈)')
+# ---------------- pipeline.py  x 560..990
+pkg(560,730,430,190,'pipeline.py — 업무 (함수 모듈)')
 cls(576,762,400,'pipeline',[],['to_internal(ProfileExtractRequest) → ProfileRequest','needs_model(ProfileRequest) → bool                     (결정 c)','build_pool(rq, products, pool_size) → SearchResult    (결정 a)','profile(rq, *, catalog: CatalogReader, store: ProfileRunStore)','   → ProfileOutcome'],stereo='«module»')
 line('M976 830 H1030 V300 H1050','use')
 line('M676 762 V700','use'); t(690,720,'types 생성','small')

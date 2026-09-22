@@ -3,7 +3,7 @@
 from fastapi.testclient import TestClient
 
 from profiling.main import app
-from profiling.profile.types import CallbackResult, RunStatus
+from profiling.types import CallbackResult, RunStatus
 
 
 class RecordingBackend:
@@ -49,7 +49,7 @@ def test_unknown_fields_are_accepted_and_logged(caplog) -> None:
         app.state.backend = RecordingBackend()
         body = {"recipientUserId": 9074, "sourceVersion": 1, "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품", "weight": 1}],
                 "giftPreference": None, "reviews": [], "extraTop": "x"}
-        with caplog.at_level("WARNING", logger="profiling.transport.profile_intake"):
+        with caplog.at_level("WARNING", logger="profiling.intake"):
             res = client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body)
         assert res.status_code == 202
         assert any("CONTRACT_7_6_UNKNOWN_FIELD" in r.message and "extraTop" in r.message and "weight" in r.message for r in caplog.records)

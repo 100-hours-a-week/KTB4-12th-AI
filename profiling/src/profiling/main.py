@@ -3,7 +3,7 @@
 실행:  uv run uvicorn profiling.main:app --port 8000 --reload
 확인:  curl localhost:8000/health
 
-여기서만 adapters의 구체 클래스를 import한다. 라우터(transport/)와 업무(profile/)는 app.state에 든 객체를 ports의 모양으로만 쓴다.
+여기서만 구체 클래스(FileCatalogReader · Db*Store · HttpBackendPort)를 import한다. 라우터(intake.py)와 업무(pipeline.py)는 app.state에 든 객체를 ports의 모양으로만 쓴다.
 
 app.state에 두는 것 (lifespan에서 1회 생성):
   catalog          CatalogReader        FileCatalogReader (팀원 카탈로그 DB 전까지 파일)
@@ -26,16 +26,18 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from profiling.adapters.backend_port_http import HttpBackendPort
-from profiling.adapters.catalog_reader_file import FileCatalogReader
-from profiling.adapters.profile_run_store_db import DbProfileRunStore
-from profiling.adapters.profile_run_store_memory import MemoryProfileRunStore
-from profiling.adapters.recipient_profile_store_db import DbRecipientProfileStore
-from profiling.config.settings import Settings, get_settings
-from profiling.profile.ports import NoActiveCatalog
-from profiling.runtime.supervisor import Supervisor
-from profiling.transport import profile_intake
-from profiling.transport.schemas import ErrorBody, ErrorResponse
+from profiling import intake
+from profiling.backend import HttpBackendPort
+from profiling.catalog import FileCatalogReader
+from profiling.ports import NoActiveCatalog
+from profiling.schemas import ErrorBody, ErrorResponse
+from profiling.settings import Settings, get_settings
+from profiling.stores import (
+    DbProfileRunStore,
+    DbRecipientProfileStore,
+    MemoryProfileRunStore,
+)
+from profiling.supervisor import Supervisor
 
 log = logging.getLogger(__name__)
 
@@ -123,7 +125,7 @@ class _NoCatalog:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="profiling", version="0.1.0", lifespan=lifespan)
-app.include_router(profile_intake.router)
+app.include_router(intake.router)
 
 
 def _error_response(status: int, code: str, message: str, trace_id: str | None = None) -> JSONResponse:

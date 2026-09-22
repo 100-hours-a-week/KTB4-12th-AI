@@ -1,6 +1,6 @@
 """파이프라인 — 7.6 요청 한 건을 끝까지 처리한다. 4단계 2.2 `profile()` 의사코드의 자리 (Application Service).
 
-이 파일은 "무엇을 어떤 순서로"만 안다. 바깥(파일·DB·HTTP)은 ports의 모양으로만 받고(인자 catalog·store), adapters를 import하지 않는다.
+이 파일은 "무엇을 어떤 순서로"만 안다. 바깥(파일·DB·HTTP)은 ports의 모양으로만 받고(인자 catalog·store), 구현 모듈을 import하지 않는다.
 그래서 단위 테스트는 ports 모양의 가짜(dict 하나짜리 클래스)를 넣어 DB 없이 돈다.
 
 v1(지금): 취향 문장 None · 리뷰 [] → 추출·검증을 건너뛰고, 비선호 카테고리를 뺀 상품 풀 30개를 만든다.
@@ -24,14 +24,14 @@ import hashlib
 import logging
 from uuid import UUID
 
-from profiling.profile.ports import (
+from profiling.ports import (
     CatalogReader,
     NoActiveCatalog,
     ProfileRunStore,
     RecipientProfileStore,
 )
-from profiling.profile.recipient_profile import from_outcome
-from profiling.profile.types import (
+from profiling.schemas import ProductRecord, ProfileExtractRequest
+from profiling.types import (
     DislikedCategory,
     ErrorCode,
     ProfileOutcome,
@@ -40,8 +40,8 @@ from profiling.profile.types import (
     RunStatus,
     SearchResult,
     ValidationResult,
+    from_outcome,
 )
-from profiling.transport.schemas import ProductRecord, ProfileExtractRequest
 
 log = logging.getLogger(__name__)
 

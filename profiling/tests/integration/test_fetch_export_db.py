@@ -4,7 +4,7 @@
 import pytest
 import sqlalchemy as sa
 
-from profiling.config.settings import get_settings
+from profiling.settings import get_settings
 from tools.catalog import fetch_export as fx
 
 DDL = """

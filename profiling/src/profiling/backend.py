@@ -21,8 +21,8 @@ import time
 import httpx
 from pydantic import ValidationError
 
-from profiling.profile.types import CallbackResult, ErrorCode, ProfileOutcome, RunStatus
-from profiling.transport.schemas import ErrorResponse, ProfileCallbackRequest
+from profiling.schemas import ErrorResponse, ProfileCallbackRequest
+from profiling.types import CallbackResult, ErrorCode, ProfileOutcome, RunStatus
 
 log = logging.getLogger(__name__)
 

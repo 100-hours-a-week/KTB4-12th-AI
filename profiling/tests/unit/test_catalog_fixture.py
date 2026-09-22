@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from profiling.adapters.catalog_reader_file import (
+from profiling.catalog import (
     FILE_CATALOG_VERSION_ID,
     FileCatalogReader,
 )
@@ -28,7 +28,7 @@ def test_fixture_loads_with_expected_shape() -> None:
 
 def test_app_health_with_fixture(monkeypatch) -> None:
     monkeypatch.setenv("PROFILING_CATALOG_FILE", str(FIXTURE))
-    from profiling.config.settings import get_settings
+    from profiling.settings import get_settings
     get_settings.cache_clear()
     with TestClient(app) as client:                                          # lifespan 실행 → FileCatalogReader 로드
         res = client.get("/health")

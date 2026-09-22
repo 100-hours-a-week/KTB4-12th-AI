@@ -1,7 +1,7 @@
 """API 경계 DTO — 모델 API 설계 v3.2.7의 7.6 · 7.7 · 7.9를 그대로 옮긴다.
 
 필드명은 문서와 1:1(camelCase). 문서가 바뀌면 이 파일만 바뀐다.
-내부 자료형(snake_case)은 profile/types.py, catalog/types.py에 있고, 변환은 api/ 안에서만 한다.
+내부 자료형(snake_case)은 types.py에 있고, 변환은 pipeline.to_internal()과 backend.to_callback() 두 곳뿐이다.
 
 구성: 1) 상수·타입 별칭  2) 공통 봉투  3) 7.6  4) 7.7  5) 7.9
 """
@@ -72,7 +72,7 @@ class ErrorResponse(BaseModel):
 
 
 ## 7.6 본문의 모르는 필드는 거부하지 않고 받아 둔다(extra="allow") — Backend가 필드를 추가해도 연동이 안 깨지게.
-## 대신 transport가 unknown_fields()로 찾아 ErrorCode.CONTRACT_7_6_UNKNOWN_FIELD 경고를 남긴다. 필수 누락·타입 오류만 400.
+## 대신 intake.py가 unknown_fields()로 찾아 ErrorCode.CONTRACT_7_6_UNKNOWN_FIELD 경고를 남긴다. 필수 누락·타입 오류만 400.
 _ALLOW = ConfigDict(extra="allow")
 
 
@@ -108,7 +108,7 @@ class ProfileExtractRequest(BaseModel):
 
 def unknown_fields(body: ProfileExtractRequest) -> dict[str, list[str]]:
     """7.6 본문에서 계약에 없는 필드 이름 — {"": [최상위], "dislikedCategories": [...], "reviews": [...]}. 없으면 {}.
-    transport가 접수 로그에 남긴다(무시하고 진행). 하위 목록은 항목들을 합쳐 이름만 모은다."""
+    intake.py가 접수 로그에 남긴다(무시하고 진행). 하위 목록은 항목들을 합쳐 이름만 모은다."""
     out: dict[str, list[str]] = {}
     if body.model_extra:
         out[""] = sorted(body.model_extra)

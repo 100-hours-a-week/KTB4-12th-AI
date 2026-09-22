@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from profiling.profile.types import ErrorCode
+from profiling.types import ErrorCode
 from tools.catalog import fetch_export as fx
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "catalog_sample.json"

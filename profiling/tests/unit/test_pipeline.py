@@ -5,10 +5,10 @@ from uuid import UUID
 
 import pytest
 
-from profiling.profile import pipeline
-from profiling.profile.ports import NoActiveCatalog
-from profiling.profile.types import DislikedCategory, ProfileRequest, Review, RunStatus
-from profiling.transport.schemas import ProductRecord, ProfileExtractRequest
+from profiling import pipeline
+from profiling.ports import NoActiveCatalog
+from profiling.schemas import ProductRecord, ProfileExtractRequest
+from profiling.types import DislikedCategory, ProfileRequest, Review, RunStatus
 
 CV = UUID(int=7)   # 시험용 카탈로그 버전 ID
 

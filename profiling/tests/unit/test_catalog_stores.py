@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from profiling.adapters.catalog_reader_file import (
+from profiling.catalog import (
     FILE_CATALOG_VERSION_ID,
     FileCatalogReader,
 )
-from profiling.adapters.profile_run_store_memory import MemoryProfileRunStore
-from profiling.profile.ports import CatalogReader, NoActiveCatalog, ProfileRunStore
-from profiling.profile.types import ProfileOutcome, RunStatus
+from profiling.ports import CatalogReader, NoActiveCatalog, ProfileRunStore
+from profiling.stores import MemoryProfileRunStore
+from profiling.types import ProfileOutcome, RunStatus
 
 # ---------------------------------------------------------------- 자료
 

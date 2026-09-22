@@ -23,9 +23,9 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from profiling.profile.ports import NoActiveCatalog
-from profiling.profile.types import ErrorCode
-from profiling.transport.schemas import ProductRecord
+from profiling.ports import NoActiveCatalog
+from profiling.schemas import ProductRecord
+from profiling.types import ErrorCode
 
 log = logging.getLogger(__name__)
 

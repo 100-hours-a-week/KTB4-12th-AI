@@ -8,8 +8,8 @@ from uuid import UUID
 
 import pytest
 
-from profiling.profile import recipient_profile as rp
-from profiling.profile.types import (
+from profiling import types as rp
+from profiling.types import (
     DislikedCategory,
     ProfileOutcome,
     ProfileRequest,

@@ -1,6 +1,6 @@
 """현재 구현된 파이프라인 지도 — 단계(접수 → 슬롯 → 처리 → 콜백)마다 실제로 부르는 함수와, 포트를 거쳐 연결되는 어댑터·바깥.
 python3 build_pipeline_map.py → pipeline-map.svg (PNG는 Chrome 헤드리스: --headless --screenshot --window-size=2W,2H)
-함수 이름은 코드 기준(2026-09-22, DB 전환 후). 바뀌면 여기도 고친다."""
+함수 이름은 코드 기준(2026-09-23, 패키지 평탄화 후). 바뀌면 여기도 고친다."""
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -43,7 +43,7 @@ def lines(x, y, rows, dy=14):
         t(x, y + i * dy, s, c)
 
 
-t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-22 코드 기준)', 'title')
+t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-23 코드 기준)', 'title')
 t(40, 70, '위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.', 'small')
 
 # ───────────────────── 0. 조립 (main.py lifespan) ─────────────────────
@@ -51,7 +51,7 @@ Y0 = 90
 box(40, Y0, W - 80, 104, 'band', 6)
 t(52, Y0 + 20, '조립 — main.py  lifespan()  (프로세스 시작 1회, app.state에 둠)', 'h')
 lines(52, Y0 + 40, [
-    ('get_settings() (config/settings.py, PROFILING_*)  →  FileCatalogReader(CATALOG_FILE)  →  Supervisor(PROFILING_SLOTS=1)  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)', 'mono'),
+    ('get_settings() (settings.py, PROFILING_*)  →  FileCatalogReader(CATALOG_FILE)  →  Supervisor(PROFILING_SLOTS=1)  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)', 'mono'),
     ('STORE=db: _connect_db(DATABASE_URL — select 1 · alembic_version 확인, 실패면 RuntimeError로 앱 안 뜸) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine)    |    STORE=memory: MemoryProfileRunStore() · recipient_store=None', 'mono'),
     ('카탈로그 로드 실패 → _NoCatalog 대역 (7.6은 503, 앱은 뜸)    ·    종료: backend.close() · engine.dispose()    ·    GET /health → catalog · store(_store_health) · supervisor.stats()', 'mono'),
     ('오류 봉투: on_validation_error(422→400 INVALID_REQUEST) · on_http_error(401/403/503) · on_unhandled(500) — 모두 _error_response() {message, error:{code, traceId}}', 'mono'),
@@ -62,10 +62,10 @@ TOP, SH = 232, 348
 CW, GAP = 385, 25
 XS = [40 + i * (CW + GAP) for i in range(4)]
 stages = [
-    ('1  접수', 'transport/profile_intake.py', 'extract_and_pool()  — HTTP 안에서, 202까지'),
-    ('2  실행 슬롯', 'runtime/supervisor.py', 'Supervisor.submit() → _run()  — 응답 뒤 백그라운드'),
-    ('3  처리', 'profile/pipeline.py', 'run_and_callback() → profile(rq, catalog, store, …)'),
-    ('4  콜백·기록', 'transport/profile_intake.py + adapters/backend_port_http.py', 'run_and_callback() 뒷부분'),
+    ('1  접수', 'intake.py', 'extract_and_pool()  — HTTP 안에서, 202까지'),
+    ('2  실행 슬롯', 'supervisor.py', 'Supervisor.submit() → _run()  — 응답 뒤 백그라운드'),
+    ('3  처리', 'pipeline.py', 'run_and_callback() → profile(rq, catalog, store, …)'),
+    ('4  콜백·기록', 'intake.py + backend.py', 'run_and_callback() 뒷부분'),
 ]
 for (name, file, fn), x in zip(stages, XS):
     box(x, TOP, CW, SH, 'stage', 6)
@@ -117,7 +117,7 @@ lines(x + 12, TOP + 84, [
     ('4  outcome = ProfileOutcome(RESULT_READY, …)', 'mono'),
     ('5  store.save(outcome)      ← 콜백 본문이 DB에 먼저', 'monob'),
     ('6  recipient_store.upsert(from_outcome(rq, outcome))', 'monob'),
-    ('   recipient_profile.py: from_outcome → cap_tags(12·8)', 'sub'),
+    ('   types.py: from_outcome → cap_tags(12·8)', 'sub'),
     ('실패 → _fail(rq, store, reason) → FAILED, 콜백 없음', 'mono'),
     ('return outcome', 'monob'),
 ])
@@ -155,7 +155,7 @@ for i, label in enumerate(['run_and_callback + rq: ProfileRequest', 'fn(*args)',
 # ───────────────────── 포트 띠 ─────────────────────
 PY = TOP + SH + 70
 box(40, PY, W - 80, 40, 'band', 6)
-t(52, PY + 16, 'profile/ports.py — 업무가 바깥에 요구하는 모양 (typing.Protocol · @runtime_checkable). 업무 코드는 이 파일만 import한다', 'h2')
+t(52, PY + 16, 'ports.py — 업무가 바깥에 요구하는 모양 (typing.Protocol · @runtime_checkable). 업무 코드는 이 파일만 import한다', 'h2')
 ports = ['CatalogReader  active() · by_id()', 'ProfileRunStore  save() · get()', 'RecipientProfileStore  upsert() · get() · delete()', 'BackendPort  send_profile_callback()']
 for p, x in zip(ports, XS):
     t(x + CW / 2, PY + 33, p, 'port', 'middle')
@@ -173,25 +173,25 @@ path(f'M{XS[3]+220} {B} V{PY}'); t(XS[3] + 228, B + 26, 'send_profile_callback()
 AY0 = PY + 74
 AH = 126
 adapters = [
-    ('FileCatalogReader', 'adapters/catalog_reader_file.py', [
+    ('FileCatalogReader', 'catalog.py', [
         '__init__(path): JSON 로드 → _product_dicts() 로 형식 판별',
         '  _is_raw_format · _adapt_raw_product → ProductRecord 검증',
         '  잘못된 행 제외 · productId 중복 제거',
         'active() → (FILE_CATALOG_VERSION_ID 고정 UUID, 상품 전체)',
         'by_id(product_id) → ProductRecord | None  (v3 리뷰 조인)']),
-    ('DbProfileRunStore', 'adapters/profile_run_store_db.py', [
+    ('DbProfileRunStore', 'stores.py', [
         'save(outcome): INSERT … ON CONFLICT (rid, sv) DO UPDATE',
         '  status·input_hash·attempt+1(RUNNING)·payload coalesce',
         '  callback_attempts greatest · error · callback_body()',
         'get(rid) → 최신 1행 → ProfileOutcome',
         'payload_hash() · delete_recipient()']),
-    ('DbRecipientProfileStore', 'adapters/recipient_profile_store_db.py', [
+    ('DbRecipientProfileStore', 'stores.py', [
         'upsert(profile): INSERT … ON CONFLICT (rid) DO UPDATE',
         '  WHERE 기존.source_version <= 새 버전 (낮으면 무시)',
         'get(rid) → RecipientProfile',
         'delete(rid) → bool',
         'v1 저장: source_version · disliked_categories · 태그']),
-    ('HttpBackendPort', 'adapters/backend_port_http.py', [
+    ('HttpBackendPort', 'backend.py', [
         'send_profile_callback(outcome) → RunStatus',
         '  to_callback → callback_body (7.7 본문, 태그 없음)',
         '  _status_from_response · _error_code',

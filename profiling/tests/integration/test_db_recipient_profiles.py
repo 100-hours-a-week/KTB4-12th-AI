@@ -4,7 +4,7 @@ DB가 안 떠 있으면 skip (단위 테스트와 섞이지 않게). 실행: doc
 import pytest
 import sqlalchemy as sa
 
-from profiling.config.settings import get_settings
+from profiling.settings import get_settings
 
 
 @pytest.fixture(scope="module")

@@ -6,10 +6,10 @@ from uuid import UUID
 import httpx
 import pytest
 
-from profiling.adapters import backend_port_http as backend_mod
-from profiling.adapters.backend_port_http import HttpBackendPort, to_callback
-from profiling.profile.ports import BackendPort
-from profiling.profile.types import ErrorCode, ProfileOutcome, RunStatus, SearchResult
+from profiling import backend as backend_mod
+from profiling.backend import HttpBackendPort, to_callback
+from profiling.ports import BackendPort
+from profiling.types import ErrorCode, ProfileOutcome, RunStatus, SearchResult
 from tools.fake_backend import app as fake
 
 CV = UUID(int=1)   # 시험용 카탈로그 버전 ID

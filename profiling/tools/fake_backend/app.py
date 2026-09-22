@@ -36,10 +36,9 @@ from fastapi import Body, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
-from profiling.adapters.catalog_reader_file import FileCatalogReader
-from profiling.config.settings import get_settings
-from profiling.profile.ports import NoActiveCatalog
-from profiling.transport.schemas import (
+from profiling.catalog import FileCatalogReader
+from profiling.ports import NoActiveCatalog
+from profiling.schemas import (
     ErrorBody,
     ErrorResponse,
     ProductExportData,
@@ -47,6 +46,7 @@ from profiling.transport.schemas import (
     ProfileCallbackRequest,
     SuccessResponse,
 )
+from profiling.settings import get_settings
 
 logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s fake_backend: %(message)s")
 log = logging.getLogger("fake_backend")
