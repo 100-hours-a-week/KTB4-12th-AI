@@ -1,4 +1,4 @@
-"""adapters/catalog_reader_file.FileCatalogReader · adapters/profile_run_store_memory.MemoryProfileRunStore — ports 계약대로 동작하는지 (DB adapter도 같은 테스트를 통과해야 한다)."""
+"""catalog.FileCatalogReader · stores.MemoryProfileRunStore — ports 계약대로 동작하는지 (DB 구현도 같은 테스트를 통과해야 한다)."""
 
 import json
 from pathlib import Path

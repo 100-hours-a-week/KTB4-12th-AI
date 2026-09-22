@@ -88,7 +88,7 @@ line('M676 762 V700','use'); t(690,720,'types 생성','small')
 # ---------------- api / main  x 40..510
 pkg(40,730,470,190,'transport · runtime · main — Transport · Supervisor · 조립')
 cls(56,762,214,'main.app (FastAPI)',['state.catalog: CatalogReader','state.store: ProfileRunStore','state.backend: BackendPort','state.supervisor: Supervisor'],['lifespan()  adapter 생성 1회','exception_handler 422→400','GET /health'],stereo='«app»')
-cls(286,762,208,'profile_intake (Transport)',['EXTRACT_AND_POOL_PATH'],['require_service_token()  401','extract_and_pool()  202 / 503','  → supervisor.submit(run_and_callback)','run_and_callback()  → 7.7'],stereo='«router»')
+cls(286,762,208,'intake.py (Transport)',['EXTRACT_AND_POOL_PATH'],['require_service_token()  401','extract_and_pool()  202 / 503','  → supervisor.submit(run_and_callback)','run_and_callback()  → 7.7'],stereo='«router»')
 line('M270 810 H279','has')
 line('M494 840 H570','use'); t(532,834,'호출','small','middle')
 line('M160 700 V690','use'); t(170,712,'DTO 검증·응답','small')

@@ -64,7 +64,7 @@ X2, W2 = 800, 320     # adapters
 X3, W3 = 1160, 400    # DB
 for x, w, name, sub, cls_ in [(X0, W0, 'intake.py', 'run_and_callback() — Supervisor 슬롯 안', 'box'),
                               (X1, W1, 'pipeline.py', 'profile(rq, catalog, store, recipient_store)', 'box'),
-                              (X2, W2, 'adapters/ + main.py', '포트(ports.py) 구현과 조립', 'box'),
+                              (X2, W2, '구현 + main.py', 'catalog·stores·backend 와 조립', 'box'),
                               (X3, W3, 'PostgreSQL  ai_chat', 'docker compose · alembic 0001·0002 · 스키마 ai_profile', 'db')]:
     box(x, TOP, w, LH, cls_, 6)
     t(x + 12, TOP + 24, name, 'h'); t(x + 12, TOP + 42, sub, 'sub')
@@ -101,13 +101,13 @@ for y, cls_, head, subs in steps:
 # adapters lane
 ax, aw = X2 + 12, W2 - 24
 box(ax, TOP + 70, aw, 124, 'new')
-t(ax + 10, TOP + 90, 'DbProfileRunStore', 'h2'); t(ax + 10, TOP + 106, 'profile_run_store_db.py  «ProfileRunStore 구현»', 'sub')
+t(ax + 10, TOP + 90, 'DbProfileRunStore', 'h2'); t(ax + 10, TOP + 106, 'stores.py  «ProfileRunStore 구현»', 'sub')
 for i, s in enumerate(['save(outcome) INSERT…ON CONFLICT(rid,sv)', '  status·input_hash · attempt +1 (RUNNING)', '  callback_payload·hash = coalesce(새, 기존)',
                        '  callback_attempts = greatest · error', 'get(rid) → 최신 버전 1행 → ProfileOutcome']):
     t(ax + 10, TOP + 124 + i * 15, s, 'mono')
 box(ax, TOP + 205, aw, 46, 'old'); t(ax + 10, TOP + 224, 'FileCatalogReader  (그대로)', 'h2'); t(ax + 10, TOP + 241, 'active() → (고정 UUID …0001, 111건)', 'mono')
 box(ax, TOP + 330, aw, 102, 'new')
-t(ax + 10, TOP + 350, 'DbRecipientProfileStore', 'h2'); t(ax + 10, TOP + 366, 'recipient_profile_store_db.py', 'sub'); t(ax + 10, TOP + 380, '«RecipientProfileStore 구현»', 'sub')
+t(ax + 10, TOP + 350, 'DbRecipientProfileStore', 'h2'); t(ax + 10, TOP + 366, 'stores.py', 'sub'); t(ax + 10, TOP + 380, '«RecipientProfileStore 구현»', 'sub')
 for i, s in enumerate(['upsert(profile)  ON CONFLICT (rid) DO UPDATE', '  WHERE 기존.source_version <= 새 버전', 'get(rid) · delete(rid)']):
     t(ax + 10, TOP + 398 + i * 15, s, 'mono')
 box(ax, TOP + 480, aw, 46, 'old'); t(ax + 10, TOP + 499, 'HttpBackendPort  (그대로)', 'h2'); t(ax + 10, TOP + 516, 'POST 7.7 → 200/409/4xx/5xx → RunStatus', 'mono')

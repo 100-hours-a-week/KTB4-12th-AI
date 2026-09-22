@@ -33,8 +33,8 @@
 <text x="342" y="264" class="h">pipeline.py</text>
 <text x="342" y="282" class="sub">profile(rq, catalog, store, recipient_store)</text>
 <rect x="800" y="240" width="320" height="640" rx="6" class="box"/>
-<text x="812" y="264" class="h">adapters/ + main.py</text>
-<text x="812" y="282" class="sub">포트(ports.py) 구현과 조립</text>
+<text x="812" y="264" class="h">구현 + main.py</text>
+<text x="812" y="282" class="sub">catalog·stores·backend 와 조립</text>
 <rect x="1160" y="240" width="400" height="640" rx="6" class="db"/>
 <text x="1172" y="264" class="h">PostgreSQL  ai_chat</text>
 <text x="1172" y="282" class="sub">docker compose · alembic 0001·0002 · 스키마 ai_profile</text>
@@ -72,7 +72,7 @@
 <text x="352" y="667" class="mono">return outcome   →  transport가 RESULT_READY면 콜백</text>
 <rect x="812" y="310" width="296" height="124" rx="4" class="new"/>
 <text x="822" y="330" class="h2">DbProfileRunStore</text>
-<text x="822" y="346" class="sub">profile_run_store_db.py  «ProfileRunStore 구현»</text>
+<text x="822" y="346" class="sub">stores.py  «ProfileRunStore 구현»</text>
 <text x="822" y="364" class="mono">save(outcome) INSERT…ON CONFLICT(rid,sv)</text>
 <text x="822" y="379" class="mono">  status·input_hash · attempt +1 (RUNNING)</text>
 <text x="822" y="394" class="mono">  callback_payload·hash = coalesce(새, 기존)</text>
@@ -83,7 +83,7 @@
 <text x="822" y="481" class="mono">active() → (고정 UUID …0001, 111건)</text>
 <rect x="812" y="570" width="296" height="102" rx="4" class="new"/>
 <text x="822" y="590" class="h2">DbRecipientProfileStore</text>
-<text x="822" y="606" class="sub">recipient_profile_store_db.py</text>
+<text x="822" y="606" class="sub">stores.py</text>
 <text x="822" y="620" class="sub">«RecipientProfileStore 구현»</text>
 <text x="822" y="638" class="mono">upsert(profile)  ON CONFLICT (rid) DO UPDATE</text>
 <text x="822" y="653" class="mono">  WHERE 기존.source_version &lt;= 새 버전</text>

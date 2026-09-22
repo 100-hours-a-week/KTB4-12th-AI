@@ -16,13 +16,13 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 **Ports & Adapters(헥사고날).** 업무 코드는 바깥(HTTP·파일·DB)을 모르고, 바깥이 업무의 "포트(모양)"에 맞춰 들어온다. 의존 방향은 항상 안쪽.
 
 ```
-   Backend ──HTTP 7.6──▶ [intake.py] ──▶ [Supervisor 슬롯] ──▶ ┌─────────── 업무 (안쪽) ───────────┐
-                                                             │  pipeline.py  절차                │
-   파일    ◀── [FileCatalogReader]        ◀── CatalogReader ──┤  types.py     내부 자료형·프로필 행 │
-   DB      ◀── [DbProfileRunStore]        ◀── ProfileRunStore ┤  ports.py     바깥에 요구하는 모양  │
-   DB      ◀── [DbRecipientProfileStore]  ◀── RecipientProfileStore ─────────────────────────────┤
-   Backend ◀── [HttpBackendPort] 7.7      ◀── BackendPort ────────────────────────────────────────┤
-                                                             └───────────────────────────────────┘
+   Backend ──HTTP 7.6──▶ [intake.py] ──▶ [Supervisor 슬롯] ──▶      ┌───────────── 업무 (안쪽) ─────────────┐
+                                                                    │ pipeline.py  요청 한 건의 절차        │
+   파일    ◀── [FileCatalogReader]        ◀── CatalogReader ────────┤ types.py     내부 자료형 · 프로필 행  │
+   DB      ◀── [DbProfileRunStore]        ◀── ProfileRunStore ──────┤ ports.py     바깥에 요구하는 모양     │
+   DB      ◀── [DbRecipientProfileStore]  ◀── RecipientProfileStore ┤                                       │
+   Backend ◀── [HttpBackendPort] 7.7      ◀── BackendPort ──────────┤                                       │
+                                                                    └───────────────────────────────────────┘
    조립: main.py 한 곳에서만 구체 구현을 만들어 app.state에 둔다.   계약: schemas.py (camelCase, 문서 1 그대로)
    이름은 3단계 도표와 같다: Transport · Profile · ProfileRunStore · RecipientProfileStore · BackendPort · CatalogReader · Supervisor
 ```
@@ -181,7 +181,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | `integration/test_db_recipient_profiles.py` | 마이그레이션 결과 | 열 순서·PK 시퀀스 없음·유니크·CHECK·upsert 버전 규칙 | 5 |
 | `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체(STORE=db)** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED | 8 |
 | `integration/test_fetch_export_db.py` | `--compare-db` | 팀원 DDL로 `ai_search.products` 만들어 TEXT id·누락·이름 차이 보고 | 2 |
-| `test_backend_port_http.py::test_callback_path_matches_fake_backend` | 계약 문자열 | AI 송신 경로 == fake 수신 경로 | (포함) |
+| `test_backend.py::test_callback_path_matches_fake_backend` | 계약 문자열 | AI 송신 경로 == fake 수신 경로 | (포함) |
 
 가짜를 만드는 규칙: `ports.py`의 메서드 이름·시그니처만 맞추면 된다(`@runtime_checkable`이라 `isinstance`로 확인 가능). DB adapter는 같은 포트를 구현하므로 단위 테스트의 단언이 그대로 통과했다 — 바뀐 것은 조립(`main.py`)과 통합 테스트뿐.
 
@@ -191,12 +191,12 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
-| 1 | ~~DB adapter~~ **완료(09-22)** — `DbProfileRunStore`·`DbRecipientProfileStore`, [docs/DB_전환_설명.md](docs/DB_전환_설명.md). 남은 v1 조각: 접수 단계 중복 판정(`store.get()` — RUNNING이면 새 분석 없음·결과 있으면 재전송만) · `MemoryRecipientProfileStore` | `profile_intake.extract_and_pool` 앞부분 · `stores.py` | 어댑터·ports |
+| 1 | ~~DB adapter~~ **완료(09-22)** — `DbProfileRunStore`·`DbRecipientProfileStore`, [docs/DB_전환_설명.md](docs/DB_전환_설명.md). 남은 v1 조각: 접수 단계 중복 판정(`store.get()` — RUNNING이면 새 분석 없음·결과 있으면 재전송만) · `MemoryRecipientProfileStore` | `intake.extract_and_pool` 앞부분 · `stores.py` | 어댑터·ports |
 | 2 | 7.7 재시도(5xx 최대 3회)·409→SUPERSEDED·실행 기록 상태 갱신 | `HttpBackendPort.send_profile_callback` 안 · Transport가 `store.save(status)` | 포트 시그니처(이미 `RunStatus`) |
 | 3 | Catalog 빌드 CLI — 7.9 수신·검증·버전 저장·활성 포인터 | `catalog/` · fake 7.9는 이미 있음 | |
 | 4 | 팀원 Search 연동 | `pipeline.build_pool` 호출 한 줄 | 나머지 |
 | 5 | v3 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) | `pipeline.profile` 2)단계 · `model.py` | 접수·저장·콜백 |
-| 5′ | **v3 마이그레이션 0003** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/0003_*.py` (`add_column`) · `recipient_profile.py` 필드 · 통합 테스트 | 0001·0002 |
+| 5′ | **v3 마이그레이션 0003** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/0003_*.py` (`add_column`) · `types.RecipientProfile` 필드 · 통합 테스트 | 0001·0002 |
 | 6 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
 
 인터페이스 합의 항목(팀원과): Search 인자와 어휘, Catalog 담당(3단계 문서 vs 팀원 README), 비선호 상한 5의 7.6 반영, 7.7 태그 유무.

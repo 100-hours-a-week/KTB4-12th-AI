@@ -33,12 +33,9 @@ from profiling.types import (
 log = logging.getLogger(__name__)
 
 
-
 # ===========================================================================
 # ai_profile.profile_runs — 실행 기록
 # ===========================================================================
-
-log = logging.getLogger(__name__)
 
 RUNS_TABLE = "ai_profile.profile_runs"
 

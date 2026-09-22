@@ -238,7 +238,7 @@
 <text x="64" y="907" class="m">GET /health</text>
 <rect x="286" y="762" width="208" height="131" rx="3" fill="#fff" stroke="#bcc5cd" stroke-width="1.3"/>
 <text x="390.0" y="776" class="st" text-anchor="middle">«router»</text>
-<text x="390.0" y="791" class="cn" text-anchor="middle">profile_intake (Transport)</text>
+<text x="390.0" y="791" class="cn" text-anchor="middle">intake.py (Transport)</text>
 <line x1="286" y1="796" x2="494" y2="796" stroke="#bcc5cd"/>
 <text x="294" y="809" class="m">EXTRACT_AND_POOL_PATH</text>
 <line x1="286" y1="819" x2="494" y2="819" stroke="#bcc5cd"/>
