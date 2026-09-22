@@ -35,14 +35,13 @@ CALLBACK_PATH = "/api/internal/v1/recipients/{recipientUserId}/profile"
 # ---------------------------------------------------------------------------
 
 
-def to_callback(outcome: ProfileOutcome) -> ProfileCallbackRequest:
-    """ProfileOutcome → ProfileCallbackRequest. 태그는 넣지 않는다.
+def callback_body(outcome: ProfileOutcome) -> ProfileCallbackRequest:
+    """ProfileOutcome → 7.7 본문(ProfileCallbackRequest). 상태는 보지 않는다 — 검색 결과만 있으면 만든다.
 
-    RESULT_READY가 아니거나 검색 결과가 없으면 ValueError — 호출자(api.run_and_callback)가 이미 거르지만
-    여기서도 막아서 잘못된 본문이 나가지 않게 한다. recommendedProductIds는 SearchResult.product_ids 순서 그대로(= 순위).
+    to_callback(전송용)과 DbProfileRunStore(저장용: profile_runs.callback_payload)가 함께 쓴다. 저장 시점(RESULT_READY)과
+    전송 뒤 갱신 시점(DELIVERED 등) 모두 같은 본문이어야 재전송이 "같은 payload"가 된다(3단계 §16.4).
+    태그는 넣지 않는다(DR-035). recommendedProductIds는 SearchResult.product_ids 순서 그대로(= 순위).
     """
-    if outcome.status != RunStatus.RESULT_READY:
-        raise ValueError(f"콜백은 RESULT_READY만 보낸다: status={outcome.status}")
     if outcome.search is None:
         raise ValueError("콜백에 보낼 검색 결과(search)가 없다")
     return ProfileCallbackRequest(
@@ -50,6 +49,13 @@ def to_callback(outcome: ProfileOutcome) -> ProfileCallbackRequest:
         sourceVersion=outcome.source_version,
         recommendedProductIds=list(outcome.search.product_ids[:30]),
     )
+
+
+def to_callback(outcome: ProfileOutcome) -> ProfileCallbackRequest:
+    """전송용 — RESULT_READY만 허용. 호출자(run_and_callback)가 이미 거르지만 여기서도 막아서 잘못된 본문이 나가지 않게 한다."""
+    if outcome.status != RunStatus.RESULT_READY:
+        raise ValueError(f"콜백은 RESULT_READY만 보낸다: status={outcome.status}")
+    return callback_body(outcome)
 
 
 def _status_from_response(status_code: int) -> RunStatus:

@@ -3,8 +3,15 @@
 실행:  uv run uvicorn profiling.main:app --port 8000 --reload
 확인:  curl localhost:8000/health
 
-여기서만 adapters의 구체 클래스를 import한다. 라우터(api/)와 업무(profile/)는 app.state에 든 객체를 ports의 모양으로만 쓴다.
-내일 DB로 바꿀 때는 lifespan의 세 줄(FileCatalogReader·MemoryProfileRunStore·HttpBackendPort)만 바뀐다.
+여기서만 adapters의 구체 클래스를 import한다. 라우터(transport/)와 업무(profile/)는 app.state에 든 객체를 ports의 모양으로만 쓴다.
+
+app.state에 두는 것 (lifespan에서 1회 생성):
+  catalog          CatalogReader        FileCatalogReader (팀원 카탈로그 DB 전까지 파일)
+  store            ProfileRunStore      STORE=db → DbProfileRunStore(profile_runs) · memory → MemoryProfileRunStore
+  recipient_store  RecipientProfileStore  STORE=db → DbRecipientProfileStore(recipient_profiles) · memory → None(저장 안 함)
+  backend          BackendPort          HttpBackendPort
+  supervisor       Supervisor
+  engine           sqlalchemy Engine    STORE=db 일 때만. 종료 시 dispose
 """
 
 from __future__ import annotations
@@ -13,6 +20,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import sqlalchemy as sa
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -20,8 +28,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from profiling.adapters.backend_port_http import HttpBackendPort
 from profiling.adapters.catalog_reader_file import FileCatalogReader
+from profiling.adapters.profile_run_store_db import DbProfileRunStore
 from profiling.adapters.profile_run_store_memory import MemoryProfileRunStore
-from profiling.config.settings import get_settings
+from profiling.adapters.recipient_profile_store_db import DbRecipientProfileStore
+from profiling.config.settings import Settings, get_settings
 from profiling.profile.ports import NoActiveCatalog
 from profiling.runtime.supervisor import Supervisor
 from profiling.transport import profile_intake
@@ -50,17 +60,51 @@ async def lifespan(app: FastAPI):
         log.error("활성 카탈로그 없음: %s — 7.6은 503을 반환합니다", e)
         app.state.catalog = _NoCatalog(str(e))
 
-    app.state.store = MemoryProfileRunStore()
+    # 저장소 — 기본은 DB. 연결이 안 되면 여기서 앱이 죽는다(조용히 메모리로 내려가면 콜백은 나가는데 기록이 없는 상태가 되므로).
+    app.state.engine = None
+    if settings.STORE == "db":
+        app.state.engine = _connect_db(settings)
+        app.state.store = DbProfileRunStore(app.state.engine)
+        app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
+    else:
+        log.warning("STORE=memory — 실행 기록은 프로세스 메모리, 수신자 프로필은 저장하지 않음 (시험용)")
+        app.state.store = MemoryProfileRunStore()
+        app.state.recipient_store = None
+
     app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS)   # 3단계 §12.1 시작값 1
     app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S)
-    log.info("profiling 시작 backend=%s pool_size=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE)
+    log.info("profiling 시작 backend=%s pool_size=%s store=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE, settings.STORE)
 
     yield
 
-    # 종료 — HttpBackendPort가 httpx.Client를 들고 있으면 닫는다. 없어도 조용히 넘어간다.
+    # 종료 — HttpBackendPort가 httpx.Client를 들고 있으면 닫는다. 없어도 조용히 넘어간다. DB 커넥션 풀도 정리.
     close = getattr(app.state.backend, "close", None)
     if callable(close):
         close()
+    if app.state.engine is not None:
+        app.state.engine.dispose()
+
+
+def _connect_db(settings: Settings) -> sa.Engine:
+    """Engine 생성 + 연결 확인 + 마이그레이션 버전 확인. 실패하면 RuntimeError로 앱 시작을 막는다.
+
+    pool_pre_ping: 풀에서 꺼낸 커넥션이 죽어 있으면(DB 재시작) 버리고 새로 연다 — 백그라운드 작업이 오래 뒤에 실행되므로 필요.
+    """
+    engine = sa.create_engine(settings.DATABASE_URL, pool_pre_ping=True, future=True)
+    try:
+        with engine.connect() as conn:
+            version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
+    except sa.exc.OperationalError as e:
+        engine.dispose()
+        raise RuntimeError(
+            f"DB 연결 실패 ({settings.DATABASE_URL.split('@')[-1]}): {e.orig if hasattr(e, 'orig') else e}\n"
+            "  → docker compose up -d && uv run alembic upgrade head   (또는 DB 없이 띄우려면 PROFILING_STORE=memory)"
+        ) from e
+    except sa.exc.ProgrammingError as e:    # alembic_version 테이블 없음 = 마이그레이션 안 됨
+        engine.dispose()
+        raise RuntimeError("DB는 있으나 마이그레이션이 적용되지 않음 → uv run alembic upgrade head") from e
+    log.info("DB 연결 %s migration=%s", settings.DATABASE_URL.split("@")[-1], version)
+    return engine
 
 
 class _NoCatalog:
@@ -123,4 +167,17 @@ def health(request: Request) -> dict:
         catalog = {"active": True, "version": str(version_id), "products": len(products)}
     except NoActiveCatalog as e:
         catalog = {"active": False, "reason": str(e)}
-    return {"status": "ok", "catalog": catalog, "supervisor": request.app.state.supervisor.stats()}
+    return {"status": "ok", "catalog": catalog, "store": _store_health(request), "supervisor": request.app.state.supervisor.stats()}
+
+
+def _store_health(request: Request) -> dict:
+    """저장소 상태 — db면 지금 연결되는지와 마이그레이션 버전까지. 확인 자체가 실패해도 /health는 200(프로세스는 살아 있으므로)."""
+    engine = request.app.state.engine
+    if engine is None:
+        return {"backend": "memory", "connected": True}
+    try:
+        with engine.connect() as conn:
+            version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
+        return {"backend": "db", "connected": True, "migration": version}
+    except sa.exc.SQLAlchemyError as e:      # 연결 끊김·테이블 없음 등 DB 쪽 오류만 — 그 외는 500으로 드러나야 한다
+        return {"backend": "db", "connected": False, "reason": type(e).__name__}

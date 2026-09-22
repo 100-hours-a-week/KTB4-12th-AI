@@ -26,6 +26,7 @@ from profiling.profile.ports import (
     CatalogReader,
     NoActiveCatalog,
     ProfileRunStore,
+    RecipientProfileStore,
 )
 from profiling.profile.types import ProfileRequest, RunStatus
 from profiling.runtime.supervisor import Supervisor
@@ -55,6 +56,10 @@ def get_catalog(request: Request) -> CatalogReader:
 
 def get_store(request: Request) -> ProfileRunStore:
     return request.app.state.store
+
+
+def get_recipient_store(request: Request) -> RecipientProfileStore | None:
+    return request.app.state.recipient_store          # STORE=memory 면 None → 프로필 저장 생략
 
 
 def get_backend(request: Request) -> BackendPort:
@@ -92,18 +97,21 @@ def require_service_token(
 # ---------------------------------------------------------------------------
 
 
-def run_and_callback(rq: ProfileRequest, catalog: CatalogReader, store: ProfileRunStore, backend: BackendPort, pool_size: int = 30) -> None:
-    """pipeline.profile() → 결과가 RESULT_READY일 때만 7.7 콜백.
+def run_and_callback(
+    rq: ProfileRequest, catalog: CatalogReader, store: ProfileRunStore, backend: BackendPort,
+    pool_size: int = 30, recipient_store: RecipientProfileStore | None = None,
+) -> None:
+    """pipeline.profile() → 결과가 RESULT_READY일 때만 7.7 콜백 → 콜백 결과를 실행 기록에 저장.
 
     - 여기서 나는 예외는 응답과 무관하므로(이미 202를 보냈다) 로그로만 남긴다. 죽은 백그라운드 작업은 조용히 사라지기 때문에
       반드시 잡아서 기록해야 한다.
-    - FAILED는 콜백하지 않는다. Backend는 콜백이 오지 않으면 다음 디바인스 주기에 다시 7.6을 호출한다.
-    - 콜백 결과는 RunStatus로 돌아온다(DELIVERED·SUPERSEDED·FAILED·RESULT_READY). 오늘은 로그만 남기고, 실행 기록 상태 갱신·재시도는 #23
-      (DB adapter가 생기면 store.save(outcome.model_copy(update={"status": result}))로 이어진다).
+    - FAILED는 콜백하지 않는다. Backend는 콜백이 오지 않으면 다음 디바운스 주기에 다시 7.6을 호출한다.
+    - 콜백 결과(RunStatus: DELIVERED·SUPERSEDED·FAILED·RESULT_READY)를 같은 행에 저장한다 — profile_runs.status·callback_attempts.
+      RESULT_READY(5xx·네트워크)면 행은 "결과 있음·미전달"로 남아 재전송 대상이 된다. 재시도·백오프 자체는 #23.
     """
     rid = rq.recipient_user_id
     try:
-        outcome = pipeline.profile(rq, catalog=catalog, store=store, pool_size=pool_size)
+        outcome = pipeline.profile(rq, catalog=catalog, store=store, recipient_store=recipient_store, pool_size=pool_size)
     except Exception:  # 백그라운드에서는 무엇이든 잡아 기록한다
         log.exception("profile 실패 recipient=%s source_version=%s", rid, rq.source_version)
         return
@@ -114,6 +122,10 @@ def run_and_callback(rq: ProfileRequest, catalog: CatalogReader, store: ProfileR
 
     result = backend.send_profile_callback(outcome)
     log.info("7.7 콜백 결과 recipient=%s source_version=%s → %s", rid, rq.source_version, result)
+    try:
+        store.save(outcome.model_copy(update={"status": result, "callback_attempts": outcome.callback_attempts + 1}))
+    except Exception:
+        log.exception("7.7 콜백 결과 저장 실패 recipient=%s source_version=%s (콜백은 %s)", rid, rq.source_version, result)
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +145,7 @@ async def extract_and_pool(
     bg: BackgroundTasks,
     catalog: Annotated[CatalogReader, Depends(get_catalog)],
     store: Annotated[ProfileRunStore, Depends(get_store)],
+    recipient_store: Annotated[RecipientProfileStore | None, Depends(get_recipient_store)],
     backend: Annotated[BackendPort, Depends(get_backend)],
     supervisor: Annotated[Supervisor, Depends(get_supervisor)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -145,7 +158,8 @@ async def extract_and_pool(
       3) 활성 카탈로그 — 없으면 지금 503. 백그라운드에서 발견하면 Backend는 영영 모르기 때문에 접수 단계에서 걸러야 한다
       4) Supervisor에 제출 — 응답 뒤 슬롯 안에서 백그라운드 실행
       5) 202 — 요청 값 그대로 + PENDING
-    같은 수신자의 중복 접수: 오늘은 그대로 다시 돌린다(마지막 결과가 덮어씀). "진행 중이면 새 분석 없음"은 실행 기록(DB)이 생긴 뒤.
+    같은 (수신자, 버전)의 중복 접수: 지금은 다시 돌린다(실행 기록의 attempt+1, 결과 덮어씀). "RUNNING이면 새 분석 없음 · 결과 있으면
+    재전송만"(3단계 §10.2)은 접수 단계에서 store.get()으로 판정하는 다음 작업(#23).
     """
     try:
         catalog.active()
@@ -153,7 +167,7 @@ async def extract_and_pool(
         raise _error(503, "SERVICE_UNAVAILABLE", "활성 카탈로그가 없습니다.") from e
 
     rq = pipeline.to_internal(body)
-    supervisor.submit(bg, run_and_callback, rq, catalog, store, backend, settings.POOL_SIZE)   # 슬롯 안에서 실행 (Supervisor)
+    supervisor.submit(bg, run_and_callback, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store)   # 슬롯 안에서 실행 (Supervisor)
     log.info("7.6 접수 recipient=%s source_version=%s disliked=%d reviews=%d pref=%s",
              body.recipientUserId, body.sourceVersion, len(body.dislikedCategories), len(body.reviews), body.giftPreference is not None)
 

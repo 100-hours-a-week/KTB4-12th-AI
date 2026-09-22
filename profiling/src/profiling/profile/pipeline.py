@@ -7,21 +7,30 @@ v1(지금): 취향 문장 None · 리뷰 [] → 추출·검증을 건너뛰고, 
 v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.analyze()(모델) → 검증기 → Search 호출이 들어온다. 나머지 흐름은 그대로.
 
 흐름 (한 건):
-  api.run_and_callback ──▶ profile(rq, catalog=, store=)
+  api.run_and_callback ──▶ profile(rq, catalog=, store=, recipient_store=)
+                            0) store.save(RUNNING)         실행 기록 시작 — profile_runs 한 행 (input_hash 포함). 저장 못 하면 FAILED·콜백 없음
                             1) catalog.active()            활성 카탈로그 (없으면 NoActiveCatalog — api가 접수 단계에서 이미 걸렀지만 여기서도 FAILED로 기록)
                             2) validation 만들기           v1: 비선호 이름만 disliked_tags에, 나머지 빈 값
                             3) build_pool()                비선호 제외 · 판매중 · 조회수순 pool_size개  (결정 a)
                             4) ProfileOutcome(RESULT_READY)
-                            5) store.save(outcome)         같은 수신자면 덮어씀
+                            5) store.save(outcome)         실행 기록 갱신 — callback_payload·hash가 여기서 DB에 먼저 커밋된다 (§16.4)
+                            6) recipient_store.upsert()    수신자 프로필 (recipient_profiles) — 낮은 버전이면 DB가 무시
                           ◀── outcome  (RESULT_READY면 api가 7.7 콜백, FAILED면 침묵)
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from uuid import UUID
 
-from profiling.profile.ports import CatalogReader, NoActiveCatalog, ProfileRunStore
+from profiling.profile.ports import (
+    CatalogReader,
+    NoActiveCatalog,
+    ProfileRunStore,
+    RecipientProfileStore,
+)
+from profiling.profile.recipient_profile import from_outcome
 from profiling.profile.types import (
     DislikedCategory,
     ProfileOutcome,
@@ -54,6 +63,15 @@ def to_internal(body: ProfileExtractRequest) -> ProfileRequest:
         disliked_categories=[DislikedCategory(category_id=c.categoryId, category_name=c.categoryName) for c in body.dislikedCategories],
         reviews=[Review(product_id=r.productId, rating=r.rating, review_text=r.reviewText) for r in body.reviews],
     )
+
+
+def input_hash(rq: ProfileRequest) -> str:
+    """요청을 정규화해 sha256 — 실행 기록(profile_runs.input_hash)에 저장. 같은 (수신자, 버전)에 다른 입력이 오면 값이 달라진다(3단계 §10.2).
+
+    정규화: 비선호 카테고리는 ID 순으로 정렬(Backend가 보내는 순서에 의존하지 않게). 리뷰는 받은 순서 그대로(최신순이 의미 있음).
+    """
+    canon = rq.model_copy(update={"disliked_categories": sorted(rq.disliked_categories, key=lambda c: c.category_id)})
+    return hashlib.sha256(canon.model_dump_json().encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -100,13 +118,26 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
 # ---------------------------------------------------------------------------
 
 
-def profile(rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStore, pool_size: int = 30) -> ProfileOutcome:
+def profile(
+    rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStore,
+    recipient_store: RecipientProfileStore | None = None, pool_size: int = 30,
+) -> ProfileOutcome:
     """7.6 요청 한 건 → ProfileOutcome (저장까지). 예외를 밖으로 내지 않고 FAILED로 돌려준다.
 
     반환의 status가 RESULT_READY면 호출자(api.run_and_callback)가 7.7 콜백을 보내고, FAILED면 보내지 않는다(문서 1: AI는 침묵).
-    catalog·store는 ports 모양이면 무엇이든 된다(파일/메모리 → 내일 DB → 테스트 가짜).
+    catalog·store·recipient_store는 ports 모양이면 무엇이든 된다(파일/DB → 테스트 가짜). recipient_store가 None이면(메모리 모드)
+    수신자 프로필 저장을 건너뛴다.
     """
     rid, sv = rq.recipient_user_id, rq.source_version
+    h = input_hash(rq)
+
+    # 0) 실행 기록 시작 — RUNNING 한 행. 여기서 실패하면(DB 없음) 아무것도 하지 않고 FAILED: 기록 없는 결과를 Backend에 보내지 않는다
+    try:
+        store.save(ProfileOutcome(recipient_user_id=rid, source_version=sv, status=RunStatus.RUNNING, input_hash=h,
+                                  validator_version=VALIDATOR_VERSION_V1))
+    except Exception as e:
+        log.exception("profile recipient=%s source_version=%s 실행 기록(RUNNING) 저장 실패", rid, sv)
+        return _fail(rq, store, f"저장 실패: {type(e).__name__}: {e}", save=False)
 
     # 1) 활성 카탈로그 — 한 요청 안에서 한 번만 잡아 끝까지 같은 버전을 쓴다 (4단계 snapshot 원칙)
     try:
@@ -131,7 +162,7 @@ def profile(rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStor
 
         # 4) 결과
         outcome = ProfileOutcome(
-            recipient_user_id=rid, source_version=sv, status=RunStatus.RESULT_READY,
+            recipient_user_id=rid, source_version=sv, status=RunStatus.RESULT_READY, input_hash=h,
             validation=validation, search=search,
             prompt_version=None, validator_version=VALIDATOR_VERSION_V1,
         )
@@ -139,12 +170,21 @@ def profile(rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStor
         log.exception("profile recipient=%s source_version=%s 실패", rid, sv)
         return _fail(rq, store, f"{type(e).__name__}: {e}")
 
-    # 5) 저장 — 같은 수신자면 덮어씀. 저장 실패는 결과를 FAILED로 (콜백을 보냈는데 우리 쪽에 기록이 없는 상태를 만들지 않기 위해)
+    # 5) 실행 기록 갱신 — RESULT_READY + 콜백 본문. 저장 실패는 결과를 FAILED로 (콜백을 보냈는데 우리 쪽에 기록이 없는 상태를 만들지 않기 위해)
     try:
         store.save(outcome)
     except Exception as e:
         log.exception("profile recipient=%s 저장 실패", rid)
         return _fail(rq, store, f"저장 실패: {type(e).__name__}: {e}", save=False)
+
+    # 6) 수신자 프로필 — 한 사람당 한 행. 낮은 버전이 늦게 오면 DB가 무시한다(should_replace와 같은 규칙을 SQL로).
+    #    실패하면 FAILED로 되돌린다: 콜백은 나갔는데 Chat이 읽을 프로필이 없는 상태를 만들지 않기 위해.
+    if recipient_store is not None:
+        try:
+            recipient_store.upsert(from_outcome(rq, outcome))
+        except Exception as e:
+            log.exception("profile recipient=%s 수신자 프로필 저장 실패", rid)
+            return _fail(rq, store, f"프로필 저장 실패: {type(e).__name__}: {e}")
 
     log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d catalog_version=%s rule=%s",
              rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), catalog_version_id, POOL_RULE_V1)
@@ -153,8 +193,8 @@ def profile(rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStor
 
 def _fail(rq: ProfileRequest, store: ProfileRunStore, reason: str, *, save: bool = True) -> ProfileOutcome:
     """FAILED 결과를 만들고(가능하면) 저장한다. 콜백은 보내지 않는다."""
-    outcome = ProfileOutcome(recipient_user_id=rq.recipient_user_id, source_version=rq.source_version,
-                             status=RunStatus.FAILED, failure_reason=reason, validator_version=VALIDATOR_VERSION_V1)
+    outcome = ProfileOutcome(recipient_user_id=rq.recipient_user_id, source_version=rq.source_version, status=RunStatus.FAILED,
+                             input_hash=input_hash(rq), failure_reason=reason, validator_version=VALIDATOR_VERSION_V1)
     if save:
         try:
             store.save(outcome)

@@ -91,18 +91,18 @@ def test_pool_excludes_disliked_and_unavailable_keeps_order() -> None:
 def test_pool_sorted_by_view_count_desc_then_product_id() -> None:
     products = [_product(1, 100, "뷰티", views=5), _product(2, 100, "뷰티", views=50), _product(3, 100, "뷰티", views=50),
                 _product(4, 200, "주방", views=999), _product(5, 100, "뷰티", views=7, available=False)]
-    res = pipeline.build_pool(_rq(disliked=[(200, "주방")]), products, 30, 7)
+    res = pipeline.build_pool(_rq(disliked=[(200, "주방")]), products, 30, CV)
     assert res.product_ids == [2, 3, 1]                                        # 50, 50(동점 → id 순), 5 · 주방(999)은 제외 · 판매불가 제외
 
 
 def test_pool_matches_by_name_when_id_differs() -> None:
     rq = _rq(disliked=[(999, "완구")])                                         # ID 체계가 달라도 이름으로 걸러짐
-    res = pipeline.build_pool(rq, PRODUCTS, 30, 7)
+    res = pipeline.build_pool(rq, PRODUCTS, 30, CV)
     assert all(p.categoryName != "완구" for p in PRODUCTS if p.productId in res.product_ids)
 
 
 def test_pool_size_cap() -> None:
-    assert len(pipeline.build_pool(_rq(), PRODUCTS, 5, 7).product_ids) == 5
+    assert len(pipeline.build_pool(_rq(), PRODUCTS, 5, CV).product_ids) == 5
 
 
 # ---------------------------------------------------------------- profile()

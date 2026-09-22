@@ -186,13 +186,19 @@ class RunStatus(StrEnum):
 
 
 class ProfileOutcome(BaseModel):
-    """`profile()` 한 건의 결과 — 저장·콜백의 입력."""
+    """`profile()` 한 건의 결과 — 저장·콜백의 입력. 실행 기록(ai_profile.profile_runs) 한 행과 1:1.
+
+    status가 바뀔 때마다 같은 객체를 model_copy(update=…)로 복사해 store.save()에 넘긴다:
+      RUNNING(접수) → RESULT_READY(결과) → DELIVERED | SUPERSEDED | FAILED(콜백 뒤)  — 3단계 구현 상세 §10.2
+    """
 
     recipient_user_id: int
     source_version: int
     status: RunStatus
+    input_hash: str | None = None       # 정규화한 7.6 본문 해시 (pipeline.input_hash). DB 저장 시 필수 — 같은 키·다른 입력 감지용
     validation: ValidationResult | None = None
     search: SearchResult | None = None
     failure_reason: str | None = None
+    callback_attempts: int = 0          # 7.7 시도 횟수. run_and_callback이 콜백 뒤 +1 해서 저장
     prompt_version: str | None = None
     validator_version: str | None = None

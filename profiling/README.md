@@ -157,11 +157,12 @@ curl -s localhost:8081/received | python3 -m json.tool | head -30
 
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
-| 1 | DB adapter — pgvector/pg16 컨테이너 · Alembic · `catalog_versions`·`products`·`profile_runs`·`recipient_profiles` | `adapters/db.py` 신설 · `main.lifespan` 세 줄 · 통합 테스트 | pipeline · api · ports · 단위 테스트 단언 |
+| 1 | DB adapter — 테이블은 있음(0001 `recipient_profiles` · 0002 `profile_runs`). 남은 것: `adapters/profile_run_store_db.py`(`ProfileRunStore`) → `adapters/recipient_profile_store_db.py`(`RecipientProfileStore`, `pipeline.profile()` 연결 포함) | 두 어댑터 신설 · `main.lifespan` 조립 · 통합 테스트 | pipeline 규칙 · api · ports · 단위 테스트 단언 |
 | 2 | 7.7 재시도(5xx 최대 3회)·409→SUPERSEDED·실행 기록 상태 갱신 | `HttpBackendPort.send_profile_callback` 안 · Transport가 `store.save(status)` | 포트 시그니처(이미 `RunStatus`) |
 | 3 | Catalog 빌드 CLI — 7.9 수신·검증·버전 저장·활성 포인터 | `catalog/` · fake 7.9는 이미 있음 | |
 | 4 | 팀원 Search 연동 | `pipeline.build_pool` 호출 한 줄 | 나머지 |
 | 5 | v3 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) | `pipeline.profile` 2)단계 · `adapters/model_*.py` | 접수·저장·콜백 |
+| 5′ | **v3 마이그레이션 0003** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/0003_*.py` (`add_column`) · `recipient_profile.py` 필드 · 통합 테스트 | 0001·0002 |
 | 6 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
 
 인터페이스 합의 항목(팀원과): Search 인자와 어휘, Catalog 담당(3단계 문서 vs 팀원 README), 비선호 상한 5의 7.6 반영, 7.7 태그 유무.
