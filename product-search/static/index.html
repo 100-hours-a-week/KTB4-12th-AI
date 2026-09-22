@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f6f8fb">
+  <title>상품 검색 · 선잘알</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23007e73'/%3E%3Cpath d='M8 14h16v12H8zm-2-5h20v6H6zm10 0v17' fill='none' stroke='white' stroke-width='2'/%3E%3Cpath d='M16 9C6 10 9 0 16 9c7-9 10 1 0 0' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/__ASSET_VERSION__/app.css">
+  <script type="module" src="/assets/__ASSET_VERSION__/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="선잘알 상품 검색 홈"><span class="brand-mark" aria-hidden="true">s.</span><strong>선잘알</strong><span class="brand-divider"></span><span>상품 검색</span></a>
+    <div class="topbar-end"><span class="catalog-status"><i></i><span id="catalog-count">카탈로그 준비 중</span></span><button class="quiet" id="about-button" title="검색 정보">검색 정보 <span class="small-arrow">↗</span></button></div>
+  </header>
+  <div class="search-band">
+    <form id="search-form" role="search" autocomplete="off">
+      <span class="search-symbol" aria-hidden="true"></span>
+      <input id="query" name="query" type="search" placeholder="상품명, 브랜드, 원하는 특징을 검색하세요" aria-label="상품 검색어" maxlength="500" autofocus>
+      <kbd class="search-shortcut">/</kbd><button class="primary search-submit" type="submit">검색</button>
+    </form>
+    <div class="suggestions" aria-label="검색 예시"><button data-query="텀블러">텀블러</button><button data-query="커피 도구">커피 도구</button><button data-query="무선 이어폰">무선 이어폰</button><button data-query="집들이 선물">집들이 선물</button><button data-query="휴대하기 좋은 스피커">휴대하기 좋은 스피커</button></div>
+  </div>
+  <div class="workspace">
+    <aside class="filters" id="filters-panel" aria-label="검색 필터">
+      <div class="filter-heading"><h2>필터 <span id="filter-count" class="count-pill" hidden>0</span></h2><button class="text-button" id="reset-filters">초기화</button><button class="icon-button mobile-only" id="close-filters" aria-label="필터 닫기">✕</button></div>
+      <div class="filter-scroll">
+        <section class="filter-section"><h3>가격</h3><div class="price-range"><label><span class="sr-only">최소 가격</span><input id="min-price" type="number" min="0" step="1000" placeholder="최소" inputmode="numeric"></label><span>–</span><label><span class="sr-only">최대 가격</span><input id="max-price" type="number" min="0" step="1000" placeholder="최대" inputmode="numeric"></label><span>원</span></div><div class="price-presets"><button data-price="30000">3만원 이하</button><button data-price="50000">5만원 이하</button><button data-price="100000">10만원 이하</button></div></section>
+        <section class="filter-section"><h3>카테고리</h3><div id="categories" class="categories"><div class="loading-line"></div></div></section>
+        <section class="filter-section"><h3><label for="brand-input">브랜드</label></h3><div class="add-field"><input id="brand-input" list="brands-list" placeholder="브랜드 검색" autocomplete="off"><button id="add-brand" aria-label="브랜드 적용">+</button></div><datalist id="brands-list"></datalist><div id="brand-chips" class="filter-chips"></div></section>
+        <section class="filter-section"><h3>상품 유형</h3><div class="type-options"><label><input type="checkbox" value="Shipping" name="product-type">배송 상품</label><label><input type="checkbox" value="Voucher" name="product-type">상품권·이용권</label><label><input type="checkbox" value="Pickup" name="product-type">픽업</label></div></section>
+        <details class="advanced filter-section"><summary>제외·선호 조건 <span>+</span></summary><div class="advanced-content">
+          <label class="field-label" for="exclude-category">제외 카테고리</label><select id="exclude-category"><option value="">선택해서 추가</option></select><div class="filter-chips" id="exclude-category-chips"></div>
+          <label class="field-label" for="exclude-brand">제외 브랜드</label><div class="add-field"><input id="exclude-brand" list="brands-list" placeholder="브랜드 검색"><button id="add-exclude-brand" aria-label="제외 브랜드 적용">+</button></div><div class="filter-chips" id="exclude-brand-chips"></div>
+          <label class="field-label" for="exclude-products">제외 상품 ID</label><textarea id="exclude-products" rows="2" placeholder="쉼표나 줄바꿈으로 구분"></textarea>
+          <label class="field-label" for="prefer-category">선호 카테고리 · 가점</label><select id="prefer-category"><option value="">선택해서 추가</option></select><div class="filter-chips" id="prefer-category-chips"></div>
+          <label class="field-label" for="downrank-category">비선호 카테고리 · 감점</label><select id="downrank-category"><option value="">선택해서 추가</option></select><div class="filter-chips" id="downrank-category-chips"></div>
+          <label class="field-label" for="availability">판매 상태</label><select id="availability"><option value="any">전체 상태</option><option value="unknown">미확인</option><option value="available">판매 가능</option><option value="unavailable">판매 불가</option></select><p class="field-help">현재 카탈로그의 판매 상태는 미확인입니다.</p>
+        </div></details>
+        <p class="catalog-note">수집 당시 가격 기준<br>현재 가격·판매 상태는 상품 페이지에서 확인하세요.</p>
+      </div>
+    </aside>
+    <main id="main-content">
+      <div class="results-toolbar">
+        <div class="results-title"><button class="filter-toggle" id="open-filters">필터 <span id="mobile-filter-count"></span></button><h1 id="result-title">전체 상품</h1><span id="result-count" class="result-count"></span><span id="busy-indicator" class="busy-indicator" hidden><i></i>검색 중</span></div>
+        <div class="results-controls"><div class="segmented" role="group" aria-label="검색 방식"><button data-mode="hybrid" class="active" aria-pressed="true">통합</button><button data-mode="lexical" aria-pressed="false">키워드</button><button data-mode="dense" aria-pressed="false">의미</button></div><div class="view-toggle" role="group" aria-label="상품 보기 방식"><button id="grid-view" class="active" aria-label="그리드 보기" aria-pressed="true">▦</button><button id="list-view" aria-label="목록 보기" aria-pressed="false">☷</button></div></div>
+      </div>
+      <div class="result-meta"><div id="active-filters" class="active-filters"></div><div class="meta-actions"><span id="timing" class="timing"></span><button id="missing-button" class="text-button" disabled>누락 제보</button><button id="share-button" class="text-button" disabled>공유</button><button id="export-button" class="text-button" disabled>기록 ↓</button></div></div>
+      <div id="error" class="error-banner" role="alert" hidden></div>
+      <div id="results" class="product-grid" aria-label="상품 검색 결과" aria-busy="true"></div>
+      <div id="empty-state" class="empty-state" hidden><span class="empty-symbol">⌕</span><h2>조건에 맞는 상품이 없어요</h2><p>검색어를 바꾸거나 적용한 필터를 줄여 보세요.</p><button class="secondary" id="empty-reset">필터 초기화</button></div>
+      <div class="load-more-wrap"><button class="secondary" id="load-more" hidden>상품 더 보기 <span>↓</span></button></div>
+      <footer class="results-footer"><span id="footer-count"></span><span id="snapshot"></span></footer>
+    </main>
+  </div>
+  <div class="filter-scrim" id="filter-scrim" hidden></div>
+  <dialog id="detail-dialog" class="detail-dialog"><div class="detail-heading"><span>상품 상세</span><div><button id="detail-exclude" class="text-button">검색에서 제외</button><button id="close-detail" class="icon-button" aria-label="상품 상세 닫기">✕</button></div></div><div id="detail-body" class="detail-body"></div></dialog>
+  <dialog id="note-dialog" class="note-dialog"><form id="note-form"><div class="dialog-heading"><h2 id="note-title">누락된 상품 제보</h2><button type="button" class="icon-button" id="close-note" aria-label="제보 창 닫기">✕</button></div><p id="note-description">나와야 하는 상품명이나 검색 결과에 대한 의견을 남겨 주세요.</p><textarea id="note-text" rows="5" maxlength="1200" placeholder="상품명, 기대한 결과, 발견한 문제" required></textarea><div class="dialog-actions"><button type="button" class="secondary" id="cancel-note">취소</button><button class="primary" type="submit">의견 저장</button></div></form></dialog>
+  <dialog id="about-dialog" class="note-dialog"><div class="dialog-heading"><h2>검색 정보</h2><button class="icon-button" id="close-about" aria-label="검색 정보 닫기">✕</button></div><div id="about-body"></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="live-status" class="sr-only" role="status" aria-live="polite"></div>
+</body>
+</html>

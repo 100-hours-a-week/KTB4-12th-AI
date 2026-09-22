@@ -1,0 +1,12 @@
+{
+  "name": "product-search-embedding",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "onnxruntime-node": "1.29.0",
+    "@huggingface/transformers": "3.8.1"
+  },
+  "overrides": {
+    "onnxruntime-node": "1.29.0"
+  }
+}
