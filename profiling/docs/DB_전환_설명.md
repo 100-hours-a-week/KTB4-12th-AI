@@ -3,6 +3,8 @@
 ![DB 전환 개요](assets/db-transition.png)
 
 > 그림 원본: `assets/build_db_transition.py` → `db-transition.svg` (PNG는 Chrome 헤드리스). 코드가 바뀌면 스크립트를 고치고 다시 만든다.
+>
+> **2026-09-23 갱신** — 이 문서가 설명하는 "전환"이 끝나, 메모리 구현(`MemoryProfileRunStore`·`MemoryRecipientProfileStore`)과 `PROFILING_STORE` 설정을 **지웠다**. 저장소는 PostgreSQL 하나뿐이고 DB 없이 앱을 띄우는 모드는 없다. 아래에서 "메모리"는 전환 이전(09-21)의 모습을 가리키는 설명이다.
 
 ## 1. 한 줄 요약
 
@@ -56,8 +58,9 @@ AI는 어떤 경우에도 실패를 7.6·7.7로 알리지 않는다(Backend가 P
 |---|---|
 | `stores.py` | `DbProfileRunStore(engine)` — `ports.ProfileRunStore` 구현. `save()`는 상태에 관계없이 UPSERT 한 문장, `get()`은 그 수신자의 최신 버전 1행 → `ProfileOutcome`. `payload_hash()`, `delete_recipient()`(시험·삭제 요청용) |
 | `stores.py` | `DbRecipientProfileStore(engine)` — `ports.RecipientProfileStore` 구현. `upsert()`(버전 가드, 무시되면 warning 로그) · `get()` · `delete()` |
-| `tests/integration/test_db_stores.py` | 두 어댑터 + `pipeline.profile()` → 두 테이블 + 앱 전체(STORE=db, 7.6 → DB에 DELIVERED). 13개 |
-| `tests/unit/conftest.py` | 단위 테스트는 `PROFILING_STORE=memory` — DB 없이 돈다 |
+| `tests/integration/test_db_stores.py` | 두 어댑터 + `pipeline.profile()` → 두 테이블 + 앱 전체(7.6 → DB에 DELIVERED). 8개 |
+| `tests/integration/test_e2e_app.py` | 앱을 띄워 7.6 → 202 → 7.7 → 두 테이블까지. 3개 (09-23에 `tests/unit`에서 옮김 — 앱 lifespan이 DB에 붙으므로) |
+| `tests/unit/*` | 가짜 구현으로 돈다 — DB도 네트워크도 쓰지 않는다 |
 | `docs/assets/build_db_transition.py` | 이 문서의 그림 |
 
 ### 바뀜
@@ -69,14 +72,14 @@ AI는 어떤 경우에도 실패를 7.6·7.7로 알리지 않는다(Backend가 P
 | `types.py` | `from_outcome` · `should_replace` · `cap_tags` 채움. 필드 `explicit_disliked_category_ids: list[int]` → `disliked_categories: list[DislikedCategory]` | ④에 필요. 필드는 테이블 열(`disliked_categories`, id+이름)과 같은 이름·모양으로 |
 | `intake.py` | `get_recipient_store` 의존성 · `run_and_callback(…, recipient_store)` · 콜백 뒤 `store.save(status=result, callback_attempts+1)` | 그림 ⑥ (이전 코드의 "DB adapter가 생기면"이라던 자리) |
 | `backend.py` | `to_callback()`을 `callback_body()`(본문만) + 상태 검사로 분리 | DB adapter가 저장할 payload와 전송할 payload가 **같은 함수**에서 나오게 — 재전송이 "같은 payload"가 되는 근거 |
-| `settings.py` | `STORE: "db" \| "memory"` (기본 db) | 단위 테스트·DB 없는 로컬 |
+| `settings.py` | ~~`STORE: "db" \| "memory"`~~ | 09-22에 넣었다가 **09-23에 제거** — 저장소가 PostgreSQL 하나가 되면서 고를 것이 없어졌다 |
 | `main.py` | `_connect_db()`: engine 생성 · `select 1` · `alembic_version` 확인, 실패면 **RuntimeError로 앱이 뜨지 않음** · `app.state.recipient_store` · `/health`에 `store` 항목 | 조용히 메모리로 내려가면 "콜백은 나가는데 기록이 없는" 상태가 되므로 실패를 드러낸다 |
 | `alembic/versions/0001` 주석 · 통합 테스트 | `disliked_categories` JSON 키를 `{category_id, category_name}`(snake_case)로 | 아래 §6 |
 | `README.md` · `이름_대조표.md` · `.env.example` | 반영 | |
 
 ### 그대로
 
-`ports.py`(포트 모양 그대로 — 그래서 어댑터만 갈아끼워졌다), `schemas.py`, `catalog.py`, `stores.py`(STORE=memory에서 계속 사용), `supervisor.py`, `tools/fake_backend`.
+`ports.py`(포트 모양 그대로 — 그래서 구현만 갈아끼워졌다), `schemas.py`, `catalog.py`, `supervisor.py`, `tools/fake_backend`.
 
 ## 5. 실행과 확인
 
@@ -88,7 +91,7 @@ docker compose up -d && uv run alembic upgrade head
 uv run uvicorn profiling.main:app --port 8000 --reload
 ```
 
-시작 로그에 `DB 연결 localhost:5432/ai_chat migration=0002`가 보여야 한다. DB가 꺼져 있으면 `RuntimeError: DB 연결 실패 … → docker compose up -d && uv run alembic upgrade head (또는 DB 없이 띄우려면 PROFILING_STORE=memory)`로 멈춘다.
+시작 로그에 `DB 연결 localhost:5432/ai_chat migration=0002`가 보여야 한다. DB가 꺼져 있으면 `RuntimeError: DB 연결 실패 … → docker compose up -d && uv run alembic upgrade head`로 멈춘다 — 대신 쓸 저장소는 없다.
 
 상태:
 
@@ -122,13 +125,12 @@ DB가 켜져 있으면 64 passed / 3 skipped(v3 stub), 꺼져 있으면 통합 1
 - `catalog_version_id`는 **UUID**(팀원 `catalog_versions.id`와 같은 타입). 파일 카탈로그는 고정값 `00000000-0000-0000-0000-000000000001`.
 - `profile_runs.status`는 **text + CHECK**(PG enum 아님) — 상태 목록이 §10.5 합의로 바뀔 수 있어서.
 - 실행 기록과 수신자 프로필은 **트랜잭션이 따로**다(어댑터가 둘). 설계는 "RESULT_READY 커밋 트랜잭션에서 upsert"라고 하지만, v1에서는 ④ 실패 시 실행 기록을 FAILED로 되돌리는 것으로 같은 효과를 낸다. 한 트랜잭션으로 묶는 것은 어댑터를 합칠 때(v3) 다시 본다.
-- `STORE=db`에서 DB 연결 실패는 **앱 시작 실패**. 자동으로 메모리로 내려가지 않는다.
+- DB 연결 실패는 **앱 시작 실패**. 대체 저장소가 없으므로 조용히 내려갈 곳도 없다(09-23에 메모리 구현을 지웠다).
 
 **남은 것 (v1 범위)**
 
 - 접수 단계 중복 판정 — `store.get()`으로 "RUNNING이면 새 분석 없음 · 결과 있으면 재전송만"(§10.2). 지금은 같은 (수신자, 버전)이 다시 오면 다시 돌린다(`attempt+1`). (#23)
 - 콜백 재시도(5xx 최대 3회)와 재시작 복구(RUNNING → FAILED 정리). (#23)
-- `MemoryRecipientProfileStore` — STORE=memory에서는 프로필 저장을 건너뛴다. 메모리 구현이 채워지면 `main.py` 한 줄로 연결.
 
 **v3로 미룬 것**
 

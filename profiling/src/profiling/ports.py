@@ -2,7 +2,7 @@
 
 typing.Protocol 이라 상속이 필요 없다: 메서드 이름·인자·반환이 같으면 어떤 클래스든 이 자리에 꽂힌다
 (catalog.py·stores.py·backend.py의 실제 구현, tests/의 가짜, 팀원의 어댑터 전부). pipeline.py는 이 파일만 import하고
-구현 모듈을 import하지 않는다 — 그래야 파일→DB, 메모리→PostgreSQL로 바꿔도 pipeline이 안 바뀐다.
+구현 모듈을 import하지 않는다 — 그래야 카탈로그를 파일에서 DB로 바꿔도 pipeline이 안 바뀐다.
 
 이름은 팀원 3단계 구현 상세 §4와 맞춘다. 확정 전이라 오늘은 여기 이름이 기준이고, 합칠 때 그쪽 이름으로 바꾼다
 (후보: CatalogReader.active → Catalog.acquire()/SnapshotHandle, ProfileModel.analyze는 팀원 문서 이름 그대로).
@@ -50,7 +50,7 @@ class CatalogReader(Protocol):
 
 @runtime_checkable
 class ProfileRunStore(Protocol):
-    """프로파일링 결과 보관. 구현: stores.DbProfileRunStore · stores.MemoryProfileRunStore."""
+    """프로파일링 결과 보관. 구현: stores.DbProfileRunStore (ai_profile.profile_runs)."""
 
     def save(self, outcome: ProfileOutcome) -> None:
         """실행 기록 + 수신자 프로필 upsert. 같은 recipient_user_id면 덮어쓴다.
@@ -80,7 +80,7 @@ class BackendPort(Protocol):
 
 @runtime_checkable
 class RecipientProfileStore(Protocol):
-    """수신자 프로필(태그) 보관 — ai_profile.recipient_profiles. 구현: stores.DbRecipientProfileStore · stores.MemoryRecipientProfileStore(목).
+    """수신자 프로필(태그) 보관 — ai_profile.recipient_profiles. 구현: stores.DbRecipientProfileStore.
     ProfileRunStore(실행 기록·전달 상태)와 분리: 실행 기록은 시도마다 한 행, 프로필은 수신자당 한 행(최신 분석이 덮어씀)."""
 
     def upsert(self, profile: RecipientProfile) -> None: ...

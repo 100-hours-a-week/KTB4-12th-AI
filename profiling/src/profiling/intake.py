@@ -59,8 +59,8 @@ def get_store(request: Request) -> ProfileRunStore:
     return request.app.state.store
 
 
-def get_recipient_store(request: Request) -> RecipientProfileStore | None:
-    return request.app.state.recipient_store          # STORE=memory 면 None → 프로필 저장 생략
+def get_recipient_store(request: Request) -> RecipientProfileStore:
+    return request.app.state.recipient_store
 
 
 def get_backend(request: Request) -> BackendPort:
@@ -100,7 +100,7 @@ def require_service_token(
 
 def run_and_callback(
     rq: ProfileRequest, catalog: CatalogReader, store: ProfileRunStore, backend: BackendPort,
-    pool_size: int = 30, recipient_store: RecipientProfileStore | None = None,
+    pool_size: int, recipient_store: RecipientProfileStore,
 ) -> None:
     """pipeline.profile() → 결과가 RESULT_READY일 때만 7.7 콜백 → 콜백 결과를 실행 기록에 저장.
 
@@ -148,7 +148,7 @@ async def extract_and_pool(
     bg: BackgroundTasks,
     catalog: Annotated[CatalogReader, Depends(get_catalog)],
     store: Annotated[ProfileRunStore, Depends(get_store)],
-    recipient_store: Annotated[RecipientProfileStore | None, Depends(get_recipient_store)],
+    recipient_store: Annotated[RecipientProfileStore, Depends(get_recipient_store)],
     backend: Annotated[BackendPort, Depends(get_backend)],
     supervisor: Annotated[Supervisor, Depends(get_supervisor)],
     settings: Annotated[Settings, Depends(get_settings)],

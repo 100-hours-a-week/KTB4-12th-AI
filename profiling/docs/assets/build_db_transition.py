@@ -88,7 +88,7 @@ steps = [
     (190, 'box', '2  validation = 비선호 카테고리 이름만 disliked_tags 에', []),
     (230, 'box', '3  search = build_pool(비선호 제외 · 판매중 · 조회수순 30)', []),
     (270, 'new', '4·5  outcome = ProfileOutcome(RESULT_READY, search)', ['input_hash=h 포함 · store.save(outcome)   실패 → FAILED, 콜백 없음']),
-    (330, 'new', '6  recipient_store.upsert(from_outcome(rq, outcome))', ['실패 → FAILED로 되돌림 (콜백은 나갔는데 Chat이 읽을 행이 없는 상태 방지)', 'recipient_store=None(메모리 모드)이면 건너뜀']),
+    (330, 'new', '6  recipient_store.upsert(from_outcome(rq, outcome))', ['실패 → FAILED로 되돌림 (콜백은 나갔는데 Chat이 읽을 행이 없는 상태 방지)', '프로필 저장은 건너뛸 수 없다 — 저장소가 DB 하나뿐']),
     (410, 'box', 'return outcome   →  transport가 RESULT_READY면 콜백', []),
 ]
 for y, cls_, head, subs in steps:
@@ -113,7 +113,7 @@ for i, s in enumerate(['upsert(profile)  ON CONFLICT (rid) DO UPDATE', '  WHERE 
 box(ax, TOP + 480, aw, 46, 'old'); t(ax + 10, TOP + 499, 'HttpBackendPort  (그대로)', 'h2'); t(ax + 10, TOP + 516, 'POST 7.7 → 200/409/4xx/5xx → RunStatus', 'mono')
 box(ax, TOP + 542, aw, 92, 'new')
 t(ax + 10, TOP + 560, 'main.py  lifespan (조립)', 'h2')
-for i, s in enumerate(['STORE=db → create_engine(DATABASE_URL)', '  연결·alembic 버전 확인 — 실패면 앱이 뜨지 않음', '  store = DbProfileRunStore(engine)', '  recipient_store = DbRecipientProfileStore(…)', 'STORE=memory → Memory… · recipient_store=None']):
+for i, s in enumerate(['create_engine(DATABASE_URL)', '  연결·alembic 버전 확인 — 실패면 앱이 뜨지 않음', '  store = DbProfileRunStore(engine)', '  recipient_store = DbRecipientProfileStore(…)', '(대체 저장소 없음 — 09-23에 메모리 구현 제거)']):
     t(ax + 10, TOP + 576 + i * 13, s, 'mono')
 
 # DB lane — 두 테이블
@@ -178,7 +178,7 @@ t(40, yb + 50, '실패했을 때', 'h2')
 t(150, yb + 50, '①·③ 저장 실패 → FAILED, 콜백 없음(기록 없는 결과를 보내지 않는다)      ④ 실패 → 실행 기록을 FAILED로 되돌림      ⑤ 5xx·네트워크 → RESULT_READY 유지 = 재전송 대상(재시도 자체는 #23)      '
                 'AI는 실패를 알리지 않고 Backend가 판정', 'sub')
 t(40, yb + 78, '확인', 'h2')
-t(150, yb + 78, 'GET /health → "store": {"backend": "db", "connected": true, "migration": "0002"}     ·     STORE=memory 로 띄우면 이전 동작(메모리 · 프로필 저장 없음) — 단위 테스트가 이 모드', 'mono')
+t(150, yb + 78, 'GET /health → "store": {"backend": "db", "connected": true, "migration": "0002"}     ·     DB 없이 띄우는 모드는 없다 (단위 테스트는 가짜 구현을 쓴다)', 'mono')
 t(150, yb + 96, 'docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_id, source_version, status, attempt, callback_attempts, updated_at from ai_profile.profile_runs order by updated_at desc limit 5"', 'mono')
 parts.append('</svg>')
 (P / 'db-transition.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')

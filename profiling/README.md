@@ -31,7 +31,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 profiling/
 ├─ src/profiling/
 │  ├─ __init__.py             공개 표면 — profile() · ProfileRequest/Outcome · RunStatus · ErrorCode · Settings
-│  ├─ main.py                 조립(Composition Root) · DB 연결 확인(STORE=db, 실패면 앱 안 뜸) · 오류 봉투(422→400, 401/503, 500) · GET /health
+│  ├─ main.py                 조립(Composition Root) · DB 연결 확인(실패면 앱 안 뜸) · 오류 봉투(422→400, 401/503, 500) · GET /health
 │  ├─ schemas.py              7.6·7.7·7.9 DTO — 바깥 계약. camelCase · 범위 검증 · 모르는 필드는 무시하고 경고
 │  ├─ intake.py               POST /api/internal/v1/ai/profile/extract-and-pool — 토큰 → 503 확인 → 202 → Supervisor → 7.7
 │  ├─ supervisor.py           Supervisor — 프로파일링 슬롯(동시 1). 기한·취소는 다음
@@ -40,7 +40,7 @@ profiling/
 │  ├─ ports.py                Protocol 4개: CatalogReader · ProfileRunStore · RecipientProfileStore · BackendPort
 │  ├─ pipeline.py             to_internal → input_hash → needs_model → build_pool → profile()  (예외는 FAILED로, 밖으로 안 던짐)
 │  ├─ catalog.py              FileCatalogReader — 7.9 export 형식·동료 공유본 원형 자동 판별, 검증·중복 제거
-│  ├─ stores.py               DbProfileRunStore(profile_runs UPSERT 한 문장) · DbRecipientProfileStore(버전 가드) · 메모리 판 2개(STORE=memory)
+│  ├─ stores.py               DbProfileRunStore(profile_runs UPSERT 한 문장) · DbRecipientProfileStore(버전 가드) — PostgreSQL 전용
 │  ├─ backend.py              HttpBackendPort — 7.7 POST → CallbackResult(DELIVERED·SUPERSEDED·FAILED·RESULT_READY)
 │  └─ settings.py             Settings(BaseSettings, PROFILING_*) · get_settings()
 ├─ tools/
@@ -100,7 +100,7 @@ profiling/
 | 패키지 | **uv** — `pyproject.toml` + `uv.lock`(커밋) · `.venv`(커밋 안 함) | 폴더별 가상환경 만들지 않음 |
 | 의존성 | fastapi · uvicorn[standard] · pydantic · pydantic-settings · httpx · sqlalchemy · alembic · psycopg[binary] | dev: pytest · ruff |
 | 설정 | 환경변수 `PROFILING_*` 또는 `profiling/.env` (`.env.example` 복사) | 코드는 `settings.X`로만 접근 — 이름 바꿀 때 `settings.py` 한 곳 |
-| DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`·`0002` | `PROFILING_STORE=db`(기본) — 연결 실패면 앱이 뜨지 않음. `memory`면 DB 없이(프로필 저장 없음) |
+| DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`·`0002` | 저장소는 PostgreSQL 하나뿐 — 연결 실패면 앱이 뜨지 않는다 (DB 없이 띄우는 모드는 없음) |
 | 카탈로그 | 기본 `tests/fixtures/catalog_sample.json`(111건) · 전체 4,231건은 `.env`에서 경로 지정 | 팀원 카탈로그 DB 전까지 파일 |
 
 ```bash
@@ -129,7 +129,7 @@ uv run uvicorn tools.fake_backend.app:app --port 8081
 uv run uvicorn profiling.main:app --port 8000 --reload
 ```
 
-DB 없이 띄우려면 `PROFILING_STORE=memory uv run uvicorn …` (실행 기록은 메모리, 수신자 프로필은 저장 안 함).
+앱은 DB 없이 뜨지 않는다 — `docker compose up -d && uv run alembic upgrade head`를 먼저 한다.
 
 브라우저 `http://localhost:8081/` → 콘솔.
 
@@ -165,25 +165,25 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 4. 테스트
 
-원칙: **업무 코드는 가짜 adapter로, adapter는 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`)는 외부 의존 없이 돈다(`conftest.py`가 `PROFILING_STORE=memory`). 통합(`tests/integration`)은 진짜 PostgreSQL — DB가 꺼져 있으면 skip.
+원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 58개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 18개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
 
 | 파일 | 대상 | 방법 | 개수 |
 |---|---|---|---|
-| `test_schemas.py` | 7.6·7.7 DTO 경계 | Pydantic `ValidationError` — 11개 리뷰·rating 0/6·extra 필드·태그 포함 콜백 거부 | 5 |
-| `test_pipeline.py` | `to_internal`·`needs_model`·`input_hash`·`build_pool`·`profile()` | `FakeCatalog`·`FakeStore`·`FakeRecipientStore`(ports 모양). 비선호 제외·조회수 정렬·상한·FAILED 경로·저장 실패·RUNNING→RESULT_READY 순서·프로필 upsert | 16 |
-| `test_catalog_stores.py` | `FileCatalogReader`·`MemoryProfileRunStore` | tmp JSON 두 형식 · 중복/오류 제외 · `isinstance(…, Protocol)` 모양 검사 | 4 |
+| `test_schemas.py` | 7.6·7.7·7.9 DTO 경계 | Pydantic `ValidationError` — 11개 리뷰·rating 0/6·모르는 필드·조회수 별칭·태그 포함 콜백 거부 | 11 |
+| `test_pipeline.py` | `to_internal`·`needs_model`·`input_hash`·`build_pool`·`profile()` | `FakeCatalog`·`FakeStore`·`FakeRecipientStore`(ports 모양). 비선호 제외·조회수 정렬·상한·FAILED 경로·저장 실패·RUNNING→RESULT_READY 순서·프로필 upsert | 17 |
+| `test_catalog.py` | `FileCatalogReader` | tmp JSON 두 형식 · 중복/오류 제외 · `isinstance(…, Protocol)` 모양 검사 | 3 |
 | `test_backend.py` | `to_callback`·`HttpBackendPort` | `httpx.MockTransport` — 상태 코드 6종 → `CallbackResult(status, code)`, 헤더·경로·본문, 네트워크 오류 | 12 |
 | `test_fetch_export.py` | `tools/catalog/fetch_export` | 계약 점검(모르는 필드·별칭·필수 누락) · ID 대조 · 저장 정규화 · 종료 코드 | 7 |
-| `test_catalog_fixture.py` | 예시 카탈로그 | 111건·56카테고리·null 1·판매불가 2, `/health` | 2 |
-| `test_e2e_transport.py` | **끝에서 끝** (메모리) | `TestClient(app)` — lifespan → 7.6 202 → Supervisor 슬롯 → 가짜 BackendPort가 7.7 받음 → 실행 기록 DELIVERED. 400은 백그라운드로 안 감 | 1 |
-| `test_recipient_profile.py` | `from_outcome`·`should_replace`·`cap_tags` | 행 변환·버전 규칙·상한 (v3 함수 3개는 skip) | 4 |
+| `test_catalog_fixture.py` | 예시 카탈로그(파일만) | 111건·56카테고리·null 1·판매불가 2 | 1 |
+| `test_recipient_profile.py` | `from_outcome`·`should_replace`·`cap_tags` | 행 변환·버전 규칙·상한 (v3 함수 2개는 skip) | 6 |
 | `test_supervisor.py` | Supervisor | 슬롯 1이면 동시에 하나만 실행 | 1 |
 | `integration/test_db_recipient_profiles.py` | 마이그레이션 결과 | 열 순서·PK 시퀀스 없음·유니크·CHECK·upsert 버전 규칙 | 5 |
-| `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체(STORE=db)** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED | 8 |
+| `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED | 8 |
+| `integration/test_e2e_app.py` | **끝에서 끝** | `TestClient(app)` — lifespan(진짜 DB) → 7.6 202 → Supervisor 슬롯 → 가짜 BackendPort가 7.7 받음 → `profile_runs` DELIVERED·`recipient_profiles` upsert. 400은 백그라운드로 안 감. 모르는 필드 경고. `/health` | 3 |
 | `integration/test_fetch_export_db.py` | `--compare-db` | 팀원 DDL로 `ai_search.products` 만들어 TEXT id·누락·이름 차이 보고 | 2 |
 | `test_backend.py::test_callback_path_matches_fake_backend` | 계약 문자열 | AI 송신 경로 == fake 수신 경로 | (포함) |
 
-가짜를 만드는 규칙: `ports.py`의 메서드 이름·시그니처만 맞추면 된다(`@runtime_checkable`이라 `isinstance`로 확인 가능). DB adapter는 같은 포트를 구현하므로 단위 테스트의 단언이 그대로 통과했다 — 바뀐 것은 조립(`main.py`)과 통합 테스트뿐.
+가짜를 만드는 규칙: `ports.py`의 메서드 이름·시그니처만 맞추면 된다(`@runtime_checkable`이라 `isinstance`로 확인 가능).
 
 ---
 
@@ -191,7 +191,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
-| 1 | ~~DB adapter~~ **완료(09-22)** — `DbProfileRunStore`·`DbRecipientProfileStore`, [docs/DB_전환_설명.md](docs/DB_전환_설명.md). 남은 v1 조각: 접수 단계 중복 판정(`store.get()` — RUNNING이면 새 분석 없음·결과 있으면 재전송만) · `MemoryRecipientProfileStore` | `intake.extract_and_pool` 앞부분 · `stores.py` | 어댑터·ports |
+| 1 | ~~DB adapter~~ **완료(09-22)** — `DbProfileRunStore`·`DbRecipientProfileStore`, [docs/DB_전환_설명.md](docs/DB_전환_설명.md). 남은 v1 조각: 접수 단계 중복 판정(`store.get()` — RUNNING이면 새 분석 없음·결과 있으면 재전송만) | `intake.extract_and_pool` 앞부분 | 어댑터·ports |
 | 2 | 7.7 재시도(5xx 최대 3회)·409→SUPERSEDED·실행 기록 상태 갱신 | `HttpBackendPort.send_profile_callback` 안 · Transport가 `store.save(status)` | 포트 시그니처(이미 `RunStatus`) |
 | 3 | Catalog 빌드 CLI — 7.9 수신·검증·버전 저장·활성 포인터 | `catalog/` · fake 7.9는 이미 있음 | |
 | 4 | 팀원 Search 연동 | `pipeline.build_pool` 호출 한 줄 | 나머지 |

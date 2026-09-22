@@ -67,7 +67,7 @@
 <rect x="342" y="570" width="376" height="54" rx="4" class="new"/>
 <text x="352" y="587" class="mono">6  recipient_store.upsert(from_outcome(rq, outcome))</text>
 <text x="352" y="602" class="sub">실패 → FAILED로 되돌림 (콜백은 나갔는데 Chat이 읽을 행이 없는 상태 방지)</text>
-<text x="352" y="617" class="sub">recipient_store=None(메모리 모드)이면 건너뜀</text>
+<text x="352" y="617" class="sub">프로필 저장은 건너뛸 수 없다 — 저장소가 DB 하나뿐</text>
 <rect x="342" y="650" width="376" height="24" rx="4" class="box"/>
 <text x="352" y="667" class="mono">return outcome   →  transport가 RESULT_READY면 콜백</text>
 <rect x="812" y="310" width="296" height="124" rx="4" class="new"/>
@@ -93,11 +93,11 @@
 <text x="822" y="756" class="mono">POST 7.7 → 200/409/4xx/5xx → RunStatus</text>
 <rect x="812" y="782" width="296" height="92" rx="4" class="new"/>
 <text x="822" y="800" class="h2">main.py  lifespan (조립)</text>
-<text x="822" y="816" class="mono">STORE=db → create_engine(DATABASE_URL)</text>
+<text x="822" y="816" class="mono">create_engine(DATABASE_URL)</text>
 <text x="822" y="829" class="mono">  연결·alembic 버전 확인 — 실패면 앱이 뜨지 않음</text>
 <text x="822" y="842" class="mono">  store = DbProfileRunStore(engine)</text>
 <text x="822" y="855" class="mono">  recipient_store = DbRecipientProfileStore(…)</text>
-<text x="822" y="868" class="mono">STORE=memory → Memory… · recipient_store=None</text>
+<text x="822" y="868" class="mono">(대체 저장소 없음 — 09-23에 메모리 구현 제거)</text>
 <rect x="1172" y="310" width="376" height="186" rx="4" class="tbl"/>
 <text x="1182" y="328" class="h2">ai_profile.profile_runs   (0002)</text>
 <text x="1182" y="343" class="sub">실행 1건 = 1행 · 감사·재전송 기록 (작업 큐 아님)</text>
@@ -146,6 +146,6 @@
 <text x="40" y="948" class="h2">실패했을 때</text>
 <text x="150" y="948" class="sub">①·③ 저장 실패 → FAILED, 콜백 없음(기록 없는 결과를 보내지 않는다)      ④ 실패 → 실행 기록을 FAILED로 되돌림      ⑤ 5xx·네트워크 → RESULT_READY 유지 = 재전송 대상(재시도 자체는 #23)      AI는 실패를 알리지 않고 Backend가 판정</text>
 <text x="40" y="976" class="h2">확인</text>
-<text x="150" y="976" class="mono">GET /health → "store": {"backend": "db", "connected": true, "migration": "0002"}     ·     STORE=memory 로 띄우면 이전 동작(메모리 · 프로필 저장 없음) — 단위 테스트가 이 모드</text>
+<text x="150" y="976" class="mono">GET /health → "store": {"backend": "db", "connected": true, "migration": "0002"}     ·     DB 없이 띄우는 모드는 없다 (단위 테스트는 가짜 구현을 쓴다)</text>
 <text x="150" y="994" class="mono">docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_id, source_version, status, attempt, callback_attempts, updated_at from ai_profile.profile_runs order by updated_at desc limit 5"</text>
 </svg>

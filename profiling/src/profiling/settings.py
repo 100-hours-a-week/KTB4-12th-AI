@@ -12,7 +12,6 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -36,11 +35,6 @@ class Settings(BaseSettings):
     # ---- DB (로컬 compose 기본값. 팀원 골격 이름은 DATABASE_URL — 합칠 때 접두사만 맞춤)
     DATABASE_URL: str = Field(default="postgresql+psycopg://ai_user:ai_password@localhost:5432/ai_chat",
                               description="SQLAlchemy URL (psycopg 3). Alembic env.py도 이 값을 쓴다")
-    STORE: Literal["db", "memory"] = Field(
-        default="db",
-        description="실행 기록·수신자 프로필 저장소. db = PostgreSQL(profile_runs·recipient_profiles, 시작 시 연결 확인 — 실패하면 앱이 뜨지 않음) · "
-                    "memory = 프로세스 메모리(단위 테스트·DB 없는 로컬용. 수신자 프로필은 저장하지 않음)",
-    )
 
     # ---- 카탈로그 (DB adapter 전까지 파일)
     CATALOG_FILE: Path = Field(

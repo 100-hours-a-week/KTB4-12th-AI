@@ -15,7 +15,7 @@
 <rect x="40" y="90" width="1620" height="104" rx="6" class="band"/>
 <text x="52" y="110" class="h">조립 — main.py  lifespan()  (프로세스 시작 1회, app.state에 둠)</text>
 <text x="52" y="130" class="mono">get_settings() (settings.py, PROFILING_*)  →  FileCatalogReader(CATALOG_FILE)  →  Supervisor(PROFILING_SLOTS=1)  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)</text>
-<text x="52" y="144" class="mono">STORE=db: _connect_db(DATABASE_URL — select 1 · alembic_version 확인, 실패면 RuntimeError로 앱 안 뜸) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine)    |    STORE=memory: MemoryProfileRunStore() · recipient_store=None</text>
+<text x="52" y="144" class="mono">_connect_db(DATABASE_URL — select 1 · alembic_version 확인, 실패면 RuntimeError로 앱 안 뜸) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine)   |   저장소는 PostgreSQL 하나뿐</text>
 <text x="52" y="158" class="mono">카탈로그 로드 실패 → _NoCatalog 대역 (7.6은 503, 앱은 뜸)    ·    종료: backend.close() · engine.dispose()    ·    GET /health → catalog · store(_store_health) · supervisor.stats()</text>
 <text x="52" y="172" class="mono">오류 봉투: on_validation_error(422→400 INVALID_REQUEST) · on_http_error(401/403/503) · on_unhandled(500) — 모두 _error_response() {message, error:{code, traceId}}</text>
 <rect x="40" y="232" width="385" height="348" rx="6" class="stage"/>
@@ -154,7 +154,7 @@
 <text x="1282" y="792" class="mono">  to_callback → callback_body (7.7 본문, 태그 없음)</text>
 <text x="1282" y="806" class="mono">  _status_from_response · _error_code</text>
 <text x="1282" y="820" class="mono">close() — lifespan 종료 시</text>
-<text x="1282" y="834" class="mono">(STORE=memory: MemoryProfileRunStore — dict + Lock)</text>
+<text x="1282" y="834" class="mono">payload_hash() · delete_recipient()</text>
 <path d="M1462.5 690 V724" class="impl"/>
 <rect x="40" y="888" width="385" height="76" rx="5" class="ext"/>
 <text x="52" y="910" class="h2">파일  tests/fixtures/catalog_sample.json</text>
@@ -186,5 +186,5 @@
 <text x="40" y="1034" class="h2">실패 경로</text>
 <text x="110" y="1034" class="sub">400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.</text>
 <text x="40" y="1056" class="h2">시험</text>
-<text x="110" y="1056" class="sub">단위(tests/unit, STORE=memory): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계, TestClient로 1~4 e2e   ·   통합(tests/integration): 진짜 PostgreSQL로 어댑터·앱 전체   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql</text>
+<text x="110" y="1056" class="sub">단위(tests/unit, 58): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 18): 진짜 PostgreSQL로 구현·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql</text>
 </svg>

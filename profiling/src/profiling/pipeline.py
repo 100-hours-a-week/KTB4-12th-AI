@@ -121,13 +121,12 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
 
 def profile(
     rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStore,
-    recipient_store: RecipientProfileStore | None = None, pool_size: int = 30,
+    recipient_store: RecipientProfileStore, pool_size: int = 30,
 ) -> ProfileOutcome:
     """7.6 요청 한 건 → ProfileOutcome (저장까지). 예외를 밖으로 내지 않고 FAILED로 돌려준다.
 
     반환의 status가 RESULT_READY면 호출자(api.run_and_callback)가 7.7 콜백을 보내고, FAILED면 보내지 않는다(문서 1: AI는 침묵).
-    catalog·store·recipient_store는 ports 모양이면 무엇이든 된다(파일/DB → 테스트 가짜). recipient_store가 None이면(메모리 모드)
-    수신자 프로필 저장을 건너뛴다.
+    catalog·store·recipient_store는 ports 모양이면 무엇이든 된다(파일/DB → 테스트 가짜).
     """
     rid, sv = rq.recipient_user_id, rq.source_version
     h = input_hash(rq)
@@ -180,12 +179,11 @@ def profile(
 
     # 6) 수신자 프로필 — 한 사람당 한 행. 낮은 버전이 늦게 오면 DB가 무시한다(should_replace와 같은 규칙을 SQL로).
     #    실패하면 FAILED로 되돌린다: 콜백은 나갔는데 Chat이 읽을 프로필이 없는 상태를 만들지 않기 위해.
-    if recipient_store is not None:
-        try:
-            recipient_store.upsert(from_outcome(rq, outcome))
-        except Exception as e:
-            log.exception("profile recipient=%s 수신자 프로필 저장 실패", rid)
-            return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {type(e).__name__}: {e}")
+    try:
+        recipient_store.upsert(from_outcome(rq, outcome))
+    except Exception as e:
+        log.exception("profile recipient=%s 수신자 프로필 저장 실패", rid)
+        return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {type(e).__name__}: {e}")
 
     log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d catalog_version=%s rule=%s",
              rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), catalog_version_id, POOL_RULE_V1)

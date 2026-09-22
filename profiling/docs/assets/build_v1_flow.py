@@ -12,7 +12,7 @@ def t(x,y,s,c='msg',anchor=None):
     parts.append(f'<text x="{x}" y="{y}" class="{c}"{an}>{escape(s)}</text>')
 # lifelines
 L=[('Backend',['(내일: 실제 · 오늘: curl)']),('intake.py',['Transport · 7.6 접수','run_and_callback() (Supervisor 슬롯)']),('pipeline.py',['to_internal · needs_model','build_pool · profile()']),
-   ('catalog.py',['CatalogReader (파일)']),('stores.py',['ProfileRunStore (메모리)']),('backend.py',['BackendPort (HTTP)']),('tools/fake_backend',['7.7 수신'])]
+   ('catalog.py',['CatalogReader (파일)']),('stores.py',['ProfileRunStore (DB)']),('backend.py',['BackendPort (HTTP)']),('tools/fake_backend',['7.7 수신'])]
 xs=[110,350,600,830,1020,1210,1380]
 t(40,48,'v1 프로파일링 한 건 — 파일 사이의 호출 순서 (7.6 접수 → 202 → 백그라운드 → 7.7 콜백)','title')
 t(40,74,'실선 파랑 = 호출, 점선 회색 = 반환. 노란 상자 = 그 시점에 쓰는 자료형(schemas.py = 바깥 계약 camelCase · types.py = 내부 snake_case). 조립(main.py)은 맨 아래.','small')
@@ -63,7 +63,7 @@ ret(884,5,1,'RunStatus  DELIVERED · SUPERSEDED · FAILED · RESULT_READY(재시
 t(350,900,'log.info("7.7 콜백 결과 … → DELIVERED")   ※ 실행 기록 상태 갱신·재시도는 DB adapter 뒤(#23)','small','middle')
 
 parts.append(f'<line x1="40" y1="{BOT+14}" x2="{W-40}" y2="{BOT+14}" class="rule"/>')
-t(40,BOT+40,'조립 (main.py, 시작 1회):  lifespan에서 FileCatalogReader(settings.CATALOG_FILE) · MemoryProfileRunStore() · HttpBackendPort(settings.BACKEND_BASE_URL, token)를 만들어 app.state에 두고, 라우터는 Depends로 꺼내 pipeline에 넘긴다.','small')
+t(40,BOT+40,'조립 (main.py, 시작 1회):  lifespan에서 FileCatalogReader(settings.CATALOG_FILE) · DbProfileRunStore(engine) · HttpBackendPort(settings.BACKEND_BASE_URL, token)를 만들어 app.state에 두고, 라우터는 Depends로 꺼내 pipeline에 넘긴다.','small')
 t(40,BOT+62,'의존 방향:  api → pipeline → ports(Protocol 모양)  ←구현─ adapters.   pipeline은 adapters 파일을 import하지 않는다. 테스트(tests/unit)는 ports 모양의 가짜를 넣어 5·6·7만 돌린다.','small')
 t(40,BOT+84,'v3에서 바뀌는 곳: 5단계 안에서 needs_model → True면 카탈로그 조인 → ProfileModel.analyze() → validator → Search. 1~4, 7~9는 그대로.','small')
 parts.append('</svg>')

@@ -76,7 +76,6 @@ t(1256,470,'ProductRecord(schemas) · ProfileOutcome(types)를 인자·반환으
 # ---------------- adapters  x 1040..1560
 pkg(1040,510,520,190,'adapters/ — 구현 (바깥과 닿는 코드). 스테레오타입이 어느 포트를 구현하는지')
 cls(1056,542,150,'FileCatalogReader',['path: Path','_products: list','_by_id: dict'],['active()','by_id()'],stereo='«CatalogReader 구현»')
-cls(1216,542,180,'MemoryProfileRunStore',['_items: dict[int,Outcome]','_lock: threading.Lock'],['save()','get()'],stereo='«ProfileRunStore 구현»')
 cls(1406,542,140,'HttpBackendPort',['base_url · token','timeout_s','_client: httpx.Client'],['send_profile_callback()','close()'],stereo='«BackendPort 구현»')
 
 # ---------------- pipeline.py  x 560..990

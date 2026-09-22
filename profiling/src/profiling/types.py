@@ -288,7 +288,7 @@ def should_replace(current: RecipientProfile | None, incoming: RecipientProfile)
     """기존 행을 새 결과로 덮어쓸지 — source_version이 같거나 높을 때만. 낮으면 순서 역전(늦게 도착한 옛 분석) → 기존 유지.
 
     DB adapter의 upsert도 같은 규칙을 SQL(WHERE source_version <= excluded.source_version)로 한 번 더 건다 — 두 프로세스가
-    동시에 써도 DB가 최종 심판. 이 함수는 메모리 구현과 호출자의 사전 판단용.
+    동시에 써도 DB가 최종 심판. 이 함수는 호출자의 사전 판단용(테스트 가짜 저장소도 이 규칙을 따른다).
     """
     return current is None or current.source_version <= incoming.source_version
 

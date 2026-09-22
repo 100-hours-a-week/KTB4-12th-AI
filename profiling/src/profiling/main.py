@@ -7,11 +7,11 @@
 
 app.state에 두는 것 (lifespan에서 1회 생성):
   catalog          CatalogReader        FileCatalogReader (팀원 카탈로그 DB 전까지 파일)
-  store            ProfileRunStore      STORE=db → DbProfileRunStore(profile_runs) · memory → MemoryProfileRunStore
-  recipient_store  RecipientProfileStore  STORE=db → DbRecipientProfileStore(recipient_profiles) · memory → None(저장 안 함)
+  store            ProfileRunStore      DbProfileRunStore (ai_profile.profile_runs)
+  recipient_store  RecipientProfileStore  DbRecipientProfileStore (ai_profile.recipient_profiles)
   backend          BackendPort          HttpBackendPort
   supervisor       Supervisor
-  engine           sqlalchemy Engine    STORE=db 일 때만. 종료 시 dispose
+  engine           sqlalchemy Engine    시작 시 연결 확인, 종료 시 dispose
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from profiling.settings import Settings, get_settings
 from profiling.stores import (
     DbProfileRunStore,
     DbRecipientProfileStore,
-    MemoryProfileRunStore,
 )
 from profiling.supervisor import Supervisor
 
@@ -62,20 +61,14 @@ async def lifespan(app: FastAPI):
         log.error("활성 카탈로그 없음: %s — 7.6은 503을 반환합니다", e)
         app.state.catalog = _NoCatalog(str(e))
 
-    # 저장소 — 기본은 DB. 연결이 안 되면 여기서 앱이 죽는다(조용히 메모리로 내려가면 콜백은 나가는데 기록이 없는 상태가 되므로).
-    app.state.engine = None
-    if settings.STORE == "db":
-        app.state.engine = _connect_db(settings)
-        app.state.store = DbProfileRunStore(app.state.engine)
-        app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
-    else:
-        log.warning("STORE=memory — 실행 기록은 프로세스 메모리, 수신자 프로필은 저장하지 않음 (시험용)")
-        app.state.store = MemoryProfileRunStore()
-        app.state.recipient_store = None
+    # 저장소 — PostgreSQL 하나뿐. 연결이 안 되면 여기서 앱이 죽는다(기록 없이 콜백만 나가는 상태를 만들지 않으려고).
+    app.state.engine = _connect_db(settings)
+    app.state.store = DbProfileRunStore(app.state.engine)
+    app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
 
     app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS)   # 3단계 §12.1 시작값 1
     app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S)
-    log.info("profiling 시작 backend=%s pool_size=%s store=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE, settings.STORE)
+    log.info("profiling 시작 backend=%s pool_size=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE)
 
     yield
 
@@ -83,8 +76,7 @@ async def lifespan(app: FastAPI):
     close = getattr(app.state.backend, "close", None)
     if callable(close):
         close()
-    if app.state.engine is not None:
-        app.state.engine.dispose()
+    app.state.engine.dispose()
 
 
 def _connect_db(settings: Settings) -> sa.Engine:
@@ -100,7 +92,7 @@ def _connect_db(settings: Settings) -> sa.Engine:
         engine.dispose()
         raise RuntimeError(
             f"DB 연결 실패 ({settings.DATABASE_URL.split('@')[-1]}): {e.orig if hasattr(e, 'orig') else e}\n"
-            "  → docker compose up -d && uv run alembic upgrade head   (또는 DB 없이 띄우려면 PROFILING_STORE=memory)"
+            "  → docker compose up -d && uv run alembic upgrade head"
         ) from e
     except sa.exc.ProgrammingError as e:    # alembic_version 테이블 없음 = 마이그레이션 안 됨
         engine.dispose()
@@ -176,10 +168,8 @@ def health(request: Request) -> dict:
 
 
 def _store_health(request: Request) -> dict:
-    """저장소 상태 — db면 지금 연결되는지와 마이그레이션 버전까지. 확인 자체가 실패해도 /health는 200(프로세스는 살아 있으므로)."""
+    """저장소 상태 — 지금 연결되는지와 마이그레이션 버전. 확인 자체가 실패해도 /health는 200(프로세스는 살아 있으므로)."""
     engine = request.app.state.engine
-    if engine is None:
-        return {"backend": "memory", "connected": True}
     try:
         with engine.connect() as conn:
             version = conn.execute(sa.text("select version_num from alembic_version")).scalar()

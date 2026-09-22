@@ -1,4 +1,4 @@
-"""catalog.FileCatalogReader · stores.MemoryProfileRunStore — ports 계약대로 동작하는지 (DB 구현도 같은 테스트를 통과해야 한다)."""
+"""catalog.FileCatalogReader — 두 형식 자동 판별·검증·중복 제거가 ports 계약(CatalogReader)대로 도는지. 저장소는 DB뿐이라 tests/integration."""
 
 import json
 from pathlib import Path
@@ -9,9 +9,7 @@ from profiling.catalog import (
     FILE_CATALOG_VERSION_ID,
     FileCatalogReader,
 )
-from profiling.ports import CatalogReader, NoActiveCatalog, ProfileRunStore
-from profiling.stores import MemoryProfileRunStore
-from profiling.types import ProfileOutcome, RunStatus
+from profiling.ports import CatalogReader, NoActiveCatalog
 
 # ---------------------------------------------------------------- 자료
 
@@ -76,26 +74,3 @@ def test_file_catalog_missing_or_empty(tmp_path: Path) -> None:
         FileCatalogReader(_write(tmp_path, {"data": {"products": []}}))
     with pytest.raises(NoActiveCatalog):
         FileCatalogReader(_write(tmp_path, {"hello": 1}))
-
-
-# ---------------------------------------------------------------- MemoryProfileRunStore
-
-
-def _outcome(rid: int, sv: int) -> ProfileOutcome:
-    return ProfileOutcome(recipient_user_id=rid, source_version=sv, status=RunStatus.RESULT_READY)
-
-
-def test_memory_store_save_get_overwrite() -> None:
-    store = MemoryProfileRunStore()
-    assert isinstance(store, ProfileRunStore)                      # ports 모양
-    assert store.get(1) is None
-    store.save(_outcome(1, 1))
-    store.save(_outcome(2, 5))
-    store.save(_outcome(1, 2))                                  # 같은 수신자 → 덮어씀
-    assert store.get(1).source_version == 2
-    assert store.get(2).source_version == 5
-    assert len(store) == 2
-    store.save(_outcome(1, 1))                                  # 역전 — 오늘은 덮어쓰기만 (경고 로그)
-    assert store.get(1).source_version == 1
-    store.clear()
-    assert len(store) == 0

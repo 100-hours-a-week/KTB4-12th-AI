@@ -1,4 +1,4 @@
-"""DB adapter 통합 시험 — DbProfileRunStore(profile_runs) · DbRecipientProfileStore(recipient_profiles) · 앱 전체(STORE=db).
+"""DB adapter 통합 시험 — DbProfileRunStore(profile_runs) · DbRecipientProfileStore(recipient_profiles) · 앱 전체.
 DB가 안 떠 있으면 skip. 실행: docker compose up -d && uv run alembic upgrade head && uv run pytest tests/integration -q
 
 adapter가 트랜잭션을 스스로 열므로(engine.begin) 테스트를 트랜잭션으로 감쌀 수 없다 → 시험용 수신자 ID(99xxxx)를 쓰고 끝에 지운다."""
@@ -154,7 +154,7 @@ def test_pipeline_writes_both_tables(stores, engine) -> None:
     assert prof.source_version == 3 and [c.category_id for c in prof.disliked_categories] == [802] and prof.disliked_tags == ["출산·육아용품"]
 
 
-# ---------------------------------------------------------------- 앱 전체 (STORE=db)
+# ---------------------------------------------------------------- 앱 전체 (진짜 DB)
 
 
 class RecordingBackend:
@@ -167,7 +167,6 @@ class RecordingBackend:
 
 
 def test_app_end_to_end_with_db(engine, monkeypatch) -> None:
-    monkeypatch.setenv("PROFILING_STORE", "db")
     monkeypatch.setenv("PROFILING_CATALOG_FILE", FIXTURE)
     get_settings.cache_clear()
     from profiling.main import app

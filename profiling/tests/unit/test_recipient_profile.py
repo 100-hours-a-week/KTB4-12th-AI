@@ -1,7 +1,7 @@
 """profile/recipient_profile — 태그 보관·갱신 규칙.
 
 채운 것: from_outcome · should_replace · cap_tags (09-22, DB 연결에 필요).
-남은 것(v3, skip): merge_explicit_dislikes · to_search_hint · MemoryRecipientProfileStore.
+남은 것(v3, skip): merge_explicit_dislikes · to_search_hint.
 """
 
 from uuid import UUID
@@ -72,7 +72,3 @@ def test_merge_explicit_dislikes_front_and_dedup() -> None:
 def test_to_search_hint_shape() -> None:
     raise NotImplementedError
 
-
-@pytest.mark.skip(reason="MemoryRecipientProfileStore 채운 뒤 활성화")
-def test_memory_store_upsert_get_delete() -> None:
-    raise NotImplementedError

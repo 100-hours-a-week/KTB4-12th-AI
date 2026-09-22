@@ -52,7 +52,7 @@ box(40, Y0, W - 80, 104, 'band', 6)
 t(52, Y0 + 20, '조립 — main.py  lifespan()  (프로세스 시작 1회, app.state에 둠)', 'h')
 lines(52, Y0 + 40, [
     ('get_settings() (settings.py, PROFILING_*)  →  FileCatalogReader(CATALOG_FILE)  →  Supervisor(PROFILING_SLOTS=1)  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)', 'mono'),
-    ('STORE=db: _connect_db(DATABASE_URL — select 1 · alembic_version 확인, 실패면 RuntimeError로 앱 안 뜸) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine)    |    STORE=memory: MemoryProfileRunStore() · recipient_store=None', 'mono'),
+    ('_connect_db(DATABASE_URL — select 1 · alembic_version 확인, 실패면 RuntimeError로 앱 안 뜸) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine)   |   저장소는 PostgreSQL 하나뿐', 'mono'),
     ('카탈로그 로드 실패 → _NoCatalog 대역 (7.6은 503, 앱은 뜸)    ·    종료: backend.close() · engine.dispose()    ·    GET /health → catalog · store(_store_health) · supervisor.stats()', 'mono'),
     ('오류 봉투: on_validation_error(422→400 INVALID_REQUEST) · on_http_error(401/403/503) · on_unhandled(500) — 모두 _error_response() {message, error:{code, traceId}}', 'mono'),
 ])
@@ -196,7 +196,7 @@ adapters = [
         '  to_callback → callback_body (7.7 본문, 태그 없음)',
         '  _status_from_response · _error_code',
         'close() — lifespan 종료 시',
-        '(STORE=memory: MemoryProfileRunStore — dict + Lock)']),
+        'payload_hash() · delete_recipient()']),
 ]
 for (name, file, rows), x in zip(adapters, XS):
     box(x, AY0, CW, AH, 'box', 5)
@@ -232,7 +232,7 @@ t(110, NY + 22, 'ProfileExtractRequest(camel) → to_internal → ProfileRequest
 t(40, NY + 44, '실패 경로', 'h2')
 t(110, NY + 44, '400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.', 'sub')
 t(40, NY + 66, '시험', 'h2')
-t(110, NY + 66, '단위(tests/unit, STORE=memory): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계, TestClient로 1~4 e2e   ·   통합(tests/integration): 진짜 PostgreSQL로 어댑터·앱 전체   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
+t(110, NY + 66, '단위(tests/unit, 58): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 18): 진짜 PostgreSQL로 구현·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
 parts.append('</svg>')
 (P / 'pipeline-map.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')
 print('svg ok')

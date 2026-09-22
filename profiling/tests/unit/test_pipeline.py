@@ -128,7 +128,7 @@ def test_pool_size_cap() -> None:
 
 def test_profile_v1_happy_path() -> None:
     store = FakeStore()
-    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store, pool_size=30)
+    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore(), pool_size=30)
     assert out.status is RunStatus.RESULT_READY
     assert out.validation.preferred_tags == [] and out.validation.disliked_tags == ["뷰티"]
     assert out.search.catalog_version_id == CV and 0 < len(out.search.product_ids) <= 30
@@ -138,20 +138,20 @@ def test_profile_v1_happy_path() -> None:
 
 def test_profile_overwrites_same_recipient() -> None:
     store = FakeStore(); cat = FakeCatalog(PRODUCTS)
-    pipeline.profile(_rq(), catalog=cat, store=store)
-    second = pipeline.profile(_rq(disliked=[(300, "완구")]), catalog=cat, store=store)
+    pipeline.profile(_rq(), catalog=cat, store=store, recipient_store=FakeRecipientStore())
+    second = pipeline.profile(_rq(disliked=[(300, "완구")]), catalog=cat, store=store, recipient_store=FakeRecipientStore())
     assert store.get(9073) is second
 
 
 def test_profile_no_catalog_is_failed_not_exception() -> None:
     store = FakeStore()
-    out = pipeline.profile(_rq(), catalog=FakeCatalog([], fail=True), store=store)
+    out = pipeline.profile(_rq(), catalog=FakeCatalog([], fail=True), store=store, recipient_store=FakeRecipientStore())
     assert out.status is RunStatus.FAILED and "카탈로그" in out.failure_reason
     assert store.get(9073).status is RunStatus.FAILED                          # FAILED도 기록
 
 
 def test_profile_with_reviews_still_v1_path() -> None:
-    out = pipeline.profile(_rq(pref="휴대용", reviews=[Review(product_id=1, rating=5)]), catalog=FakeCatalog(PRODUCTS), store=FakeStore())
+    out = pipeline.profile(_rq(pref="휴대용", reviews=[Review(product_id=1, rating=5)]), catalog=FakeCatalog(PRODUCTS), store=FakeStore(), recipient_store=FakeRecipientStore())
     assert out.status is RunStatus.RESULT_READY and out.validation.preferred_tags == []   # 모델 단계 미구현 → v1 경로
 
 
@@ -159,13 +159,13 @@ def test_profile_store_failure_is_failed() -> None:
     class BrokenStore(FakeStore):
         def save(self, outcome):
             raise RuntimeError("db down")
-    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=BrokenStore())
+    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=BrokenStore(), recipient_store=FakeRecipientStore())
     assert out.status is RunStatus.FAILED and "저장 실패" in out.failure_reason
 
 
 def test_profile_records_running_then_result_with_same_hash() -> None:
     store = FakeStore()
-    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store)
+    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore())
     assert store.history == [RunStatus.RUNNING, RunStatus.RESULT_READY]          # 접수 기록이 결과보다 먼저
     assert out.input_hash == pipeline.input_hash(_rq(disliked=[(100, "뷰티")])) and len(out.input_hash) == 64
 

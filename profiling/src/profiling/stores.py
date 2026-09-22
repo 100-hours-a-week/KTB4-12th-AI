@@ -1,12 +1,12 @@
-"""저장소 어댑터 — ports.ProfileRunStore · ports.RecipientProfileStore 의 PostgreSQL 판과 메모리 판.
+"""저장소 어댑터 — ports.ProfileRunStore · ports.RecipientProfileStore 의 PostgreSQL 구현.
 
-  DbProfileRunStore · MemoryProfileRunStore              ai_profile.profile_runs        실행 기록 — (수신자, source_version) 한 쌍마다 한 행
-  DbRecipientProfileStore · MemoryRecipientProfileStore  ai_profile.recipient_profiles  프로필 — 수신자당 한 행, 최신 분석이 덮어씀
+  DbProfileRunStore        ai_profile.profile_runs        실행 기록 — (수신자, source_version) 한 쌍마다 한 행
+  DbRecipientProfileStore  ai_profile.recipient_profiles  프로필 — 수신자당 한 행, 최신 분석이 덮어씀
 
-같은 계약이라 main.py 의 조립 한 줄(PROFILING_STORE=db|memory)만 바꾸면 교체된다.
 표 구조·UPSERT 규칙·상태 전이는 docs/DB_전환_설명.md, 근거는 3단계 구현 상세 §10.2·§16.4 및 담당파트 설계서 §1.7.
+다른 구현을 끼울 자리는 ports.py(Protocol)이고, 조립은 main.py 한 곳에서만 한다.
 
-스레드 안전: DB 판은 Engine 커넥션 풀(메서드마다 `with engine.begin()` 하나), 메모리 판은 Lock 하나.
+스레드 안전: Engine 커넥션 풀이 담당한다 — 메서드마다 `with engine.begin()` 트랜잭션 하나.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import threading
 from typing import Any
 
 import sqlalchemy as sa
@@ -125,45 +124,6 @@ class DbProfileRunStore:
             return conn.execute(sa.text(f"delete from {RUNS_TABLE} where recipient_user_id = :rid"), {"rid": recipient_user_id}).rowcount
 
 # ===========================================================================
-# 실행 기록 (메모리) — DB 없이 돌릴 때
-# ===========================================================================
-
-
-class MemoryProfileRunStore:
-    """ports.ProfileRunStore 구현."""
-
-    def __init__(self) -> None:
-        self._items: dict[int, ProfileOutcome] = {}
-        self._lock = threading.Lock()
-
-    # ---- ports.ProfileRunStore --------------------------------------------------
-    ## source_version check
-    def save(self, outcome: ProfileOutcome) -> None:
-        rid = outcome.recipient_user_id
-        with self._lock:
-            prev = self._items.get(rid)
-            self._items[rid] = outcome
-        if prev is not None and prev.source_version > outcome.source_version:
-            # 순서 역전 — DB adapter에서는 저장하지 않고 SUPERSEDED로 표시할 자리(#23). 오늘은 기록만.
-            log.warning("MemoryProfileRunStore: recipient=%s source_version 역전 %s → %s (덮어씀)", rid, prev.source_version, outcome.source_version)
-        else:
-            log.debug("MemoryProfileRunStore: recipient=%s source_version=%s status=%s 저장", rid, outcome.source_version, outcome.status)
-
-    def get(self, recipient_user_id: int) -> ProfileOutcome | None:
-        with self._lock:
-            return self._items.get(recipient_user_id)
-
-    # ---- 편의 (시험·디버그) ------------------------------------------------------
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._items)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._items.clear()
-
-# ===========================================================================
 # ai_profile.recipient_profiles — 수신자 프로필
 # ===========================================================================
 
@@ -223,37 +183,3 @@ class DbRecipientProfileStore:
     def delete(self, recipient_user_id: int) -> bool:
         with self._engine.begin() as conn:
             return conn.execute(sa.text(f"delete from {PROFILES_TABLE} where recipient_user_id = :rid"), {"rid": recipient_user_id}).rowcount > 0
-
-# ===========================================================================
-# 수신자 프로필 (메모리) — 목, 내용은 채울 것
-# ===========================================================================
-
-## 메모리 구현을 위한 임시 클래스 -> DB 연동시 변경예정
-class MemoryRecipientProfileStore:
-    """ports.RecipientProfileStore 구현 (메모리)."""
-
-    def __init__(self) -> None:
-        self._items: dict[int, RecipientProfile] = dict()
-        self._lock = threading.Lock()
-
-    def upsert(self, profile: RecipientProfile) -> None:
-
-
-
-        raise NotImplementedError
-
-    def get(self, recipient_user_id: int) -> RecipientProfile | None:
-
-
-        raise NotImplementedError
-
-    def delete(self, recipient_user_id: int) -> bool:
- 
-        ## 제거할려는 아이템이 없다 -> 에러 발생(항목없음)
-        if recipient_user_id in self._items:
-            
-            return 
-        ## 제거할려는 아이템이 있다. -> 제거
-        else:
-            self._items[recipient_user_id] = []
-        raise NotImplementedError
