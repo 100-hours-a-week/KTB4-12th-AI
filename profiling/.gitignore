@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+.env
+.DS_Store
+
+# 7.9 export 저장본 (fetch_export.py 결과) — 커밋하지 않음
+data/

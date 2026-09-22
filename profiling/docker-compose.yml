@@ -1,0 +1,25 @@
+# 로컬 시험용 DB — 팀원 골격의 compose(ai-db)와 같은 이미지·DB·계정 이름을 쓴다 (합칠 때 그대로 교체 가능).
+# 실행:  docker compose up -d      중지: docker compose down      데이터까지 삭제: docker compose down -v
+services:
+  ai-db:
+    image: pgvector/pgvector:pg16
+    container_name: profiling-ai-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ai_chat
+      POSTGRES_USER: ai_user
+      POSTGRES_PASSWORD: ai_password
+      TZ: UTC
+    command: ["postgres", "-c", "timezone=UTC"]
+    volumes:
+      - ai_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_user -d ai_chat"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  ai_pgdata:
