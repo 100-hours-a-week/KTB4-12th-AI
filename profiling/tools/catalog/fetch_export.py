@@ -156,7 +156,7 @@ def compare(ai_products: list[ProductRecord], backend_products: list[ProductReco
     rep = DiffReport(only_in_backend=sorted(b.keys() - a.keys()), only_in_ai=sorted(a.keys() - b.keys()))
     for pid in sorted(a.keys() & b.keys()):
         rep.common += 1
-        for f in ("categoryId", "categoryName", "available", "name"):
+        for f in ("categoryId", "categoryName", "availability", "name"):
             if getattr(a[pid], f) != getattr(b[pid], f):
                 rep.changed.append((pid, f, getattr(a[pid], f), getattr(b[pid], f)))
     return rep

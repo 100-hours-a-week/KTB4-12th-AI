@@ -14,9 +14,12 @@ Create Date: 2026-09-23
                 채우기 전에는 7.7로 내보낼 수 없다 (Backend에 없는 번호가 된다).
 
 미확인 값은 미확인으로 둔다 (패키지 README 지시):
-  stock_quantity · available  전건 NULL. "품절 0"이나 "판매가능 true"로 바꾸지 않는다.
-  view_count                  패키지에 없음 → NULL. v1 풀 정렬 기준이므로 Backend 7.9 export가 와야 채워진다.
-  둘 다 Backend 7.9 export(`available` = quantity > 0, `views`)로 갱신할 자리다.
+  stock_quantity  전건 NULL. "품절 0"으로 바꾸지 않는다.
+  availability    재고 상태 3값 available · unavailable · unknown — 검색기(product-search)와 같은 형(09-23 합의).
+                  패키지에 재고 정보가 없으므로 전건 `unknown`(= 재고 정보가 없는 상품). Backend 7.9 export의 boolean이
+                  available/unavailable로 덮는다. unknown을 둘 중 하나로 추정하지 않는다.
+                  v1 추천 풀은 **unavailable만 제외**하고 unknown은 남긴다 — 실제 재고를 아는 Backend가 최종 판단한다.
+  view_count      패키지에 없음 → NULL. v1 풀 정렬 기준이나 기준 자체가 아직 논의 중(09-23)이다.
 
 catalog_versions: 적재 1회 = 1행. 활성은 항상 1개(부분 유니크 인덱스)이고 그 id(uuid)가
 profile.types.SearchResult.catalog_version_id 에 들어간다 — 파일 카탈로그의 고정 UUID를 대신한다.
@@ -96,8 +99,9 @@ def upgrade() -> None:
         sa.Column("list_price", sa.Integer, nullable=True, comment="정가. 충돌·미확인 4건은 NULL — 할인율을 만들지 않는다"),
         sa.Column("currency", sa.Text, nullable=False, server_default=sa.text("'KRW'")),
         sa.Column("stock_quantity", sa.Integer, nullable=True, comment="미확인 = NULL. 패키지는 전건 NULL"),
-        sa.Column("available", sa.Boolean, nullable=True, comment="미확인 = NULL. Backend 7.9의 quantity > 0 으로 채운다"),
-        sa.Column("view_count", sa.Integer, nullable=True, comment="패키지에 없음 = NULL. Backend 7.9의 views 로 채운다 (v1 풀 정렬 기준)"),
+        sa.Column("availability", sa.Text, nullable=False, server_default=sa.text("'unknown'"),
+                  comment="재고 3값 available·unavailable·unknown. 패키지 적재분은 전건 unknown, Backend 7.9가 덮는다"),
+        sa.Column("view_count", sa.Integer, nullable=True, comment="패키지에 없음 = NULL. Backend 7.9의 views 로 채운다 (v1 풀 정렬 기준 — 기준은 논의 중)"),
         sa.Column("source_provider", sa.Text, nullable=False),
         sa.Column("source_product_url", sa.Text, nullable=False),
         sa.Column("source_image_url", sa.Text, nullable=False),
@@ -109,6 +113,7 @@ def upgrade() -> None:
         sa.CheckConstraint("unit_price >= 0", name="ck_products_unit_price"),
         sa.CheckConstraint("list_price IS NULL OR list_price >= 0", name="ck_products_list_price"),
         sa.CheckConstraint(f"product_type IN {PRODUCT_TYPES}", name="ck_products_type"),
+        sa.CheckConstraint("availability IN ('available', 'unavailable', 'unknown')", name="ck_products_availability"),
         sa.CheckConstraint("backend_product_id IS NULL OR backend_product_id > 0", name="ck_products_backend_id"),
         sa.UniqueConstraint("backend_product_id", name="uq_products_backend_id"),
         schema=SCHEMA,

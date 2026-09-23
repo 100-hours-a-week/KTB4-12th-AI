@@ -46,7 +46,7 @@ def test_compare_ids_and_changes() -> None:
     be = fx.check_contract(_doc([_p(2), _p(3, categoryId=8, categoryName="new", available=False), _p(4)])).valid
     d = fx.compare(ai, be)
     assert d.only_in_ai == [1] and d.only_in_backend == [4] and d.common == 2 and not d.clean
-    assert {(pid, f) for pid, f, _, _ in d.changed} == {(3, "categoryId"), (3, "categoryName"), (3, "available")}
+    assert {(pid, f) for pid, f, _, _ in d.changed} == {(3, "categoryId"), (3, "categoryName"), (3, "availability")}
     assert fx.compare(ai, ai).clean
 
 

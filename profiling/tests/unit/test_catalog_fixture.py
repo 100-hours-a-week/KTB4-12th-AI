@@ -18,6 +18,6 @@ def test_fixture_loads_with_expected_shape() -> None:
     assert len(products) == 111
     assert len({p.categoryName for p in products}) == 56                     # 카테고리 전부
     assert sum(1 for p in products if p.description is None) == 1            # 설명 null 케이스
-    assert sum(1 for p in products if not p.available) == 2                  # 판매 불가 케이스
+    assert sum(1 for p in products if p.availability == "unavailable") == 2  # 재고 없음 케이스
     assert [p.productId for p in products] == sorted(p.productId for p in products)   # 7.9: productId 오름차순
     assert sum(1 for p in products if p.viewCount > 0) > 100                    # 조회수(임의 값)가 실려 있음 — v1 정렬 기준

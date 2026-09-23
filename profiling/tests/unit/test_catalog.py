@@ -22,6 +22,8 @@ RAW = {  # 동료 공유본 원형 (형식 b) — 실제 파일의 키 그대로
          "category": "주방용품", "category_id": "CAT-03-01", "price_krw": "12000", "sale_status": "ON_SALE", "sold_out": True},
         {"product_id": "KAKAO_GIFT:11", "name": "중복", "brand": "B", "description": "x",
          "category": "메이크업", "category_id": "CAT-01-02", "price_krw": "1", "sale_status": "ON_SALE", "sold_out": False},
+        {"product_id": "KAKAO_GIFT:14", "name": "상태 없음", "brand": "E", "description": None,
+         "category": "메이크업", "category_id": "CAT-01-02", "price_krw": "5000"},   # sale_status·sold_out 없음 → unknown
         {"product_id": "KAKAO_GIFT:13", "name": "가격 없음", "brand": "D", "category": "주방용품", "category_id": "CAT-03-01",
          "sale_status": "ON_SALE", "sold_out": False},   # price_krw 없음 → 형식 오류로 버림
     ],
@@ -50,15 +52,16 @@ def test_file_catalog_raw_format(tmp_path: Path) -> None:
     assert isinstance(cat, CatalogReader)                       # ports 모양
     version_id, products = cat.active()
     assert version_id == FILE_CATALOG_VERSION_ID
-    assert [p.productId for p in products] == [11, 12]         # 중복 11 버림, 가격 없는 13 버림
+    assert [p.productId for p in products] == [11, 12, 14]     # 중복 11 버림, 가격 없는 13 버림
     lipbalm = cat.by_id(11)
     assert lipbalm is not None
     assert lipbalm.name == "립밤" and lipbalm.categoryId == 102 and lipbalm.categoryName == "메이크업" and lipbalm.price == 39000
-    assert lipbalm.available is True
-    assert cat.by_id(12).available is False                    # sold_out → 판매 불가
+    assert lipbalm.availability == "available"
+    assert cat.by_id(12).availability == "unavailable"         # sold_out → 재고 없음
+    assert cat.by_id(14).availability == "unknown"             # 판매 상태를 모르면 추정하지 않는다
     assert cat.by_id(12).description is None
     assert cat.by_id(999) is None
-    assert len(cat) == 2
+    assert len(cat) == 3
 
 
 def test_file_catalog_export_format(tmp_path: Path) -> None:

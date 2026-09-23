@@ -41,7 +41,7 @@ v1([BE_연동_필드표_v1.md](BE_연동_필드표_v1.md))에서 **바뀌는 것
 | `categoryId` | integer > 0 | ✔ | ✕ | `products.category_id` | **7.6 `dislikedCategories[].categoryId`와 대조해 제외** |
 | `categoryName` | string | ✔ | ✕ | `categories.name` | 이름 대조(보조) |
 | `price` | integer ≥ 0 | ✔ | ✕ | `products.price` | 표시 |
-| `available` | boolean | ✔ | ✕ | `quantity > 0` | **false면 추천 풀에서 제외** |
+| `available` | boolean | ✔ | ✕ | `quantity > 0` | AI는 3값(`available`·`unavailable`·`unknown`)으로 받아 저장한다 — `true→available`, `false→unavailable`, **필드가 없거나 null이면 `unknown`**. **추천 풀에서는 `unavailable`만 제외**하고 `unknown`은 남긴다(09-23 합의: 실제 재고는 BE가 안다) |
 | `updatedAt` | ISO 8601 UTC | ✔ | ✕ | 상품·카테고리 `updated_at` 중 늦은 값 | 변경 판정 |
 | `viewCount` **또는 `views`** | integer ≥ 0 | — | ✕ | `products.views` | **정렬 기준(내림차순)**. ⚠ 위키 7.9에 없음 — 추가 필요. 없으면 0(정렬 무의미) |
 | 그 밖의 필드(`sales`, `quantity`, `imageUrl` …) | | | | | 무시 (CLI가 "계약에 없는 필드"로 이름·건수만 보고) |
@@ -55,6 +55,8 @@ v1([BE_연동_필드표_v1.md](BE_연동_필드표_v1.md))에서 **바뀌는 것
 ```
 
 빈 목록은 `200` + `products: []`. 품절(재고 0)도 `available: false`로 **포함**한다.
+
+재고를 모르는 상품은 `available`을 **보내지 않거나 `null`** 로 보내면 AI가 `unknown`으로 저장한다 — AI는 `unknown`을 `true`/`false`로 추정하지 않는다(검색기와 같은 규칙). 지금 AI가 적재한 카탈로그 패키지에는 재고 정보가 없어 4,231건이 전부 `unknown`이다.
 
 ### 응답 — 오류 (BE가 돌려주는 것)
 

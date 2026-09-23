@@ -64,7 +64,7 @@ def test_tables_and_constraints_exist(engine) -> None:
             "select constraint_name from information_schema.table_constraints "
             "where table_schema = :s and constraint_type = 'CHECK'"), {"s": SCHEMA})}
         assert {"ck_categories_level", "ck_categories_parent_by_level", "ck_products_type",
-                "ck_products_unit_price", "ck_products_backend_id"} <= checks
+                "ck_products_unit_price", "ck_products_backend_id", "ck_products_availability"} <= checks
         # Backend ID 는 아직 없을 수 있어야 한다
         assert c.execute(sa.text(
             "select is_nullable from information_schema.columns "
@@ -102,10 +102,10 @@ def test_load_inserts_and_is_idempotent(engine, clean) -> None:
     first = lc.load(engine, pkg, activate=False)
     assert first["products"] == 2 and first["categories"] == 2
     with engine.begin() as c:
-        row = c.execute(sa.text(f"select name, brand, unit_price, attributes, available, view_count, backend_product_id "
+        row = c.execute(sa.text(f"select name, brand, unit_price, attributes, availability, view_count, backend_product_id "
                                 f"from {SCHEMA}.products where source_product_id = :p"), {"p": PIDS[0]}).mappings().one()
     assert row["name"] == "상품0" and row["unit_price"] == 1000 and row["attributes"] == {"k": "v"}
-    assert row["available"] is None and row["view_count"] is None and row["backend_product_id"] is None
+    assert row["availability"] == "unknown" and row["view_count"] is None and row["backend_product_id"] is None
 
     pkg["products"][0]["productName"] = "이름바뀜"
     lc.load(engine, pkg, activate=False)                     # 같은 패키지를 다시 — 상품 수는 그대로, 값은 갱신
@@ -116,16 +116,16 @@ def test_load_inserts_and_is_idempotent(engine, clean) -> None:
 
 
 def test_load_keeps_backend_id_and_availability(engine, clean) -> None:
-    """재적재가 Backend ID·재고를 지우면 안 된다 — 그 두 열은 다른 경로(회신·7.9)로 채운다."""
+    """재적재가 Backend ID·재고 상태를 지우면 안 된다 — 그 두 열은 다른 경로(회신·7.9)로 채운다."""
     lc.load(engine, _pkg(), activate=False)
     with engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = 777, available = true, view_count = 42 "
+        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = 777, availability = 'available', view_count = 42 "
                           "where source_product_id = :p"), {"p": PIDS[0]})
     lc.load(engine, _pkg(), activate=False)
     with engine.begin() as c:
-        row = c.execute(sa.text(f"select backend_product_id, available, view_count from {SCHEMA}.products "
+        row = c.execute(sa.text(f"select backend_product_id, availability, view_count from {SCHEMA}.products "
                                 "where source_product_id = :p"), {"p": PIDS[0]}).mappings().one()
-    assert row["backend_product_id"] == 777 and row["available"] is True and row["view_count"] == 42
+    assert row["backend_product_id"] == 777 and row["availability"] == "available" and row["view_count"] == 42
 
 
 # ---------------------------------------------------------------- Backend ID 회신

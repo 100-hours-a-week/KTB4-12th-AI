@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # 1) 상수 · 타입 별칭 — 클래스 필드가 아님. 응답 본문에 들어가는 값의 "허용 범위"를 정의한다.
@@ -19,6 +19,10 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 ## §2.3 프로파일 상태 모델. AI가 보내는 값은 7.6 응답 PENDING, 7.7 요청 COMPLETED뿐
 ProfileStatus = Literal["NONE", "PENDING", "COMPLETED", "FAILED"]
+
+## 재고 상태 — 검색기(product-search)와 같은 3값. 미확인은 unknown으로 두고 추정하지 않는다.
+## 패키지로 적재한 상품은 재고 정보가 없어 전건 unknown이고, Backend 7.9 export가 available/unavailable로 덮는다.
+Availability = Literal["available", "unavailable", "unknown"]
 
 ## 7.6 오류 코드 (7.5 채팅과 같은 체계). 분석이 실패해도 이 엔드포인트나 7.7로 FAILED를 보내지 않는다
 ProfileExtractErrorCode = Literal[
@@ -169,15 +173,27 @@ class ProductRecord(BaseModel):
     categoryId: int = Field(gt=0)
     categoryName: str
     price: int = Field(ge=0, description="현재 가격. export 시점의 값이며 결제 근거가 아님")
-    available: bool = Field(description="quantity > 0. 재고 0인 상품도 false로 포함됨")
+    availability: Availability = Field(
+        default="unknown", validation_alias=AliasChoices("availability", "available"),
+        description="재고 상태 3값(검색기와 같은 형). 7.9는 boolean available로 보내므로 true→available · false→unavailable로 받고, "
+                    "필드가 없거나 null이면 unknown(=재고 정보가 없는 상품). unknown을 available/unavailable로 추정하지 않는다")
     updatedAt: datetime = Field(description="상품·카테고리 updated_at 중 늦은 값 (UTC ISO 8601)")
+    ## v1이후 삭제 예정
     viewCount: int = Field(default=0, ge=0, validation_alias=AliasChoices("viewCount", "views", "view_count"),
                            description="조회수 — v1 추천 풀 정렬 기준(내림차순). Backend가 초기에는 임의 값을 넣어 보냄(09-22 합의). "
                                        "Backend 열 이름이 views라 viewCount·views·view_count 어느 이름으로 와도 받는다. 없으면 0")
 
+    @field_validator("availability", mode="before")
+    @classmethod
+    def _from_7_9_boolean(cls, v: object) -> object:
+        """7.9의 boolean을 3값으로. 명시적 null도 unknown — Backend가 "모른다"를 null로 보낼 수 있다."""
+        if isinstance(v, bool):
+            return "available" if v else "unavailable"
+        return "unknown" if v is None else v
+
 
 PRODUCT_FIELDS = frozenset(ProductRecord.model_fields)                                   # 계약 필드 이름 (CLI 보고용)
-PRODUCT_FIELD_ALIASES = frozenset({"views", "view_count"})                                # viewCount의 다른 이름 — 모르는 필드로 세지 않음
+PRODUCT_FIELD_ALIASES = frozenset({"views", "view_count", "available"})                   # 같은 뜻의 다른 이름 — 모르는 필드로 세지 않음
 
 
 ## 상품 export 응답 data — 삭제되지 않고 카테고리가 유효한 전체 상품, productId 오름차순. 비면 products: []

@@ -15,9 +15,9 @@ CV = UUID(int=7)   # 시험용 카탈로그 버전 ID
 # ---------------------------------------------------------------- 가짜
 
 
-def _product(pid: int, cat_id: int, cat_name: str, available: bool = True, views: int = 0) -> ProductRecord:
+def _product(pid: int, cat_id: int, cat_name: str, availability: str = "available", views: int = 0) -> ProductRecord:
     return ProductRecord(productId=pid, name=f"p{pid}", brand="b", description=None, categoryId=cat_id, categoryName=cat_name,
-                         price=1000, available=available, updatedAt=datetime(2026, 9, 21, tzinfo=UTC), viewCount=views)
+                         price=1000, availability=availability, updatedAt=datetime(2026, 9, 21, tzinfo=UTC), viewCount=views)
 
 
 class FakeCatalog:
@@ -62,8 +62,8 @@ class FakeRecipientStore:
         return self.rows.pop(rid, None) is not None
 
 
-# 카테고리 3종 × 판매중/불가 섞어 40개: 100번대=뷰티, 200번대=주방, 300번대=완구
-PRODUCTS = [_product(pid, cat, name, available=(pid % 10 != 0))
+# 카테고리 3종 × 재고 있음/없음 섞어 40개: 100번대=뷰티, 200번대=주방, 300번대=완구
+PRODUCTS = [_product(pid, cat, name, availability="unavailable" if pid % 10 == 0 else "available")
             for pid, (cat, name) in enumerate(((c, n) for c, n in [(100, "뷰티"), (200, "주방"), (300, "완구")] for _ in range(14)), start=1)][:40]
 
 
@@ -101,16 +101,25 @@ def test_pool_excludes_disliked_and_unavailable_keeps_order() -> None:
     res = pipeline.build_pool(rq, PRODUCTS, pool_size=30, catalog_version_id=CV)
     by_id = {p.productId: p for p in PRODUCTS}
     assert res.catalog_version_id == CV and res.query_text == ""
-    assert all(by_id[i].categoryId != 200 and by_id[i].available for i in res.product_ids)
+    assert all(by_id[i].categoryId != 200 and by_id[i].availability != "unavailable" for i in res.product_ids)
     assert res.product_ids == sorted(res.product_ids)                          # 조회수가 전부 0이면 카탈로그 순서 (동점 규칙)
-    assert len(res.product_ids) == min(30, sum(1 for p in PRODUCTS if p.available and p.categoryId != 200))
+    assert len(res.product_ids) == min(30, sum(1 for p in PRODUCTS if p.availability != "unavailable" and p.categoryId != 200))
+
+
+def test_pool_keeps_unknown_availability() -> None:
+    """재고를 모르는 상품(unknown)은 풀에 남는다 — 09-23 합의. 실제 재고 판단은 Backend 몫이고,
+    패키지로 적재한 카탈로그는 전건 unknown이라 이 규칙이 아니면 풀이 0건이 된다."""
+    products = [_product(1, 100, "뷰티", availability="unknown"), _product(2, 100, "뷰티", availability="unknown"),
+                _product(3, 100, "뷰티", availability="unavailable"), _product(4, 100, "뷰티", availability="available")]
+    res = pipeline.build_pool(_rq(), products, 30, CV)
+    assert res.product_ids == [1, 2, 4]                                        # unknown 유지 · unavailable만 제외
 
 
 def test_pool_sorted_by_view_count_desc_then_product_id() -> None:
     products = [_product(1, 100, "뷰티", views=5), _product(2, 100, "뷰티", views=50), _product(3, 100, "뷰티", views=50),
-                _product(4, 200, "주방", views=999), _product(5, 100, "뷰티", views=7, available=False)]
+                _product(4, 200, "주방", views=999), _product(5, 100, "뷰티", views=7, availability="unavailable")]
     res = pipeline.build_pool(_rq(disliked=[(200, "주방")]), products, 30, CV)
-    assert res.product_ids == [2, 3, 1]                                        # 50, 50(동점 → id 순), 5 · 주방(999)은 제외 · 판매불가 제외
+    assert res.product_ids == [2, 3, 1]                                        # 50, 50(동점 → id 순), 5 · 주방(999)은 제외 · 재고 없음 제외
 
 
 def test_pool_matches_by_name_when_id_differs() -> None:

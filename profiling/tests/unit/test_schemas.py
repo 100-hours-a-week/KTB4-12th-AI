@@ -66,3 +66,16 @@ def test_product_record_ignores_unknown_and_accepts_view_aliases() -> None:
     assert ProductRecord(**base).viewCount == 0                                           # 없으면 0
     with pytest.raises(ValidationError):                                                  # 필수 누락은 여전히 오류
         ProductRecord(**{k: v for k, v in base.items() if k != "price"})
+
+
+def test_product_record_availability_three_values() -> None:
+    """7.9는 boolean available로 보내고 우리는 3값으로 받는다. 없거나 null이면 unknown — 추정하지 않는다."""
+    base = {"productId": 1, "name": "n", "brand": "b", "description": None, "categoryId": 1, "categoryName": "c",
+            "price": 0, "updatedAt": "2026-09-01T00:00:00Z"}
+    assert ProductRecord(**{**base, "available": True}).availability == "available"
+    assert ProductRecord(**{**base, "available": False}).availability == "unavailable"
+    assert ProductRecord(**base).availability == "unknown"                                # 필드 없음
+    assert ProductRecord(**{**base, "available": None}).availability == "unknown"         # 명시적 null
+    assert ProductRecord(**{**base, "availability": "unknown"}).availability == "unknown"  # 3값을 그대로 줘도 받는다
+    with pytest.raises(ValidationError):
+        ProductRecord(**{**base, "availability": "품절"})                                  # 3값 밖은 거부

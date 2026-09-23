@@ -119,7 +119,8 @@ _PRODUCT = sa.text(f"""
         source_provider = excluded.source_provider, source_product_url = excluded.source_product_url,
         source_image_url = excluded.source_image_url, image_asset_id = excluded.image_asset_id,
         package_id = excluded.package_id, updated_at = now()""")
-# backend_product_id · available · view_count 은 여기서 건드리지 않는다 — 각각 --id-map 과 7.9 export 가 채운다.
+# backend_product_id · availability · view_count 은 여기서 건드리지 않는다 — 각각 --id-map 과 7.9 export 가 채운다.
+# (재적재가 Backend 회신과 재고 상태를 지우면 안 된다. 패키지에는 그 셋이 아예 없다.)
 
 
 def load(engine: sa.Engine, pkg: dict[str, Any], *, activate: bool = True) -> dict[str, Any]:
@@ -210,9 +211,9 @@ def report(engine: sa.Engine) -> None:
               f" · 카테고리 {be_c}/{q(f'select count(*) from {SCHEMA}.categories')}")
         if be_p == 0:
             print("                  ⚠ 아직 하나도 없다 — 7.7로 상품 번호를 내보낼 수 없다. Backend 회신 뒤 --id-map 으로 채운다")
-        av = q(f"select count(available) from {SCHEMA}.products")
+        av = q(f"select count(*) from {SCHEMA}.products where availability <> 'unknown'")
         vc = q(f"select count(view_count) from {SCHEMA}.products")
-        print(f"  available       {av}건 확인됨 (나머지는 미확인 NULL)")
+        print(f"  availability    {av}건 확인됨 (나머지는 unknown — 재고 정보가 없는 상품. 7.9 export 가 채운다)")
         print(f"  view_count      {vc}건 있음 — v1 풀 정렬 기준. Backend 7.9 export 로 채운다")
         mismatch = conn.execute(sa.text(f"""
             select c.source_category_id, c.product_count, count(p.source_product_id)

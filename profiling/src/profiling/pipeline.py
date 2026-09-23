@@ -11,7 +11,7 @@ v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.anal
                             0) store.save(RUNNING)         실행 기록 시작 — profile_runs 한 행 (input_hash 포함). 저장 못 하면 FAILED·콜백 없음
                             1) catalog.active()            활성 카탈로그 (없으면 NoActiveCatalog — api가 접수 단계에서 이미 걸렀지만 여기서도 FAILED로 기록)
                             2) validation 만들기           v1: 비선호 이름만 disliked_tags에, 나머지 빈 값
-                            3) build_pool()                비선호 제외 · 판매중 · 조회수순 pool_size개  (결정 a)
+                            3) build_pool()                비선호 제외 · 재고 없음(unavailable)만 제외 · 조회수순 pool_size개  (결정 a)
                             4) ProfileOutcome(RESULT_READY)
                             5) store.save(outcome)         실행 기록 갱신 — callback_payload·hash가 여기서 DB에 먼저 커밋된다 (§16.4)
                             6) recipient_store.upsert()    수신자 프로필 (recipient_profiles) — 낮은 버전이면 DB가 무시
@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 
 # 관측 라벨 — 어떤 규칙으로 만든 결과인지 저장해 두면 나중에 결과를 비교·회귀할 때 "언제 규칙이 바뀌었나"를 알 수 있다
 VALIDATOR_VERSION_V1 = "v1-skip"      # 검증기 없이 비선호만 반영
-POOL_RULE_V1 = "v1-view-count"        # 풀 정렬 규칙: 조회수 내림차순, 동점 productId 오름차순
+POOL_RULE_V1 = "v1-view-count"        # 풀 정렬 규칙: 조회수 내림차순, 동점 productId 오름차순 (정렬 키는 아직 논의 중 — 09-23)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,11 @@ def needs_model(rq: ProfileRequest) -> bool:
 
 
 def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int, catalog_version_id: UUID) -> SearchResult:
-    """비선호 카테고리를 뺀 판매중 상품을 **조회수 내림차순**으로 pool_size개.
+    """비선호 카테고리를 뺀 상품을 **조회수 내림차순**으로 pool_size개.
+
+    재고(availability, 3값): **unavailable(재고 없음)만 뺀다.** unknown(재고 정보가 없는 상품)은 풀에 남긴다 — 09-23 Backend 합의.
+    실제 재고를 아는 쪽은 Backend이므로 최종 판단을 Backend가 한다. 우리는 unknown을 available로 바꿔 쓰지 않고(검색기와 같은 규칙)
+    "재고 없음으로 확인된 것만 제외"할 뿐이다. 패키지로 적재한 카탈로그는 전건 unknown이라, 이 규칙이 아니면 풀이 0건이 된다.
 
     정렬 기준(결정 a, 09-22 Backend 합의): 상품 목록 export의 조회수(viewCount) 내림차순. 동점은 productId 오름차순(카탈로그 순서)으로
     묶어 같은 입력이면 항상 같은 결과가 나오게 한다 — 임의성(random)은 넣지 않는다. Backend는 초기에 임의 조회수를 넣어 보내므로
@@ -105,7 +109,7 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
     disliked_names = {c.category_name for c in rq.disliked_categories}
     candidates = [
         p for p in products
-        if p.available
+        if p.availability != "unavailable"          # unknown은 남긴다 — 재고 판단은 Backend 몫
         # ID가 정본, 이름은 보조 — Backend가 준 ID와 카탈로그 ID 체계가 어긋나는 사고(ID는 다른데 이름은 같음)까지 막는다
         and p.categoryId not in disliked_ids and p.categoryName not in disliked_names
     ]

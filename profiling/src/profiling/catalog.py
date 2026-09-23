@@ -42,6 +42,16 @@ def _is_raw_format(doc: Any) -> bool:
     return isinstance(doc, dict) and isinstance(doc.get("products"), list) and bool(doc["products"]) and "price_krw" in doc["products"][0]
 
 
+def _availability(p: dict[str, Any]) -> str:
+    """동료 공유본의 판매 상태 → 3값. 상태를 모르면 unknown — 임의로 판매중이라고 하지 않는다."""
+    if p.get("sold_out"):
+        return "unavailable"
+    status = p.get("sale_status")
+    if status is None:
+        return "unknown"
+    return "available" if status == "ON_SALE" else "unavailable"
+
+
 def _adapt_raw_product(p: dict[str, Any]) -> dict[str, Any]:
     """동료 공유본 상품 1건 → 7.9 필드 dict. 실험 `common.adapt_catalog()`와 같은 규칙 (categoryId = 대분류*100 + 소분류)."""
     pid = int(str(p["product_id"]).split(":")[-1])
@@ -55,7 +65,7 @@ def _adapt_raw_product(p: dict[str, Any]) -> dict[str, Any]:
         "categoryId": cid,
         "categoryName": p["category"],
         "price": int(p["price_krw"]),
-        "available": (p.get("sale_status") == "ON_SALE") and not p.get("sold_out", False),
+        "availability": _availability(p),
         "updatedAt": (p.get("provenance") or {}).get("fetched_at") or _RAW_DEFAULT_UPDATED_AT,
     }
 
@@ -116,8 +126,10 @@ class FileCatalogReader:
         self._by_id = {p.productId: p for p in products}
         self.loaded_at = datetime.now(UTC)
         self.version_label = str(doc.get("schema_version") or doc.get("category_version") or "") if isinstance(doc, dict) else ""
-        log.info("FileCatalogReader 로드 %s: 상품 %d건 (형식 오류 %d · 중복 %d · 판매중 %d) label=%s",
-                 self.path.name, len(products), n_invalid, n_dup, sum(p.available for p in products), self.version_label or "-")
+        log.info("FileCatalogReader 로드 %s: 상품 %d건 (형식 오류 %d · 중복 %d · 재고 available %d · unknown %d) label=%s",
+                 self.path.name, len(products), n_invalid, n_dup,
+                 sum(p.availability == "available" for p in products), sum(p.availability == "unknown" for p in products),
+                 self.version_label or "-")
         if n_invalid:
             log.warning("%s %s: 상품 %d건이 7.9 필드 계약에 안 맞아 버림 — tools/catalog/fetch_export.py 로 어느 필드인지 확인",
                         ErrorCode.CONTRACT_7_9_SCHEMA, self.path.name, n_invalid)
