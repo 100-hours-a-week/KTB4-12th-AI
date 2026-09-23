@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3400" height="2030" viewBox="0 0 1700 1015" role="img">
+<defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#3b6fb6"/></marker>
+<marker id="g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#9aa4ad"/></marker>
+<marker id="w" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#c0392b"/></marker>
+<style>text{font-family:"Apple SD Gothic Neo","Noto Sans KR",Arial,sans-serif;fill:#18212b}.title{font-size:30px;font-weight:700;letter-spacing:-.6px}
+.h{font-size:15px;font-weight:700}.h2{font-size:13px;font-weight:700;fill:#3f4a54}.sub{font-size:12px;fill:#5e6873}.msg{font-size:13px}
+.mono{font-family:Menlo,ui-monospace,monospace;font-size:11px;fill:#3f4a54}.monob{font-family:Menlo,ui-monospace,monospace;font-size:13px;font-weight:700;fill:#18212b}
+.small{font-size:13px;fill:#5e6873}.tag{font-size:11px;font-weight:700;fill:#8a94a0;letter-spacing:.4px}
+.port{font-family:Menlo,ui-monospace,monospace;font-size:13px;font-weight:700;fill:#3b6fb6}
+.call{fill:none;stroke:#3b6fb6;stroke-width:1.8;marker-end:url(#a)}.grey{fill:none;stroke:#9aa4ad;stroke-width:1.4;stroke-dasharray:5 4;marker-end:url(#g)}
+.write{fill:none;stroke:#c0392b;stroke-width:1.8;marker-end:url(#w)}.impl{fill:none;stroke:#3b6fb6;stroke-width:1.3;stroke-dasharray:6 4;marker-end:url(#a)}
+.box{fill:#fff;stroke:#bcc5cd;stroke-width:1.3}.stage{fill:#fff;stroke:#3b6fb6;stroke-width:1.6}.band{fill:#eef3fa;stroke:#9db0d2;stroke-width:1.2}
+.core{fill:#f4f8ff;stroke:#3b6fb6;stroke-width:1.8}.db{fill:#fff7f2;stroke:#e0a080;stroke-width:1.4}.ext{fill:#f7f8fa;stroke:#bcc5cd;stroke-width:1.2}
+.rule{stroke:#d9dee3;stroke-width:1}</style></defs><rect width="1700" height="1015" fill="white"/>
+<text x="40" y="46" class="title">profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-23)</text>
+<text x="40" y="70" class="small">Ports &amp; Adapters(헥사고날). 업무 코드는 바깥(HTTP·파일·DB)을 모른다. 바깥이 업무가 정한 "포트(모양)"에 맞춰 들어온다 — 화살표는 항상 안쪽을 향한다.</text>
+<rect x="40" y="92" width="1620" height="62" rx="5" class="band"/>
+<text x="56" y="114" class="monob">main.py</text>
+<text x="140" y="114" class="msg">[조립 · Composition Root]  여기서만 구체 클래스를 안다 — lifespan에서 4개를 만들어 app.state에 두고, 종료 때 정리한다 (아래 회색 점선).</text>
+<text x="56" y="136" class="mono">FileCatalogReader(CATALOG_FILE) · _connect_db(DATABASE_URL) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine) · HttpBackendPort(BACKEND_BASE_URL) · Supervisor(PROFILING_SLOTS)</text>
+<text x="1644" y="114" class="sub" text-anchor="end">settings.py — 환경변수 PROFILING_* 한 곳</text>
+<text x="1644" y="136" class="sub" text-anchor="end">__init__.py — 공개 표면(profile · 자료형 · Settings)</text>
+<path d="M 345.0 156 L 345.0 588" class="grey"/>
+<path d="M 721.0 156 L 721.0 588" class="grey"/>
+<path d="M 1097.0 156 L 1097.0 588" class="grey"/>
+<path d="M 1473.0 156 L 1473.0 588" class="grey"/>
+<text x="40" y="178" class="tag">경계 — 바깥 계약이 닿는 곳</text>
+<rect x="40" y="186" width="300" height="96" rx="5" class="ext"/>
+<text x="56" y="210" class="h">Backend</text>
+<text x="56" y="230" class="mono">POST 7.6 extract-and-pool</text>
+<text x="56" y="245" class="mono">Authorization: Bearer &lt;토큰&gt;</text>
+<text x="56" y="260" class="sub">카탈로그 없으면 503 · 검증 실패 400</text>
+<rect x="390" y="186" width="420" height="96" rx="5" class="stage"/>
+<text x="406" y="210" class="monob">intake.py</text>
+<text x="406" y="230" class="msg">[Transport] 토큰 → 검증 → 202 PENDING</text>
+<text x="406" y="245" class="mono">extract_and_pool() · run_and_callback()</text>
+<text x="406" y="260" class="sub">여기서 Backend와의 HTTP가 끝난다</text>
+<rect x="840" y="186" width="360" height="96" rx="5" class="stage"/>
+<text x="856" y="210" class="monob">schemas.py</text>
+<text x="856" y="230" class="msg">[바깥 계약] 7.6·7.7·7.9 DTO</text>
+<text x="856" y="245" class="mono">camelCase — 문서 1과 1:1</text>
+<text x="856" y="260" class="sub">모르는 필드는 무시하고 경고만</text>
+<rect x="1230" y="186" width="430" height="96" rx="5" class="stage"/>
+<text x="1246" y="210" class="monob">supervisor.py</text>
+<text x="1246" y="230" class="msg">[Supervisor] 프로파일링 슬롯(동시 1)</text>
+<text x="1246" y="245" class="mono">submit() → 응답 뒤 백그라운드에서 실행</text>
+<text x="1246" y="260" class="sub">기한·취소·재시작 복구는 다음</text>
+<path d="M 340 226 L 384 226" class="call"/>
+<path d="M 810 256 L 836 256" class="grey"/>
+<path d="M 1200 226 L 1224 226" class="call"/>
+<text x="40" y="314" class="tag">업무 (안쪽) — 바깥을 모른다. 인자로 받은 포트 모양만 쓴다</text>
+<rect x="40" y="322" width="1620" height="118" rx="5" class="core"/>
+<rect x="66" y="342" width="780" height="78" rx="5" class="box"/>
+<text x="82" y="366" class="monob">pipeline.py</text>
+<text x="82" y="386" class="mono">profile() — 0 RUNNING 기록 → 1 카탈로그 → 2 검증 → 3 풀 30개 → 4 결과 → 5 기록 → 6 프로필</text>
+<text x="82" y="401" class="mono">to_internal · input_hash · needs_model · build_pool.  예외는 FAILED로 바꿔 돌려주고 밖으로 안 던진다</text>
+<rect x="874" y="342" width="760" height="78" rx="5" class="box"/>
+<text x="890" y="366" class="monob">types.py</text>
+<text x="890" y="386" class="mono">[내부 자료형 snake_case] ProfileRequest · ValidationResult · SearchResult</text>
+<text x="890" y="401" class="mono">ProfileOutcome(=profile_runs 행) · RecipientProfile(=recipient_profiles 행) · RunStatus · ErrorCode</text>
+<path d="M 590 282 L 590 320" class="call"/>
+<text x="600" y="308" class="mono">run_and_callback(rq, catalog, store, backend, recipient_store)</text>
+<text x="40" y="474" class="tag">포트 — 업무가 바깥에 요구하는 "모양" (typing.Protocol · ports.py). 업무 코드는 이 파일만 import한다</text>
+<rect x="40" y="484" width="1620" height="52" rx="5" class="band"/>
+<text x="56" y="515" class="monob">ports.py</text>
+<text x="345.0" y="515" class="port" text-anchor="middle">CatalogReader</text>
+<text x="721.0" y="515" class="port" text-anchor="middle">ProfileRunStore</text>
+<text x="1097.0" y="515" class="port" text-anchor="middle">RecipientProfileStore</text>
+<text x="1473.0" y="515" class="port" text-anchor="middle">BackendPort</text>
+<path d="M 1560 440 L 1560 482" class="call"/>
+<text x="1548" y="474" class="sub" text-anchor="end">포트 모양으로만 부른다</text>
+<text x="40" y="580" class="tag">구현 — 포트에 꽂히는 실제 코드. 업무 코드는 이 파일들을 import하지 않는다</text>
+<rect x="170" y="590" width="350" height="118" rx="5" class="box"/>
+<text x="186" y="616" class="h">FileCatalogReader</text>
+<text x="504" y="616" class="mono" text-anchor="end">catalog.py</text>
+<text x="186" y="638" class="mono">active() → (버전, 상품 전체)</text>
+<text x="186" y="653" class="mono">by_id(product_id)</text>
+<text x="186" y="668" class="mono">7.9 형식·원형 자동 판별·검증</text>
+<path d="M 345.0 588 L 345.0 538" class="impl"/>
+<rect x="546" y="590" width="350" height="118" rx="5" class="box"/>
+<text x="562" y="616" class="h">DbProfileRunStore</text>
+<text x="880" y="616" class="mono" text-anchor="end">stores.py</text>
+<text x="562" y="638" class="mono">save() — UPSERT 한 문장</text>
+<text x="562" y="653" class="mono">get() — 최신 1행</text>
+<text x="562" y="668" class="mono">payload_hash · delete_recipient</text>
+<path d="M 721.0 588 L 721.0 538" class="impl"/>
+<rect x="922" y="590" width="350" height="118" rx="5" class="box"/>
+<text x="938" y="616" class="h">DbRecipientProfileStore</text>
+<text x="1256" y="616" class="mono" text-anchor="end">stores.py</text>
+<text x="938" y="638" class="mono">upsert() — 버전 가드</text>
+<text x="938" y="653" class="mono">get() · delete()</text>
+<text x="938" y="668" class="mono">낮은 버전은 DB가 무시</text>
+<path d="M 1097.0 588 L 1097.0 538" class="impl"/>
+<rect x="1298" y="590" width="350" height="118" rx="5" class="box"/>
+<text x="1314" y="616" class="h">HttpBackendPort</text>
+<text x="1632" y="616" class="mono" text-anchor="end">backend.py</text>
+<text x="1314" y="638" class="mono">send_profile_callback()</text>
+<text x="1314" y="653" class="mono">→ CallbackResult(상태·코드)</text>
+<text x="1314" y="668" class="mono">to_callback · callback_body</text>
+<path d="M 1473.0 588 L 1473.0 538" class="impl"/>
+<text x="1485.0" y="562" class="sub">«구현»</text>
+<text x="40" y="750" class="tag">바깥 — 실제 자원</text>
+<rect x="170" y="760" width="350" height="96" rx="5" class="ext"/>
+<text x="186" y="786" class="h2">카탈로그 JSON 파일</text>
+<text x="186" y="806" class="mono">PROFILING_CATALOG_FILE</text>
+<text x="186" y="821" class="mono">예시 111건 · 전체 4,231건</text>
+<text x="186" y="836" class="mono">BE 7.9 export 형식</text>
+<path d="M 345.0 708 L 345.0 758" class="call"/>
+<rect x="546" y="760" width="350" height="96" rx="5" class="db"/>
+<text x="562" y="786" class="h2">PostgreSQL  ai_profile.profile_runs</text>
+<text x="562" y="806" class="mono">실행 1건 = 1행</text>
+<text x="562" y="821" class="mono">(수신자, source_version) UNIQUE</text>
+<text x="562" y="836" class="mono">alembic 0002</text>
+<path d="M 721.0 708 L 721.0 758" class="write"/>
+<rect x="922" y="760" width="350" height="96" rx="5" class="db"/>
+<text x="938" y="786" class="h2">PostgreSQL  ai_profile.recipient_profiles</text>
+<text x="938" y="806" class="mono">수신자 1명 = 1행</text>
+<text x="938" y="821" class="mono">태그는 여기 보관 (DR-035)</text>
+<text x="938" y="836" class="mono">alembic 0001</text>
+<path d="M 1097.0 708 L 1097.0 758" class="write"/>
+<rect x="1298" y="760" width="350" height="96" rx="5" class="ext"/>
+<text x="1314" y="786" class="h2">Backend</text>
+<text x="1314" y="806" class="mono">POST 7.7 상품 ID ≤30</text>
+<text x="1314" y="821" class="mono">200 DELIVERED · 409 SUPERSEDED</text>
+<text x="1314" y="836" class="mono">4xx FAILED · 5xx 재전송 대상</text>
+<path d="M 1473.0 708 L 1473.0 758" class="call"/>
+<line x1="40" y1="890" x2="1660" y2="890" class="rule"/>
+<text x="40" y="916" class="small">이름 규칙 — HTTP 경계만 camelCase(schemas.py). 그 밖의 파이썬은 전부 snake_case. 두 세계를 잇는 변환은 pipeline.to_internal() 과 backend.to_callback() 두 함수뿐이다.</text>
+<text x="40" y="938" class="small">바꿔 끼우기 — 포트가 같은 모양이면 무엇이든 꽂힌다. 단위 테스트는 가짜 구현을, 운영은 위 4개를 쓴다. 파일 카탈로그를 DB로 바꿔도 pipeline.py 는 한 줄도 바뀌지 않는다.</text>
+<text x="40" y="960" class="small">아직 없는 것 — 팀원 Search 호출(v3, 질의어가 생길 때) · ProfileModel(LLM 태그 추출, v3) · 카탈로그 DB adapter. 그때 포트가 하나씩 늘고 구현 칸이 채워진다.</text>
+</svg>

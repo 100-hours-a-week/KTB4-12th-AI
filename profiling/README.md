@@ -2,11 +2,11 @@
 
 Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 **7.6**으로 보내면, 즉시 `202`로 접수하고 백그라운드에서 추천 상품 30개를 골라 **7.7 콜백**으로 돌려주는 서비스. 태그는 AI가 보관하고 Backend에는 상품 번호만 보낸다(DR-035). 상품 목록은 Backend의 **7.9 export**로 받는다.
 
-| 상태 (2026-09-22) | |
+| 상태 (2026-09-23) | |
 |---|---|
 | 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
-| 저장소 | **PostgreSQL** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
-| 테스트 | 단위 51개(외부 의존 없음) + DB 통합 13개(DB 꺼져 있으면 skip) (`uv run pytest`) |
+| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
+| 테스트 | 단위 58개(외부 의존 없음) + 통합 18개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 74 passed, 2 skipped |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
 
 ---
@@ -15,54 +15,30 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 **Ports & Adapters(헥사고날).** 업무 코드는 바깥(HTTP·파일·DB)을 모르고, 바깥이 업무의 "포트(모양)"에 맞춰 들어온다. 의존 방향은 항상 안쪽.
 
-```
-   Backend ──HTTP 7.6──▶ [intake.py] ──▶ [Supervisor 슬롯] ──▶      ┌───────────── 업무 (안쪽) ─────────────┐
-                                                                    │ pipeline.py  요청 한 건의 절차        │
-   파일    ◀── [FileCatalogReader]        ◀── CatalogReader ────────┤ types.py     내부 자료형 · 프로필 행  │
-   DB      ◀── [DbProfileRunStore]        ◀── ProfileRunStore ──────┤ ports.py     바깥에 요구하는 모양     │
-   DB      ◀── [DbRecipientProfileStore]  ◀── RecipientProfileStore ┤                                       │
-   Backend ◀── [HttpBackendPort] 7.7      ◀── BackendPort ──────────┤                                       │
-                                                                    └───────────────────────────────────────┘
-   조립: main.py 한 곳에서만 구체 구현을 만들어 app.state에 둔다.   계약: schemas.py (camelCase, 문서 1 그대로)
-   이름은 3단계 도표와 같다: Transport · Profile · ProfileRunStore · RecipientProfileStore · BackendPort · CatalogReader · Supervisor
-```
+![profiling 구조](docs/assets/structure.png)
 
-```
-profiling/
-├─ src/profiling/
-│  ├─ __init__.py             공개 표면 — profile() · ProfileRequest/Outcome · RunStatus · ErrorCode · Settings
-│  ├─ main.py                 조립(Composition Root) · DB 연결 확인(실패면 앱 안 뜸) · 오류 봉투(422→400, 401/503, 500) · GET /health
-│  ├─ schemas.py              7.6·7.7·7.9 DTO — 바깥 계약. camelCase · 범위 검증 · 모르는 필드는 무시하고 경고
-│  ├─ intake.py               POST /api/internal/v1/ai/profile/extract-and-pool — 토큰 → 503 확인 → 202 → Supervisor → 7.7
-│  ├─ supervisor.py           Supervisor — 프로파일링 슬롯(동시 1). 기한·취소는 다음
-│  ├─ types.py                내부 자료형(snake_case): ProfileRequest · ValidationResult · SearchResult · ProfileOutcome(=profile_runs 행) · RunStatus · ErrorCode
-│  │                          + RecipientProfile(=recipient_profiles 행) · from_outcome · should_replace · cap_tags
-│  ├─ ports.py                Protocol 4개: CatalogReader · ProfileRunStore · RecipientProfileStore · BackendPort
-│  ├─ pipeline.py             to_internal → input_hash → needs_model → build_pool → profile()  (예외는 FAILED로, 밖으로 안 던짐)
-│  ├─ catalog.py              FileCatalogReader — 7.9 export 형식·동료 공유본 원형 자동 판별, 검증·중복 제거
-│  ├─ stores.py               DbProfileRunStore(profile_runs UPSERT 한 문장) · DbRecipientProfileStore(버전 가드) — PostgreSQL 전용
-│  ├─ backend.py              HttpBackendPort — 7.7 POST → CallbackResult(DELIVERED·SUPERSEDED·FAILED·RESULT_READY)
-│  └─ settings.py             Settings(BaseSettings, PROFILING_*) · get_settings()
-├─ tools/
-│  ├─ fake_backend/           가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔(/console, AI DB 확인·검증 탭 포함)
-│  ├─ catalog/fetch_export.py 7.9 가져오기 · 계약 점검(CONTRACT_7_9_SCHEMA) · 상품 ID 대조(파일·ai_search.products) · 저장
-│  └─ catalog/make_sample.py  예시 카탈로그 재생성
-├─ tests/
-│  ├─ fixtures/catalog_sample.json   예시 카탈로그 111건 · 56카테고리 (7.9 형식)
-│  ├─ unit/                   가짜 adapter · httpx.MockTransport · TestClient e2e (DB·네트워크 없음)
-│  └─ integration/            진짜 PostgreSQL — 마이그레이션 결과·upsert·상태 규칙. DB 꺼져 있으면 skip
-├─ docs/
-│  ├─ 코드_안내서.md            파일·함수별 역할 (처음 보는 사람용) · 시퀀스
-│  ├─ DB_전환_설명.md           메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림)
-│  ├─ BE_연동_필드표.md         BE 전달본 색인 — v1(7.6 세 필드·7.7·profileStatus 생애주기·시퀀스 5장) · v2(7.9 export) · v3(취향·리뷰) 로 분리
-│  ├─ BE_연동_필드표_v1.md / _v2.md / _v3.md
-│  ├─ 파이프라인_지도/          날짜별 갱신 기록 — 그림 스냅샷 · 단계별 함수 · 바뀐 것 · **다음 해야 할 일(인수인계)**. 규칙은 그 폴더 README
-│  ├─ 환경_설정.md              uv·Python 3.12·의존성 규칙
-│  └─ assets/                  pipeline-map.png(단계별 함수·연결 지도) · db-transition.png · be-seq/v1|v2|v3/(BE 연동 시퀀스 9장, build_be_sequences.py가 md의 mermaid에서 생성) · v1-flow.png · class-diagram.png(DB 전환 전)
-├─ 이름_대조표.md               같은 뜻·다른 이름 정리 (camelCase ↔ snake_case)
-├─ docker-compose.yml         로컬 DB (pgvector/pg16, ai_chat · ai_user · 5432)
-└─ alembic/versions/          0001 recipient_profiles(수신자 프로필) · 0002 profile_runs(실행 기록)
-```
+> 그림 원본: `docs/assets/build_structure.py` → `structure.svg` (PNG는 Chrome 헤드리스). 모듈이 늘거나 포트가 바뀌면 스크립트를 고치고 다시 만든다.
+
+`src/profiling/` 모듈 12개의 역할은 위 그림에 있다. 나머지 폴더는 이렇다.
+
+| 폴더 · 파일 | 내용 |
+|---|---|
+| `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔(`/console`, AI DB 확인·검증 탭 포함) |
+| `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
+| `tools/catalog/make_sample.py` | 예시 카탈로그 재생성 |
+| `tests/fixtures/catalog_sample.json` | 예시 카탈로그 111건 · 56카테고리 (7.9 형식) |
+| `tests/unit/` | 가짜 구현 · `httpx.MockTransport` — DB·네트워크 없이 돈다 |
+| `tests/integration/` | 진짜 PostgreSQL — 마이그레이션 결과 · upsert · 상태 규칙 · 앱 e2e. DB 꺼져 있으면 skip |
+| `alembic/versions/` | `0001` recipient_profiles(수신자 프로필) · `0002` profile_runs(실행 기록) |
+| `docker-compose.yml` | 로컬 DB (pgvector/pg16 · `ai_chat` · `ai_user` · 5432) |
+| `docs/코드_안내서.md` | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
+| `docs/DB_전환_설명.md` | 메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림) |
+| `docs/BE_연동_필드표.md` | BE 전달본 색인 — v1(7.6 세 필드 · 7.7 · `profileStatus` 생애주기 · 시퀀스 5장) · v2(7.9 export) · v3(취향·리뷰) |
+| `docs/파이프라인_지도/` | 날짜별 갱신 기록 — 그림 스냅샷 · 단계별 함수 · 바뀐 것 · **다음 해야 할 일(인수인계)**. 규칙은 그 폴더 README |
+| `docs/환경_설정.md` | uv · Python 3.12 · 의존성 규칙 |
+| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 9장). 각각 `build_*.py`가 만든다 |
+| `이름_대조표.md` | 같은 뜻 · 다른 이름 정리 (camelCase ↔ snake_case) |
+
 
 ### 이름 규칙
 - **HTTP 경계만 camelCase** (`schemas.py`, fake_backend) — 문서 1과 1:1.
@@ -109,7 +85,7 @@ uv sync                                     # .venv + 의존성 (uv.lock 기준)
 cp .env.example .env                        # 필요 시 값 수정
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
 uv run alembic upgrade head                 # 테이블 생성 (0001·0002)
-uv run pytest -q                            # 64 passed, 3 skipped (DB 꺼져 있으면 통합 13개 skip)
+uv run pytest -q                            # 74 passed, 2 skipped (DB 꺼져 있으면 통합 18개 skip)
 uv run ruff check src tests tools alembic   # lint
 ```
 
@@ -189,14 +165,20 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 5. 다음 순서와 건드리는 곳
 
+인수인계용 전체 목록은 [docs/파이프라인_지도/2026-09-23.md §5](docs/파이프라인_지도/2026-09-23.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 여기는 요약이다.
+
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
-| 1 | ~~DB adapter~~ **완료(09-22)** — `DbProfileRunStore`·`DbRecipientProfileStore`, [docs/DB_전환_설명.md](docs/DB_전환_설명.md). 남은 v1 조각: 접수 단계 중복 판정(`store.get()` — RUNNING이면 새 분석 없음·결과 있으면 재전송만) | `intake.extract_and_pool` 앞부분 | 어댑터·ports |
-| 2 | 7.7 재시도(5xx 최대 3회)·409→SUPERSEDED·실행 기록 상태 갱신 | `HttpBackendPort.send_profile_callback` 안 · Transport가 `store.save(status)` | 포트 시그니처(이미 `RunStatus`) |
-| 3 | Catalog 빌드 CLI — 7.9 수신·검증·버전 저장·활성 포인터 | `catalog/` · fake 7.9는 이미 있음 | |
-| 4 | 팀원 Search 연동 | `pipeline.build_pool` 호출 한 줄 | 나머지 |
-| 5 | v3 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) | `pipeline.profile` 2)단계 · `model.py` | 접수·저장·콜백 |
-| 5′ | **v3 마이그레이션 0003** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/0003_*.py` (`add_column`) · `types.RecipientProfile` 필드 · 통합 테스트 | 0001·0002 |
-| 6 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
+| 1 | **Backend 미팅 결과 반영** — 7.7 태그 유무 · 7.9 조회수 필드명 · 제외 vs 감점 · 비선호 상한 5 | `schemas.py` · `pipeline.build_pool` · `tools/fake_backend` | 포트·저장소 |
+| 2 | **상품 ID를 Backend 기준으로 재적재** — 지금은 우리도 팀원도 수집처 ID(`KAKAO_GIFT:…`·`CAT-01-02`)를 쓴다. 7.7로 보낸 30개가 BE에 없는 번호면 화면에 뜨지 않는다 | `.env`의 `PROFILING_CATALOG_FILE` 교체(코드 0줄) · 팀원 쪽 `schema.sql`·`prepare_catalog.py` | 코드 전부 |
+| 3 | 상품 카탈로그를 DB로 — `0003` 마이그레이션 + 적재 CLI + `DbCatalogReader` | `alembic/versions/0003_*.py` · `tools/catalog/load_catalog.py` · `catalog.py` · `main.py` **한 줄** | `pipeline.py`·`ports.py` |
+| 4 | 접수 단계 중복 판정 — RUNNING이면 새 분석 없음 · 결과 있으면 재전송만 (설계 §10.2) | `intake.extract_and_pool` 앞부분 | 어댑터·ports |
+| 5 | 7.7 재시도(5xx 최대 3회) · 재시작 복구(RUNNING→FAILED 정리) | `backend.send_profile_callback` 안 · `main.lifespan` | 포트 시그니처 |
+| 6 | 배포 — `Dockerfile` · compose에 `ai-app` · 시작 시 `alembic upgrade head` | `docker-compose.yml` · `Dockerfile` | |
+| 7 | **v3** 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) + **팀원 Search 호출** | `pipeline.profile` 2)단계 · `model.py` · `ports.py`에 `SearchPort`·`ProfileModel` 추가 | 접수·저장·콜백 |
+| 7′ | **v3 마이그레이션** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/000N_*.py` (`add_column`) · `types.RecipientProfile` 필드 · 통합 테스트 | 기존 마이그레이션 |
+| 8 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
 
-인터페이스 합의 항목(팀원과): Search 인자와 어휘, Catalog 담당(3단계 문서 vs 팀원 README), 비선호 상한 5의 7.6 반영, 7.7 태그 유무.
+**팀원 Search는 v3부터 부른다.** v1은 질의어가 없어 검색기가 카테고리 라운드로빈으로 돌려주고, 팀원 카탈로그에는 조회수 필드가 없어 09-22에 합의한 정렬 규칙을 지킬 수 없다. 프로파일링의 카탈로그 공급처는 Backend(7.9 또는 전달 파일)이고, 두 쪽이 맞춰야 하는 것은 테이블이 아니라 **상품 ID 체계**다.
+
+합의가 남은 것(팀원·BE와): 7.7 태그 유무 · 7.9 조회수 필드명 · 비선호 제외 vs 감점 · 비선호 상한 5의 7.6 반영 · 디바운스 주기.
