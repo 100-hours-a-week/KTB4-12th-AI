@@ -43,7 +43,7 @@ def lines(x, y, rows, dy=14):
         t(x, y + i * dy, s, c)
 
 
-t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-23 코드 기준)', 'title')
+t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-23 코드 기준 · 재고 3값 반영)', 'title')
 t(40, 70, '위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.', 'small')
 
 # ───────────────────── 0. 조립 (main.py lifespan) ─────────────────────
@@ -113,7 +113,8 @@ lines(x + 12, TOP + 84, [
     ('2  needs_model(rq) → v1: False (취향 None·리뷰 [])', 'mono'),
     ('   validation = ValidationResult(disliked_tags=이름들)', 'mono'),
     ('3  search = build_pool(rq, products, pool_size, version)', 'monob'),
-    ('   판매중 · 비선호(ID 또는 이름) 제외 · viewCount↓ id↑ · 30개', 'sub'),
+    ('   재고 unavailable만 제외(unknown 유지) · 비선호(ID 또는 이름) 제외', 'sub'),
+    ('   · viewCount↓ id↑ · 30개', 'sub'),
     ('4  outcome = ProfileOutcome(RESULT_READY, …)', 'mono'),
     ('5  store.save(outcome)      ← 콜백 본문이 DB에 먼저', 'monob'),
     ('6  recipient_store.upsert(from_outcome(rq, outcome))', 'monob'),
@@ -209,7 +210,8 @@ for (name, file, rows), x in zip(adapters, XS):
 EY = AY0 + AH + 38
 EH = 76
 ext = [
-    ('파일  tests/fixtures/catalog_sample.json', ['111건 · 56카테고리 · viewCount(임의). 전체 4,231건은 .env로', '팀원 ai_search.catalog_* 테이블이 오면 교체'], 'ext'),
+    ('파일  tests/fixtures/catalog_sample.json', ['111건 · 56카테고리 · viewCount(임의). 전체 4,231건은 .env로',
+                                                 'ai_catalog(0003)에 4,231건 적재 완료 — Backend ID 회신 뒤 교체'], 'ext'),
     ('PostgreSQL  ai_chat → ai_profile.profile_runs', ['실행 1건 = 1행 · (recipient_user_id, source_version) UNIQUE', 'status CHECK · callback_payload jsonb · alembic 0002'], 'db'),
     ('PostgreSQL  ai_chat → ai_profile.recipient_profiles', ['수신자 1명 = 1행 · recipient_user_id PK (시퀀스 없음)', 'preferred/disliked_tags · disliked_categories jsonb · 0001'], 'db'),
     ('Backend  (로컬: tools/fake_backend  :8081)', ['POST 7.7 수신 (실패 주입 ok/409/400/500/timeout)', 'GET 7.9 export · 시험 콘솔 /console'], 'ext'),
@@ -232,7 +234,7 @@ t(110, NY + 22, 'ProfileExtractRequest(camel) → to_internal → ProfileRequest
 t(40, NY + 44, '실패 경로', 'h2')
 t(110, NY + 44, '400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.', 'sub')
 t(40, NY + 66, '시험', 'h2')
-t(110, NY + 66, '단위(tests/unit, 58): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 18): 진짜 PostgreSQL로 구현·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
+t(110, NY + 66, '단위(tests/unit, 65): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 25): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
 parts.append('</svg>')
 (P / 'pipeline-map.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')
 print('svg ok')
