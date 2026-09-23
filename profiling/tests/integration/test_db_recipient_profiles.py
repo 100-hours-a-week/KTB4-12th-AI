@@ -26,7 +26,7 @@ def conn(engine):
         c.rollback()
 
 
-def test_schema_applied(conn) -> None:
+def test_schema_applied(conn, alembic_head) -> None:
     cols = conn.execute(sa.text("""
         select column_name, data_type, column_default from information_schema.columns
         where table_schema='ai_profile' and table_name='recipient_profiles' order by ordinal_position""")).all()
@@ -34,7 +34,7 @@ def test_schema_applied(conn) -> None:
     assert names == ["recipient_user_id", "source_version", "preferred_tags", "disliked_tags", "disliked_categories", "created_at", "updated_at"]
     assert cols[0][2] is None                                       # PK는 Backend 값 — 시퀀스 없음
     assert conn.execute(sa.text("select 1 from pg_extension where extname='vector'")).scalar() == 1
-    assert conn.execute(sa.text("select version_num from alembic_version")).scalar() == "0002"
+    assert conn.execute(sa.text("select version_num from alembic_version")).scalar() == alembic_head
 
 
 UPSERT = sa.text("""

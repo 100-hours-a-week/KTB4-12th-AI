@@ -166,7 +166,7 @@ class RecordingBackend:
         return self.result
 
 
-def test_app_end_to_end_with_db(engine, monkeypatch) -> None:
+def test_app_end_to_end_with_db(engine, monkeypatch, alembic_head) -> None:
     monkeypatch.setenv("PROFILING_CATALOG_FILE", FIXTURE)
     get_settings.cache_clear()
     from profiling.main import app
@@ -175,7 +175,7 @@ def test_app_end_to_end_with_db(engine, monkeypatch) -> None:
         with TestClient(app) as client:
             assert isinstance(app.state.store, DbProfileRunStore) and isinstance(app.state.recipient_store, DbRecipientProfileStore)
             health = client.get("/health").json()
-            assert health["store"] == {"backend": "db", "connected": True, "migration": "0002"}
+            assert health["store"] == {"backend": "db", "connected": True, "migration": alembic_head}
 
             fake = RecordingBackend()
             app.state.backend = fake

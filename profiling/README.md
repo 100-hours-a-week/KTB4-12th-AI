@@ -25,11 +25,12 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 |---|---|
 | `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔(`/console`, AI DB 확인·검증 탭 포함) |
 | `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
+| `tools/catalog/load_catalog.py` | Backend 전달 패키지 → `ai_catalog` 적재 · Backend ID 회신 반영(`--id-map`) |
 | `tools/catalog/make_sample.py` | 예시 카탈로그 재생성 |
 | `tests/fixtures/catalog_sample.json` | 예시 카탈로그 111건 · 56카테고리 (7.9 형식) |
 | `tests/unit/` | 가짜 구현 · `httpx.MockTransport` — DB·네트워크 없이 돈다 |
 | `tests/integration/` | 진짜 PostgreSQL — 마이그레이션 결과 · upsert · 상태 규칙 · 앱 e2e. DB 꺼져 있으면 skip |
-| `alembic/versions/` | `0001` recipient_profiles(수신자 프로필) · `0002` profile_runs(실행 기록) |
+| `alembic/versions/` | `0001` recipient_profiles(수신자 프로필) · `0002` profile_runs(실행 기록) · `0003` ai_catalog(상품·카테고리·적재 버전) |
 | `docker-compose.yml` | 로컬 DB (pgvector/pg16 · `ai_chat` · `ai_user` · 5432) |
 | `docs/코드_안내서.md` | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
 | `docs/DB_전환_설명.md` | 메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림) |
@@ -76,7 +77,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | 패키지 | **uv** — `pyproject.toml` + `uv.lock`(커밋) · `.venv`(커밋 안 함) | 폴더별 가상환경 만들지 않음 |
 | 의존성 | fastapi · uvicorn[standard] · pydantic · pydantic-settings · httpx · sqlalchemy · alembic · psycopg[binary] | dev: pytest · ruff |
 | 설정 | 환경변수 `PROFILING_*` 또는 `profiling/.env` (`.env.example` 복사) | 코드는 `settings.X`로만 접근 — 이름 바꿀 때 `settings.py` 한 곳 |
-| DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`·`0002` | 저장소는 PostgreSQL 하나뿐 — 연결 실패면 앱이 뜨지 않는다 (DB 없이 띄우는 모드는 없음) |
+| DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`~`0003` | 저장소는 PostgreSQL 하나뿐 — 연결 실패면 앱이 뜨지 않는다 (DB 없이 띄우는 모드는 없음) |
 | 카탈로그 | 기본 `tests/fixtures/catalog_sample.json`(111건) · 전체 4,231건은 `.env`에서 경로 지정 | 팀원 카탈로그 DB 전까지 파일 |
 
 ```bash
@@ -84,7 +85,7 @@ cd profiling
 uv sync                                     # .venv + 의존성 (uv.lock 기준)
 cp .env.example .env                        # 필요 시 값 수정
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
-uv run alembic upgrade head                 # 테이블 생성 (0001·0002)
+uv run alembic upgrade head                 # 테이블 생성 (0001~0003)
 uv run pytest -q                            # 74 passed, 2 skipped (DB 꺼져 있으면 통합 18개 skip)
 uv run ruff check src tests tools alembic   # lint
 ```
@@ -170,8 +171,8 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
 | 1 | **Backend 미팅 결과 반영** — 7.7 태그 유무 · 7.9 조회수 필드명 · 제외 vs 감점 · 비선호 상한 5 | `schemas.py` · `pipeline.build_pool` · `tools/fake_backend` | 포트·저장소 |
-| 2 | **상품 ID를 Backend 기준으로 재적재** — 지금은 우리도 팀원도 수집처 ID(`KAKAO_GIFT:…`·`CAT-01-02`)를 쓴다. 7.7로 보낸 30개가 BE에 없는 번호면 화면에 뜨지 않는다 | `.env`의 `PROFILING_CATALOG_FILE` 교체(코드 0줄) · 팀원 쪽 `schema.sql`·`prepare_catalog.py` | 코드 전부 |
-| 3 | 상품 카탈로그를 DB로 — `0003` 마이그레이션 + 적재 CLI + `DbCatalogReader` | `alembic/versions/0003_*.py` · `tools/catalog/load_catalog.py` · `catalog.py` · `main.py` **한 줄** | `pipeline.py`·`ports.py` |
+| 2 | **Backend ID 회신 받기** — `ai_catalog`에 4,231건이 들어갔지만 `backend_product_id`가 전부 NULL이다. Backend가 적재하고 `product-id-map.jsonl`·`category-id-map.jsonl`의 null을 채워 보내면 `--id-map`으로 반영한다. 그 전에는 7.7로 상품 번호를 내보낼 수 없다 | `load_catalog --id-map`(코드 이미 있음) · 팀원 쪽 `schema.sql`·`prepare_catalog.py`도 같은 ID로 | 코드 전부 |
+| 3 | ~~상품 카탈로그 DB~~ **절반 완료(09-23)** — `0003` 마이그레이션 + `load_catalog.py`로 4,231건·67분류 적재 완료. 남은 것은 `DbCatalogReader`인데 **Backend ID가 채워진 뒤**에 의미가 있다(2번) | `catalog.py` · `main.py` **한 줄** | `pipeline.py`·`ports.py` |
 | 4 | 접수 단계 중복 판정 — RUNNING이면 새 분석 없음 · 결과 있으면 재전송만 (설계 §10.2) | `intake.extract_and_pool` 앞부분 | 어댑터·ports |
 | 5 | 7.7 재시도(5xx 최대 3회) · 재시작 복구(RUNNING→FAILED 정리) | `backend.send_profile_callback` 안 · `main.lifespan` | 포트 시그니처 |
 | 6 | 배포 — `Dockerfile` · compose에 `ai-app` · 시작 시 `alembic upgrade head` | `docker-compose.yml` · `Dockerfile` | |
