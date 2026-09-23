@@ -33,11 +33,12 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | `alembic/versions/` | `0001` recipient_profiles(수신자 프로필) · `0002` profile_runs(실행 기록) · `0003` ai_catalog(상품·카테고리·적재 버전) |
 | `docker-compose.yml` | 로컬 DB (pgvector/pg16 · `ai_chat` · `ai_user` · 5432) |
 | `docs/코드_안내서.md` | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
+| `docs/시퀀스_전체.md` | **구현된 프로파일링 전체 시퀀스** — 기동 · 성공 전체 · 접수 거절 · 분석 실패(침묵) · 콜백 4갈래 · 슬롯 (그림 6장) |
 | `docs/DB_전환_설명.md` | 메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림) |
 | `docs/BE_연동_필드표.md` | BE 전달본 색인 — v1(7.6 세 필드 · 7.7 · `profileStatus` 생애주기 · 시퀀스 5장) · v2(7.9 export) · v3(취향·리뷰) |
 | `docs/파이프라인_지도/` | 날짜별 갱신 기록 — 그림 스냅샷 · 단계별 함수 · 바뀐 것 · **다음 해야 할 일(인수인계)**. 규칙은 그 폴더 README |
 | `docs/환경_설정.md` | uv · Python 3.12 · 의존성 규칙 |
-| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 9장). 각각 `build_*.py`가 만든다 |
+| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 9장) · `seq/`(전체 시퀀스 6장). 각각 `build_*.py`가 만든다 |
 | `이름_대조표.md` | 같은 뜻 · 다른 이름 정리 (camelCase ↔ snake_case) |
 
 
