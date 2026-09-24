@@ -12,6 +12,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -36,11 +37,16 @@ class Settings(BaseSettings):
     DATABASE_URL: str = Field(default="postgresql+psycopg://ai_user:ai_password@localhost:5432/ai_chat",
                               description="SQLAlchemy URL (psycopg 3). Alembic env.py도 이 값을 쓴다")
 
-    # ---- 카탈로그 (DB adapter 전까지 파일)
+    # ---- 카탈로그
+    CATALOG_SOURCE: Literal["file", "db"] = Field(
+        default="file",
+        description="활성 카탈로그를 어디서 읽나. db = ai_catalog(0003) — **배포는 이쪽**(컨테이너에 파일이 없다). "
+                    "file = CATALOG_FILE 의 JSON — 로컬 개발·시험 기본값",
+    )
     CATALOG_FILE: Path = Field(
         default=Path("tests/fixtures/catalog_sample.json"),
         description="카탈로그 JSON(7.9 export 형식 또는 동료 공유본 원형). 기본은 레포 안 예시 111건 — 전체 4,231건은 .env에서 지정. "
-                    "상대경로는 실행 위치(profiling/) 기준. DB 전환 후 삭제",
+                    "상대경로는 실행 위치(profiling/) 기준. CATALOG_SOURCE=file 일 때만 쓴다",
     )
 
     # ---- 계약 상한 (문서 1 §7.6·§7.7 · C-05)

@@ -3,10 +3,10 @@
 실행:  uv run uvicorn profiling.main:app --port 8000 --reload
 확인:  curl localhost:8000/health
 
-여기서만 구체 클래스(FileCatalogReader · Db*Store · HttpBackendPort)를 import한다. 라우터(intake.py)와 업무(pipeline.py)는 app.state에 든 객체를 ports의 모양으로만 쓴다.
+여기서만 구체 클래스(DbCatalogReader·FileCatalogReader · Db*Store · HttpBackendPort)를 import한다. 라우터(intake.py)와 업무(pipeline.py)는 app.state에 든 객체를 ports의 모양으로만 쓴다.
 
 app.state에 두는 것 (lifespan에서 1회 생성):
-  catalog          CatalogReader        FileCatalogReader (팀원 카탈로그 DB 전까지 파일)
+  catalog          CatalogReader        DbCatalogReader(ai_catalog) 또는 FileCatalogReader — CATALOG_SOURCE 설정
   store            ProfileRunStore      DbProfileRunStore (ai_profile.profile_runs)
   recipient_store  RecipientProfileStore  DbRecipientProfileStore (ai_profile.recipient_profiles)
   backend          BackendPort          HttpBackendPort
@@ -28,7 +28,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from profiling import intake
 from profiling.backend import HttpBackendPort
-from profiling.catalog import FileCatalogReader
+from profiling.catalog import DbCatalogReader, FileCatalogReader
 from profiling.ports import NoActiveCatalog
 from profiling.schemas import ErrorBody, ErrorResponse
 from profiling.settings import Settings, get_settings
@@ -51,18 +51,20 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     logging.basicConfig(level=settings.LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    # 카탈로그 — 오늘은 파일. 로드 실패해도 앱은 띄운다: 7.6이 503을 내고, /health가 catalog=false를 보이게.
+    # 저장소 — PostgreSQL 하나뿐. 연결이 안 되면 여기서 앱이 죽는다(기록 없이 콜백만 나가는 상태를 만들지 않으려고).
+    app.state.engine = _connect_db(settings)
+
+    # 카탈로그 — 설정 한 줄로 DB(배포)와 파일(로컬) 중 하나. 로드 실패해도 앱은 띄운다: 7.6이 503을 내고, /health가 active=false를 보이게.
     try:
         ## 상품DB연결
-        app.state.catalog = FileCatalogReader(Path(settings.CATALOG_FILE))
+        app.state.catalog = (DbCatalogReader(app.state.engine) if settings.CATALOG_SOURCE == "db"
+                             else FileCatalogReader(Path(settings.CATALOG_FILE)))
         version_id, products = app.state.catalog.active()
-        log.info("카탈로그 로드 version=%s products=%d (%s)", version_id, len(products), settings.CATALOG_FILE)
+        log.info("카탈로그 로드 source=%s version=%s products=%d (%s)", settings.CATALOG_SOURCE, version_id, len(products),
+                 "ai_catalog" if settings.CATALOG_SOURCE == "db" else settings.CATALOG_FILE)
     except NoActiveCatalog as e:
         log.error("활성 카탈로그 없음: %s — 7.6은 503을 반환합니다", e)
         app.state.catalog = _NoCatalog(str(e))
-
-    # 저장소 — PostgreSQL 하나뿐. 연결이 안 되면 여기서 앱이 죽는다(기록 없이 콜백만 나가는 상태를 만들지 않으려고).
-    app.state.engine = _connect_db(settings)
     app.state.store = DbProfileRunStore(app.state.engine)
     app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
 
@@ -162,6 +164,9 @@ def health(request: Request) -> dict:
     try:
         version_id, products = request.app.state.catalog.active()
         catalog = {"active": True, "version": str(version_id), "products": len(products)}
+        if getattr(request.app.state.catalog, "provisional_ids", False):
+            # Backend 번호가 아직 없어 임시 번호로 도는 상태 — 배포는 되지만 7.7로 내보낸 번호는 Backend에 없다
+            catalog["provisional_ids"] = True
     except NoActiveCatalog as e:
         catalog = {"active": False, "reason": str(e)}
     return {"status": "ok", "catalog": catalog, "store": _store_health(request), "supervisor": request.app.state.supervisor.stats()}

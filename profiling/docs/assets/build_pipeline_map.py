@@ -51,7 +51,7 @@ Y0 = 90
 box(40, Y0, W - 80, 104, 'band', 6)
 t(52, Y0 + 20, '조립 — main.py  lifespan()  (프로세스 시작 1회, app.state에 둠)', 'h')
 lines(52, Y0 + 40, [
-    ('get_settings() (settings.py, PROFILING_*)  →  FileCatalogReader(CATALOG_FILE)  →  Supervisor(PROFILING_SLOTS=1)  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)', 'mono'),
+    ('get_settings() (settings.py, PROFILING_*)  →  Db/FileCatalogReader(CATALOG_SOURCE)  →  Supervisor(PROFILING_SLOTS=1)  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)', 'mono'),
     ('_connect_db(DATABASE_URL — select 1 · alembic_version 확인, 실패면 RuntimeError로 앱 안 뜸) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine)   |   저장소는 PostgreSQL 하나뿐', 'mono'),
     ('카탈로그 로드 실패 → _NoCatalog 대역 (7.6은 503, 앱은 뜸)    ·    종료: backend.close() · engine.dispose()    ·    GET /health → catalog · store(_store_health) · supervisor.stats()', 'mono'),
     ('오류 봉투: on_validation_error(422→400 INVALID_REQUEST) · on_http_error(401/403/503) · on_unhandled(500) — 모두 _error_response() {message, error:{code, traceId}}', 'mono'),
@@ -174,11 +174,11 @@ path(f'M{XS[3]+220} {B} V{PY}'); t(XS[3] + 228, B + 26, 'send_profile_callback()
 AY0 = PY + 74
 AH = 126
 adapters = [
-    ('FileCatalogReader', 'catalog.py', [
-        '__init__(path): JSON 로드 → _product_dicts() 로 형식 판별',
-        '  _is_raw_format · _adapt_raw_product → ProductRecord 검증',
-        '  잘못된 행 제외 · productId 중복 제거',
-        'active() → (FILE_CATALOG_VERSION_ID 고정 UUID, 상품 전체)',
+    ('DbCatalogReader / FileCatalogReader', 'catalog.py', [
+        'DB: active() → 활성 버전 id 질의 1개 · 바뀌었을 때만 다시 읽음',
+        '  상품번호 = backend_product_id, 없으면 수집처 ID 숫자부(임시)',
+        '  번호 충돌·활성 없음·상품 0건 → NoActiveCatalog',
+        '파일: JSON 1회 로드 · 두 형식 판별 · 고정 UUID (로컬 전용)',
         'by_id(product_id) → ProductRecord | None  (v3 리뷰 조인)']),
     ('DbProfileRunStore', 'stores.py', [
         'save(outcome): INSERT … ON CONFLICT (rid, sv) DO UPDATE',
@@ -210,8 +210,8 @@ for (name, file, rows), x in zip(adapters, XS):
 EY = AY0 + AH + 38
 EH = 76
 ext = [
-    ('파일  tests/fixtures/catalog_sample.json', ['111건 · 56카테고리 · viewCount(임의). 전체 4,231건은 .env로',
-                                                 'ai_catalog(0003)에 4,231건 적재 완료 — Backend ID 회신 뒤 교체'], 'ext'),
+    ('PostgreSQL  ai_chat → ai_catalog (0003)', ['catalog_versions 활성 1행 · products 4,231 · categories 67',
+                                                 '배포 기본(CATALOG_SOURCE=db) · 파일은 로컬 시험용으로 남김'], 'db'),
     ('PostgreSQL  ai_chat → ai_profile.profile_runs', ['실행 1건 = 1행 · (recipient_user_id, source_version) UNIQUE', 'status CHECK · callback_payload jsonb · alembic 0002'], 'db'),
     ('PostgreSQL  ai_chat → ai_profile.recipient_profiles', ['수신자 1명 = 1행 · recipient_user_id PK (시퀀스 없음)', 'preferred/disliked_tags · disliked_categories jsonb · 0001'], 'db'),
     ('Backend  (로컬: tools/fake_backend  :8081)', ['POST 7.7 수신 (실패 주입 ok/409/400/500/timeout)', 'GET 7.9 export · 시험 콘솔 /console'], 'ext'),
@@ -221,7 +221,7 @@ for (name, subs, cls_), x in zip(ext, XS):
     t(x + 12, EY + 22, name, 'h2')
     for i, sub in enumerate(subs):
         t(x + 12, EY + 42 + i * 15, sub, 'sub')
-path(f'M{XS[0]+CW/2} {AY0+AH} V{EY}', 'grey'); t(XS[0] + CW / 2 + 8, AY0 + AH + 24, '읽기(시작 1회)', 'sub')
+path(f'M{XS[0]+CW/2} {AY0+AH} V{EY}', 'grey'); t(XS[0] + CW / 2 + 8, AY0 + AH + 24, '읽기(활성 버전 바뀔 때)', 'sub')
 path(f'M{XS[1]+CW/2} {AY0+AH} V{EY}', 'write'); t(XS[1] + CW / 2 + 8, AY0 + AH + 24, 'UPSERT (0·5·콜백 뒤)', 'sub')
 path(f'M{XS[2]+CW/2} {AY0+AH} V{EY}', 'write'); t(XS[2] + CW / 2 + 8, AY0 + AH + 24, 'UPSERT (6)', 'sub')
 path(f'M{XS[3]+CW/2} {AY0+AH} V{EY}', 'grey'); t(XS[3] + CW / 2 + 8, AY0 + AH + 24, 'HTTP POST 7.7', 'sub')
