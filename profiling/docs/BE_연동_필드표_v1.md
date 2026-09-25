@@ -378,12 +378,12 @@ sequenceDiagram
   Note over AI: profile_runs(v) FAILED {code: STORE_FAILED} · 7.7 보내지 않음 (AI는 침묵)
   Note over BE: 10분 경과 · last_changed_at 비어 있음
   BE->>BE: profile_status = FAILED
-  Note over BE: 권장: last_changed_at = now() (자동 재전송, 최대 2회)
+  Note over BE: 재전송(09-25): retry_count < 2 면 같은 번호로 다시 보낸다
   BE->>AI: POST 7.6 (같은 v)
-  AI->>DB: 같은 행 RUNNING, attempt=2
+  AI->>DB: get_run(수신자, v) → FAILED 이므로 다시 분석 (attempt=2)
   AI-->>BE: 202 → PENDING
   AI->>DB: RESULT_READY
-  AI->>BE: POST 7.7 (v+1)
+  AI->>BE: POST 7.7 (v)
   BE-->>AI: 200 → COMPLETED
 ```
 
