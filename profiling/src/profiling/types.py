@@ -230,6 +230,8 @@ class ProfileOutcome(BaseModel):
     callback_attempts: int = 0          # 7.7 시도 횟수. run_and_callback이 콜백 뒤 +1 해서 저장
     prompt_version: str | None = None
     validator_version: str | None = None
+    updated_at: datetime | None = None  # **읽을 때만** 채운다 (store.get_run). save()는 무시하고 DB가 now()로 쓴다.
+                                        # 접수 단계 중복 판정이 "이 RUNNING이 아직 살아 있나"를 이 값으로 본다
 
 # ---------------------------------------------------------------------------
 # 수신자 프로필 — ai_profile.recipient_profiles 한 행과 그 갱신 규칙

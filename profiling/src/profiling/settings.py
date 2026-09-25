@@ -56,6 +56,12 @@ class Settings(BaseSettings):
 
     # ---- 실행 (3단계 구현 상세 §12.1 개발 시험 시작값)
     PROFILING_SLOTS: int = Field(default=1, ge=1, description="프로파일링 동시 실행 수 (Supervisor 슬롯)")
+    RUNNING_STALE_S: int = Field(
+        default=300, ge=1,
+        description="RUNNING 기록을 '죽은 실행'으로 보는 기준(초). 접수 단계 중복 판정이 쓴다 — 이보다 오래된 RUNNING은 "
+                    "프로세스가 죽어 남은 행으로 보고 다시 분석한다. Backend의 PENDING 타임아웃(10분)보다 짧아야 "
+                    "Backend 재전송이 의미를 갖는다",
+    )
 
     # ---- 운영
     LOG_LEVEL: str = Field(default="INFO", description="logging 레벨 이름")

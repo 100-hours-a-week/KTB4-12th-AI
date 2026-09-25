@@ -147,6 +147,7 @@ BE에 부탁: **400과 409는 위 조건대로 구분**해 달라. 409를 400으
 | `last_changed_at` | 마지막 변경 시각 (디바운스 기준, 비어 있으면 "대기 중인 수정 없음") | 변경 때 기록 · 7.6 202 때 **조건부로** 비움 |
 | `window_started_at` | 최초 미반영 변경 시각 (6시간 상한 기준) | 첫 변경 때 기록 · 7.6 202 때 비움 |
 | `pending_since` | PENDING이 된 시각 (타임아웃 판정) | 7.6 202 때 |
+| `retry_count` | 같은 번호로 재전송한 횟수 (최대 2) — BE 제안 `TINYINT UNSIGNED NOT NULL DEFAULT 0` (09-25) | 재전송 때 +1 · **새 번호 요청이나 7.7 저장 성공 때 0** |
 
 ### 3.3 전이표
 
@@ -159,6 +160,8 @@ BE에 부탁: **400과 409는 위 조건대로 구분**해 달라. 409를 400으
 
 상태가 바뀌는 곳은 **세 군데뿐**: 202 → PENDING, 7.7 200 → COMPLETED, 타임아웃 → FAILED. **오류 응답은 상태를 바꾸지 않는다.**
 
+PENDING이 10분을 넘기면 FAILED로 가기 전에 **같은 번호로 최대 2회 재전송**한다(⑤). 재전송은 상태를 바꾸지 않는다 — PENDING 그대로다.
+
 ### 3.4 사건별 규칙 (자세히)
 
 **① 7.6 을 보낼 때** — `last_changed_at`이 있고 (지금 − `last_changed_at` ≥ 1h **또는** 지금 − `window_started_at` ≥ 6h)이면:
@@ -167,7 +170,9 @@ source_version += 1 ; 저장(커밋)                          # 요청보다 먼
 sent_at = now() ; 보내기 직전의 last_changed_at 값을 기억
 POST 7.6 (sourceVersion = source_version)
 ```
-503·응답 없음으로 재시도할 때도 **다시 +1** 한다(번호는 시도 순번이라 비어도 상관없음. 같은 번호를 재사용하려면 "202 전까지 보류" 상태가 하나 더 필요해 오히려 복잡).
+503·응답 없음으로 **7.6이 접수되지 못했을 때**는 다시 +1 한다(번호는 시도 순번이라 비어도 상관없음. 같은 번호를 재사용하려면 "202 전까지 보류" 상태가 하나 더 필요해 오히려 복잡).
+
+⚠ **202는 받았는데 결과(7.7)가 안 오는 경우는 다르다** — 그때는 **같은 번호로** 재전송한다(⑤). 접수는 됐으므로 번호를 올리면 AI 쪽에 같은 요청이 두 벌 생긴다.
 
 **② 202 를 받았을 때 (→ PENDING, 조건부)**
 ```
@@ -200,7 +205,27 @@ if profile_status == PENDING and now() − pending_since ≥ 10분 and last_chan
 ```
 `last_changed_at`이 있으면(대기 중인 수정이 있으면) FAILED로 바꾸지 않는다 — 어차피 다음 7.6이 나가므로, 정상 대기 구간을 실패로 표시하지 않기 위해. 10분은 제안값 — v1 처리는 초 단위라 넉넉하다(나중에 모델이 붙으면 처리 기한보다 길게 다시 정한다).
 
-**⑤ FAILED 뒤 자동 재전송 (계약에 없음 — 권장)** — AI는 실패해도 아무것도 보내지 않으므로, FAILED가 되면 `last_changed_at = now()`를 다시 기록해 **한 번 더 7.6이 나가게** 한다(최대 2회, 횟수 열 하나 추가). 안 하면 사용자가 취향을 다시 고칠 때까지 "분석 실패"로 남는다. 재전송은 새 번호로 나간다(§3.4 ①).
+**⑤ PENDING이 오래 갈 때 자동 재전송 (09-25 합의)** — AI는 실패해도 아무것도 보내지 않으므로, 재전송이 없으면 사용자가 취향을 다시 고칠 때까지 그 수신자는 계속 실패 상태로 남는다. 그래서 BE가 이렇게 한다.
+
+```
+if profile_status == PENDING and now() − pending_since ≥ 10분 and retry_count < 2:
+    retry_count += 1                       # 다중 인스턴스면 조건부 원자 갱신 (… WHERE retry_count < 2)
+    POST 7.6 (sourceVersion = source_version)      # ← 같은 번호. 본문도 최초와 같아야 한다
+retry_count = 0    # 새 번호로 요청할 때 · 7.7 결과를 저장했을 때
+```
+
+**같은 번호로 보내는 이유**(AI 쪽 사정) — AI의 실행 기록은 `(수신자, sourceVersion)` 한 행이라 같은 번호면 그 행에 모이고, **이미 결과가 있으면 재분석 없이 저장해 둔 콜백 본문을 그대로 다시 보낸다**. 새 번호로 보내면 매번 전체 재분석이라 그 사이 카탈로그가 바뀌면 같은 요청인데 추천 30개가 달라진다.
+
+**AI가 같은 번호를 받으면**(접수 단계에서 판정 — `intake.decide()`):
+
+| AI 쪽 상태 | 하는 일 |
+|---|---|
+| 분석 중(`RUNNING`) | 아무것도 하지 않음 — 분석이 두 벌 돌지 않게. 원래 실행이 끝나면 콜백이 간다 |
+| 결과 있음(`RESULT_READY`·`DELIVERED`·`SUPERSEDED`) | **재분석 없이 7.7 재전송** (최초와 같은 30개) |
+| 실패(`FAILED`)·죽은 `RUNNING`(5분 초과) | 다시 분석 |
+| 같은 번호인데 **본문이 다름** | 다시 분석 — 옛 결과 재전송은 틀린 답이 된다. 그래서 재전송 본문은 최초와 같아야 한다 |
+
+어느 경우든 응답은 `202 PENDING`이다.
 
 **⑥ 사용자가 비선호를 바꿀 때** — `last_changed_at = now()`, `window_started_at`이 비어 있으면 `now()`. **번호는 올리지 않고 `profile_status`도 건드리지 않는다**(PENDING이면 PENDING 유지, COMPLETED면 옛 30개 계속 노출). 몇 번을 고치든 다음 7.6 한 번이 그 시점의 최신 상태를 실어 간다.
 
@@ -373,4 +398,55 @@ sequenceDiagram
   end
 ```
 
+### 4.6 재전송 — 10분 PENDING → 같은 번호 7.6 → AI는 재분석 없이 재전송 (09-25)
+
+![재전송](assets/be-seq/v1/06-retry-resend.png)
+
+<!-- fig: 06-retry-resend -->
+```mermaid
+sequenceDiagram
+  autonumber
+  participant BE as Backend
+  participant AI as AI 프로파일링
+  participant DB as AI DB
+  BE->>AI: POST 7.6 (sourceVersion v) — 최초
+  AI-->>BE: 202 PENDING · retry_count 0
+  AI->>DB: profile_runs(v) RUNNING → RESULT_READY + 콜백 본문
+  AI--xBE: POST 7.7 (v) — 유실 또는 5xx
+  Note over BE: PENDING 10분 경과 · retry_count(0) < 2
+  BE->>BE: retry_count = 1 (조건부 원자 갱신)
+  BE->>AI: POST 7.6 (같은 v · 같은 본문)
+  AI->>DB: get_run(수신자, v) → RESULT_READY · input_hash 같음
+  AI-->>BE: 202 PENDING (분석은 돌리지 않는다)
+  AI->>BE: POST 7.7 (v) — 저장해 둔 그 30개 그대로
+  BE->>BE: 저장 · COMPLETED · retry_count = 0
+  BE-->>AI: 200
+  AI->>DB: profile_runs(v) DELIVERED · callback_attempts 2 · attempt 1
+```
+
+분석이 아직 돌고 있으면(`RUNNING`) AI는 **아무것도 하지 않고** 202만 준다 — 원래 실행이 끝나면 콜백이 간다. 실패했거나(`FAILED`) 죽은 `RUNNING`(5분 초과)이면 다시 분석한다.
+
 ---
+
+## 5. BE에 확인·요청하는 것
+
+### 5.1 재전송 정책 (09-25 BE 제안에 대한 회신)
+
+**확인해 준 것** — `retry_count`는 BE `profiles` 테이블의 열이고 **AI 표에는 영향이 없다.** AI는 이미 `profile_runs.attempt`(분석 재실행)와 `callback_attempts`(7.7 시도)로 센다. 같은 `sourceVersion` 재전송에 동의하며, AI는 이미 결과가 있으면 재분석 없이 **최초와 같은 본문**을 재전송한다(§3.4 ⑤).
+
+| # | 확인 요청 | 왜 |
+|---|---|---|
+| 1 | 재전송 직전 `last_changed_at`이 비어 있지 않으면(대기 중인 수정이 있으면) 재전송 대신 **다음 7.6(새 번호)**으로 가는가? | 낡은 입력으로 재시도하지 않기 위해. 타임아웃 규칙(§3.4 ④)과 같은 조건 |
+| 2 | **재전송 본문은 최초와 같아야 한다** | 같은 번호인데 비선호 목록이 다르면 AI가 `input_hash`로 감지해 재분석한다. 입력이 바뀐 것이면 새 번호로 보내야 한다 |
+| 3 | 2회를 다 쓴 뒤 상태는? `FAILED` 유지 + 사용자가 다시 고칠 때만 새 7.6인가 | AI는 그 뒤에도 아무것도 보내지 않는다(침묵) |
+| 4 | 다중 인스턴스면 증가를 **조건부 원자 갱신**으로: `UPDATE … SET retry_count = retry_count + 1 WHERE recipient_user_id = ? AND retry_count < 2` | 스케줄러 두 대가 같은 타임아웃을 보면 2회가 한꺼번에 나갈 수 있다 |
+| 5 | (선택) 10분 → 3분 | v1 처리는 밀리초 단위라 복구가 빨라진다. 모델이 붙는 v3에서 다시 정하면 된다 |
+
+### 5.2 먼저 와야 연동이 완성되는 것
+
+| # | 요청 | 지금 상태 |
+|---|---|---|
+| 1 | **Backend 상품·카테고리 ID 회신** (`product-id-map.jsonl` · `category-id-map.jsonl`) | AI `ai_catalog`에 4,231건이 있으나 `backend_product_id`는 0/4,231. 회신 전에는 7.7로 보내는 번호가 Backend에 없는 번호다 |
+| 2 | **7.9 export에 재고·조회수 포함** — 재고를 모르는 상품은 `available`을 빼거나 `null`로 | AI는 3값(`available`·`unavailable`·`unknown`)으로 저장하고 `unknown`을 추정하지 않는다. 지금 적재분은 전건 `unknown` |
+| 3 | 7.7 태그 포함 여부 · 7.9 조회수 필드명 · 비선호 제외 vs 감점 | 09-22 이후 미결 |
+

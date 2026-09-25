@@ -144,3 +144,35 @@ def test_app_boots_on_db_catalog(engine, cleanup, monkeypatch) -> None:
     finally:
         monkeypatch.undo()
         get_settings.cache_clear()
+
+
+def test_same_version_resend_does_not_reanalyze(engine, cleanup) -> None:
+    """Backend 재전송(같은 sourceVersion) — 진짜 DB로.
+
+    두 번째 요청은 분석을 다시 돌리지 않고 저장된 콜백 본문을 그대로 다시 보낸다. 그래서
+      attempt            1 그대로 (분석은 한 번만)
+      callback_attempts  2 (7.7은 두 번 나갔다)
+      callback_hash      동일 (같은 요청 → 같은 결과)
+    """
+    get_settings.cache_clear()
+    from profiling.main import app
+    body = {"recipientUserId": RID, "sourceVersion": 21, "dislikedCategories": [],
+            "giftPreference": None, "reviews": []}
+    with TestClient(app) as client:
+        fake = RecordingBackend()
+        app.state.backend = fake
+        assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202
+        assert len(fake.sent) == 1
+        first = list(fake.sent[0].search.product_ids)
+
+        assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202   # 같은 번호 재전송
+        assert len(fake.sent) == 2
+        assert list(fake.sent[1].search.product_ids) == first                 # 최초와 같은 30개
+
+    with engine.connect() as c:
+        row = c.execute(sa.text("select attempt, callback_attempts, status, callback_hash "
+                                "from ai_profile.profile_runs where recipient_user_id = :r and source_version = 21"),
+                        {"r": RID}).mappings().one()
+    assert row["attempt"] == 1                       # 분석은 한 번만 돌았다
+    assert row["callback_attempts"] == 2             # 콜백은 두 번
+    assert row["status"] == "DELIVERED" and row["callback_hash"]

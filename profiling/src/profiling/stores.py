@@ -55,15 +55,45 @@ _RUN_UPSERT = sa.text(f"""
         updated_at         = now()
     returning id, attempt""")
 
+_RUN_COLUMNS = ("recipient_user_id, source_version, input_hash, status, catalog_version_id, "
+                "callback_payload, callback_attempts, error, updated_at")
+
 _RUN_LATEST = sa.text(f"""
-    select recipient_user_id, source_version, input_hash, status, catalog_version_id, callback_payload, callback_attempts, error
+    select {_RUN_COLUMNS}
     from {RUNS_TABLE} where recipient_user_id = :rid
     order by source_version desc, updated_at desc limit 1""")
+
+## 접수 단계 중복 판정용 — 키로 딱 한 행 (Backend가 같은 sourceVersion으로 재전송할 때)
+_RUN_BY_KEY = sa.text(f"""
+    select {_RUN_COLUMNS}
+    from {RUNS_TABLE} where recipient_user_id = :rid and source_version = :sv""")
 
 
 def payload_hash(payload: dict[str, Any]) -> str:
     """콜백 본문의 sha256 — 키 순서를 고정해 같은 내용이면 같은 값. 재전송 시 "같은 payload" 확인용(§16.4)."""
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _to_outcome(row: Any) -> ProfileOutcome | None:
+    """profile_runs 한 행 → ProfileOutcome. 없으면 None. get()·get_run()이 같이 쓴다.
+
+    validation(태그)은 복원하지 않는다 — 실행 기록에 저장하지 않기 때문(태그는 recipient_profiles에 있다).
+    search는 저장해 둔 콜백 본문에서 되살린다 — 그래야 **재분석 없이 같은 본문으로 재전송**할 수 있다.
+    """
+    if row is None:
+        return None
+    search = None
+    if row["callback_payload"] is not None and row["catalog_version_id"] is not None:
+        search = SearchResult(product_ids=row["callback_payload"]["recommendedProductIds"], query_text="",
+                              catalog_version_id=row["catalog_version_id"])
+    return ProfileOutcome(
+        recipient_user_id=row["recipient_user_id"], source_version=row["source_version"],
+        status=RunStatus(row["status"]), input_hash=row["input_hash"],
+        validation=None, search=search,
+        failure_code=ErrorCode(row["error"]["code"]) if (row["error"] or {}).get("code") else None,
+        failure_reason=(row["error"] or {}).get("reason"), callback_attempts=row["callback_attempts"],
+        updated_at=row["updated_at"],
+    )
 
 
 class DbProfileRunStore:
@@ -102,19 +132,12 @@ class DbProfileRunStore:
     def get(self, recipient_user_id: int) -> ProfileOutcome | None:
         with self._engine.begin() as conn:
             row = conn.execute(_RUN_LATEST, {"rid": recipient_user_id}).mappings().first()
-        if row is None:
-            return None
-        search = None
-        if row["callback_payload"] is not None and row["catalog_version_id"] is not None:
-            search = SearchResult(product_ids=row["callback_payload"]["recommendedProductIds"], query_text="",
-                                  catalog_version_id=row["catalog_version_id"])
-        return ProfileOutcome(
-            recipient_user_id=row["recipient_user_id"], source_version=row["source_version"],
-            status=RunStatus(row["status"]), input_hash=row["input_hash"],
-            validation=None, search=search,
-            failure_code=ErrorCode(row["error"]["code"]) if (row["error"] or {}).get("code") else None,
-            failure_reason=(row["error"] or {}).get("reason"), callback_attempts=row["callback_attempts"],
-        )
+        return _to_outcome(row)
+
+    def get_run(self, recipient_user_id: int, source_version: int) -> ProfileOutcome | None:
+        with self._engine.begin() as conn:
+            row = conn.execute(_RUN_BY_KEY, {"rid": recipient_user_id, "sv": source_version}).mappings().first()
+        return _to_outcome(row)
 
     # ---- 편의 (시험·운영) ---------------------------------------------------------
 

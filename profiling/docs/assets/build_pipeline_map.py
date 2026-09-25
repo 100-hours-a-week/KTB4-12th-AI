@@ -43,7 +43,7 @@ def lines(x, y, rows, dy=14):
         t(x, y + i * dy, s, c)
 
 
-t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-23 코드 기준 · 재고 3값 반영)', 'title')
+t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-25 코드 기준 · 접수 단계 중복 판정)', 'title')
 t(40, 70, '위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.', 'small')
 
 # ───────────────────── 0. 조립 (main.py lifespan) ─────────────────────
@@ -65,7 +65,7 @@ stages = [
     ('1  접수', 'intake.py', 'extract_and_pool()  — HTTP 안에서, 202까지'),
     ('2  실행 슬롯', 'supervisor.py', 'Supervisor.submit() → _run()  — 응답 뒤 백그라운드'),
     ('3  처리', 'pipeline.py', 'run_and_callback() → profile(rq, catalog, store, …)'),
-    ('4  콜백·기록', 'intake.py + backend.py', 'run_and_callback() 뒷부분'),
+    ('4  콜백·기록', 'intake.py + backend.py', '_send_and_record()  — 최초 전송과 재전송이 같은 경로'),
 ]
 for (name, file, fn), x in zip(stages, XS):
     box(x, TOP, CW, SH, 'stage', 6)
@@ -81,14 +81,16 @@ lines(x + 12, TOP + 84, [
     ('② require_service_token()  Bearer ≠ SERVICE_TOKEN → 401', 'mono'),
     ('③ catalog.active()  없으면 → 503 SERVICE_UNAVAILABLE', 'mono'),
     ('④ rq = pipeline.to_internal(body)   camel → snake', 'mono'),
-    ('⑤ supervisor.submit(bg, run_and_callback, rq, catalog,', 'mono'),
-    ('        store, backend, POOL_SIZE, recipient_store)', 'mono'),
+    ('⑤ decide(store.get_run(rid, sv), input_hash)  중복 판정', 'monob'),
+    ('· analyze → submit(run_and_callback)  처음·실패·본문 다름', 'sub'),
+    ('· resend  → submit(resend_callback)   결과 있음, 콜백만', 'sub'),
+    ('· skip    → 제출 없음                 이미 RUNNING', 'sub'),
     ('⑥ 202 SuccessResponse[ProfileAccepted] · PENDING', 'monob'),
     ('', 'mono'),
     ('의존성(Depends): get_catalog · get_store · get_recipient_store', 'sub'),
     ('· get_backend · get_supervisor  ← app.state', 'sub'),
     ('_error() → HTTPException → main.on_http_error 봉투', 'sub'),
-    ('7.6 응답 뒤에는 Backend와의 HTTP가 끝난다', 'sub'),
+    ('Backend는 10분 PENDING이면 같은 번호로 최대 2회 재전송(09-25)', 'sub'),
 ])
 # 2 슬롯
 x = XS[1]
@@ -101,7 +103,7 @@ lines(x + 12, TOP + 84, [
     ('      _running += 1 · fn(*args) · finally _running -= 1', 'mono'),
     ('stats() → {slots, running, submitted}   (/health)', 'mono'),
     ('', 'mono'),
-    ('fn = run_and_callback  → 3단계로', 'sub'),
+    ('fn = run_and_callback(분석) 또는 resend_callback(재전송만)', 'sub'),
     ('기한(deadline)·취소는 아직 없음 (3단계 §12.1 240초는 다음)', 'sub'),
 ])
 # 3 처리
@@ -184,7 +186,7 @@ adapters = [
         'save(outcome): INSERT … ON CONFLICT (rid, sv) DO UPDATE',
         '  status·input_hash·attempt+1(RUNNING)·payload coalesce',
         '  callback_attempts greatest · error · callback_body()',
-        'get(rid) → 최신 1행 → ProfileOutcome',
+        'get(rid) → 최신 1행 · get_run(rid, sv) → 그 키 1행(중복 판정)',
         'payload_hash() · delete_recipient()']),
     ('DbRecipientProfileStore', 'stores.py', [
         'upsert(profile): INSERT … ON CONFLICT (rid) DO UPDATE',
@@ -234,7 +236,7 @@ t(110, NY + 22, 'ProfileExtractRequest(camel) → to_internal → ProfileRequest
 t(40, NY + 44, '실패 경로', 'h2')
 t(110, NY + 44, '400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.', 'sub')
 t(40, NY + 66, '시험', 'h2')
-t(110, NY + 66, '단위(tests/unit, 65): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 25): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
+t(110, NY + 66, '단위(tests/unit, 83): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 32): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
 parts.append('</svg>')
 (P / 'pipeline-map.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')
 print('svg ok')
