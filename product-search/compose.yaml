@@ -1,0 +1,42 @@
+name: ai-search
+services:
+  search:
+    image: ${AI_SEARCH_IMAGE:-ai-search:local}
+    build:
+      context: .
+      target: runtime
+    init: true
+    ports:
+      - "127.0.0.1:${SEARCH_PORT:-4326}:8000"
+    environment:
+      SEARCH_INFERENCE_THREADS: ${SEARCH_INFERENCE_THREADS:-2}
+    stop_grace_period: 30s
+    volumes:
+      - data:/app/data:ro
+      - qa:/app/runtime
+  sync:
+    image: ${AI_SEARCH_IMAGE:-ai-search:local}
+    profiles: [tools]
+    init: true
+    entrypoint: [python, tools/sync_catalog.py]
+    command: [--help]
+    healthcheck:
+      disable: true
+    environment:
+      BACKEND_SERVICE_TOKEN: ${BACKEND_SERVICE_TOKEN:-}
+      SEARCH_INFERENCE_THREADS: ${SEARCH_INFERENCE_THREADS:-2}
+    volumes:
+      - data:/app/data
+  sample:
+    image: ${AI_SEARCH_IMAGE:-ai-search:local}
+    profiles: [tools]
+    init: true
+    entrypoint: [python, tools/sync_catalog.py]
+    command: [--export-file, examples/products-export.json, --categories-file, examples/categories.json, --initial-only, --apply]
+    healthcheck:
+      disable: true
+    volumes:
+      - data:/app/data
+volumes:
+  data:
+  qa:

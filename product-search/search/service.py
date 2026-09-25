@@ -9,14 +9,18 @@ import math
 from pathlib import Path
 import time
 import numpy as np
-from .models import SearchRequest
+from .models import SearchRequest, ProductRequest, SnapshotMismatch, InvalidSearchFilter
+from .version import snapshot_id
+from .identity import product_id
 from .tokenization import normalize, tokens, batch_tokens, TOKENIZER_ID, TOKENIZER_INFO
 
+# Bump when ranking weights, candidate limits, tie-breaking or browse order change;
+# this identifier participates in snapshotId and guards continuation requests.
 ALGORITHM = f"bm25f-{TOKENIZER_ID}-4-3-2-1-05+jina768-exact+rrf30/2"
 
 
 class SearchService:
-    def __init__(self, data_dir: Path, embedding=None):
+    def __init__(self, data_dir: Path, embedding=None, *, encoder_fingerprint=None):
         self.data_dir = Path(data_dir)
         raw = (self.data_dir / "catalog.json").read_bytes()
         self.catalog = json.loads(raw)
@@ -25,7 +29,11 @@ class SearchService:
         if hashlib.sha256(raw).hexdigest() != self.manifest['catalog_sha256'] or hashlib.sha256(vectors_raw).hexdigest() != self.manifest['vectors_sha256']:
             raise ValueError("catalog_embedding_hash_mismatch")
         self.products = self.catalog['products']
-        ids = [p['id'] for p in self.products]
+        ids = [product_id(p['id']) for p in self.products]
+        sources = [p['source_product_id'] for p in self.products]
+        known_sources = [s for s in sources if s is not None]
+        if any(not isinstance(s, str) or not s for s in known_sources) or len(set(known_sources)) != len(known_sources):
+            raise ValueError('invalid_source_product_ids')
         if ids != self.manifest['product_ids'] or len(set(ids)) != len(ids):
             raise ValueError("catalog_embedding_id_mismatch")
         self.vectors = np.frombuffer(vectors_raw, dtype=np.float32).reshape(len(ids), 768).copy()
@@ -34,14 +42,21 @@ class SearchService:
         self.vectors /= np.linalg.norm(self.vectors, axis=1, keepdims=True)
         self.vectors.flags.writeable = False
         self.by_id = {p['id']: i for i, p in enumerate(self.products)}
-        self.snapshot_id = self.manifest['catalog_sha256'][:20]
+        # Preserve the exact source-ID tie order, including stable catalog order.
+        identity_order = sorted(range(len(self.products)), key=self._identity_sort_key)
+        self.identity_ranks = np.empty(len(self.products), dtype=np.int64)
+        self.identity_ranks[identity_order] = np.arange(len(self.products))
+        effective_manifest = dict(self.manifest)
+        if encoder_fingerprint is not None:
+            effective_manifest['encoder_fingerprint'] = encoder_fingerprint
+        self.snapshot_id = snapshot_id(self.catalog, effective_manifest, ALGORITHM)
         self.embedding = embedding
         self.prices = np.asarray([p['price'] for p in self.products])
-        self.categories = np.asarray([p['category_id'] for p in self.products])
+        self._build_categories()
+        self.categories = np.asarray([p['category_id'] for p in self.products], dtype=np.int64)
         self.brands = np.asarray([normalize(p['brand']) for p in self.products])
         self.types = np.asarray([p['product_type'] for p in self.products])
         self.availability = np.asarray([p['availability'] for p in self.products])
-        self.category_ids = set(self.categories.tolist()) | {c['category_id'] for c in self.catalog['taxonomy']['categories']}
         self.brand_keys = set(self.brands.tolist())
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieval")
         self.cache = OrderedDict()
@@ -59,7 +74,45 @@ class SearchService:
         return [p['name'], p['brand'], ' '.join([p['category_group'], p['category'], p['kind']]),
                 p['description'] + ' ' + ' '.join(f'{k} {v}' for k, v in p['attributes'].items()), ' '.join(p['tags'])]
 
+    def _build_categories(self):
+        categories = self.catalog['taxonomy']['categories']
+        ids = [product_id(c['category_id']) for c in categories]
+        sources = [c['source_category_id'] for c in categories]
+        known_sources = [s for s in sources if s is not None]
+        if len(set(ids)) != len(ids) or any(not isinstance(s, str) or not s for s in known_sources) or len(set(known_sources)) != len(known_sources):
+            raise ValueError('invalid_category_identity')
+        self.taxonomy_by_id = {c['category_id']: c for c in categories}
+        self.category_ids = set(ids)
+        self.category_leaves = {id: set() for id in ids}
+        for category in categories:
+            id, parent = category['category_id'], category['parent_id']
+            if parent is None:
+                continue
+            product_id(parent)
+            if parent not in self.taxonomy_by_id or self.taxonomy_by_id[parent]['parent_id'] is not None:
+                raise ValueError('invalid_category_parent')
+            self.category_leaves[id].add(id)
+            self.category_leaves[parent].add(id)
+        for p in self.products:
+            id = product_id(p['category_id'])
+            parent = product_id(p['parent_category_id'])
+            category = self.taxonomy_by_id.get(id)
+            if category is None or category['parent_id'] != parent or category['source_category_id'] != p['source_category_id']:
+                raise ValueError('product_category_mismatch')
+
+    def _expand_categories(self, ids):
+        return set().union(*(self.category_leaves[id] for id in ids))
+
+    def _identity_sort_key(self, index):
+        product = self.products[index]
+        source = product['source_product_id']
+        return source if source is not None else f"backend:{product['id']:020d}"
+
     def _build_lexical(self):
+        if not self.products:
+            self.field_terms = []
+            self.postings = {}
+            return
         analyzed = batch_tokens(text for p in self.products for text in self._fields(p))
         fields = [[Counter(terms) for terms in analyzed[i:i+5]] for i in range(0, len(analyzed), 5)]
         self.field_terms = [tuple(frozenset(field) for field in product_fields) for product_fields in fields]
@@ -83,25 +136,39 @@ class SearchService:
         f, p = request.filters, request.preferences
         unknown = set(f.category_ids + f.exclude_category_ids + p.preferred_category_ids + p.downrank_category_ids) - self.category_ids
         if unknown:
-            raise ValueError("카테고리를 확인해 주세요: " + ', '.join(sorted(unknown)))
+            raise InvalidSearchFilter("UNKNOWN_CATEGORY", "카테고리를 확인해 주세요: " + ', '.join(map(str, sorted(unknown))))
         unknown_brands = {normalize(b) for b in f.brands + f.exclude_brands} - self.brand_keys
         if unknown_brands:
-            raise ValueError("브랜드 목록에서 선택해 주세요: " + ', '.join(sorted(unknown_brands)))
+            raise InvalidSearchFilter("UNKNOWN_BRAND", "브랜드 목록에서 선택해 주세요: " + ', '.join(sorted(unknown_brands)))
 
     def _eligible(self, request):
         f = request.filters
         mask = np.ones(len(self.products), dtype=bool)
         if f.min_price is not None: mask &= self.prices >= f.min_price
         if f.max_price is not None: mask &= self.prices <= f.max_price
-        if f.category_ids: mask &= np.isin(self.categories, f.category_ids)
-        if f.exclude_category_ids: mask &= ~np.isin(self.categories, f.exclude_category_ids)
+        if f.category_ids: mask &= np.isin(self.categories, list(self._expand_categories(f.category_ids)))
+        if f.exclude_category_ids: mask &= ~np.isin(self.categories, list(self._expand_categories(f.exclude_category_ids)))
         if f.brands: mask &= np.isin(self.brands, [normalize(b) for b in f.brands])
         if f.exclude_brands: mask &= ~np.isin(self.brands, [normalize(b) for b in f.exclude_brands])
         if f.product_types: mask &= np.isin(self.types, f.product_types)
-        if f.availability != 'any': mask &= self.availability == f.availability
+        if f.availability == 'available_or_unknown':
+            mask &= np.isin(self.availability, ['available','unknown'])
+        elif f.availability != 'any':
+            mask &= self.availability == f.availability
         for id in f.exclude_product_ids:
             if id in self.by_id: mask[self.by_id[id]] = False
         return mask
+
+    def _top_candidates(self, scores, mask, limit=100):
+        eligible = np.flatnonzero(mask)
+        if eligible.size > limit:
+            # Keep all ties at the boundary; slicing an arbitrary argpartition
+            # result could silently change which equal-score products qualify.
+            values = scores[eligible]
+            boundary = np.partition(values, values.size-limit)[values.size-limit]
+            eligible = eligible[values >= boundary]
+        order = np.lexsort((self.identity_ranks[eligible], -scores[eligible]))
+        return eligible[order[:limit]].tolist()
 
     def _rank(self, request, mask, vector):
         started = time.perf_counter()
@@ -109,6 +176,8 @@ class SearchService:
         dense_scores = np.zeros(len(self.products), dtype=np.float32)
         query = normalize(request.query)
         query_terms = Counter(tokens(query)) if query else Counter()
+        preferred = self._expand_categories(request.preferences.preferred_category_ids)
+        downrank = self._expand_categories(request.preferences.downrank_category_ids)
         lexical, dense, fused = [], [], {}
         if query:
             if request.mode != 'dense':
@@ -117,24 +186,23 @@ class SearchService:
                     if posting is not None:
                         idx, weights = posting
                         lexical_scores[idx] += weights * min(count, 2)
-                eligible = np.flatnonzero(mask & (lexical_scores > 0))
-                lexical = sorted(eligible.tolist(), key=lambda i: (-float(lexical_scores[i]), self.products[i]['id']))[:100]
+                lexical = self._top_candidates(lexical_scores, mask & (lexical_scores > 0))
             if vector is not None:
                 dense_scores = self.vectors @ vector
-                dense = sorted(np.flatnonzero(mask).tolist(), key=lambda i: (-float(dense_scores[i]), self.products[i]['id']))[:100]
+                dense = self._top_candidates(dense_scores, mask)
             for ranking in [lexical, dense]:
                 for rank, i in enumerate(ranking, 1):
                     fused[i] = fused.get(i, 0.) + 1 / (30 + rank)
             for i in fused:
                 category = self.products[i]['category_id']
-                if category in request.preferences.preferred_category_ids: fused[i] *= 1.10
-                if category in request.preferences.downrank_category_ids: fused[i] *= .75
-            order = sorted(fused, key=lambda i: (-fused[i], -float(lexical_scores[i]), self.products[i]['id']))
+                if category in preferred: fused[i] *= 1.10
+                if category in downrank: fused[i] *= .75
+            order = sorted(fused, key=lambda i: (-fused[i], -float(lexical_scores[i]), self._identity_sort_key(i)))
         else:
             order = [i for i in self.browse_order if mask[i]]
             # Explicit preferences apply to browsing too, with stable order as the tie breaker.
-            order.sort(key=lambda i: (self.products[i]['category_id'] in request.preferences.downrank_category_ids,
-                                     -(self.products[i]['category_id'] in request.preferences.preferred_category_ids)))
+            order.sort(key=lambda i: (self.products[i]['category_id'] in downrank,
+                                     -(self.products[i]['category_id'] in preferred)))
         lex_ranks = {i:r for r,i in enumerate(lexical,1)}
         den_ranks = {i:r for r,i in enumerate(dense,1)}
         fields_labels = ['상품명','브랜드','분류·종류','설명·속성','태그']
@@ -150,18 +218,21 @@ class SearchService:
                 'matchedFields':[label for label,terms in zip(fields_labels,self.field_terms[i]) if qt.intersection(terms)]})
             hits.append(summary)
         return {'hits':hits, 'eligibleCount':int(mask.sum()), 'candidateCount':len(order),
-                'hasMore':request.offset+len(hits)<len(order), 'status':'OK' if hits else 'NO_MATCH',
+                'hasMore':request.offset+len(hits)<len(order),
+                'nextOffset':request.offset+len(hits) if request.offset+len(hits)<len(order) else None,
+                'status':'OK' if order else 'NO_MATCH',
                 'retrievalMs':round((time.perf_counter()-started)*1000,2)}
 
     def _summary(self, p):
-        return {'id':p['id'],'backendProductId':p['backend_product_id'],'name':p['name'],'brand':p['brand'],
-                'categoryId':p['category_id'],'category':p['category'],'categoryGroup':p['category_group'],
+        return {'productId':p['id'],'sourceProductId':p['source_product_id'],'name':p['name'],'brand':p['brand'],
+                'categoryId':p['category_id'],'sourceCategoryId':p['source_category_id'],'parentCategoryId':p['parent_category_id'],
+                'category':p['category'],'categoryGroup':p['category_group'],
                 'price':p['price'],'description':p['description'][:300], 'productType':p['product_type'],
                 'availability':p['availability'],'image':p['image'],'imageLarge':p['image_large'],'imageFallback':p['image_fallback']}
 
     def _check_snapshot(self, snapshot):
         if snapshot is not None and snapshot != self.snapshot_id:
-            raise ValueError("카탈로그 버전이 변경되었습니다. 검색을 다시 실행해 주세요.")
+            raise SnapshotMismatch("카탈로그 버전이 변경되었습니다. 검색을 다시 실행해 주세요.")
 
     async def search(self, request: SearchRequest, snapshot=None, source='qa'):
         if not isinstance(request, SearchRequest):
@@ -191,6 +262,8 @@ class SearchService:
         return result
 
     def get_products(self, ids, snapshot=None):
+        request = ProductRequest(ids=ids, snapshot_id=snapshot)
+        ids = request.ids
         self._check_snapshot(snapshot)
         products, missing = [], []
         for id in ids:
@@ -207,14 +280,20 @@ class SearchService:
 
     def get_metadata(self):
         counts=Counter(self.categories)
-        categories=[{'id':c['category_id'],'name':c['category'],'group':c['category_group'],'count':counts[c['category_id']]} for c in self.catalog['taxonomy']['categories']]
+        categories=[{'id':c['category_id'],'name':c['category'],'group':c['category_group'],
+                     'parentId':c['parent_id'],'sourceCategoryId':c['source_category_id'],'count':counts[c['category_id']]}
+                    for c in self.catalog['taxonomy']['categories'] if c['parent_id'] is not None]
+        groups=[{'id':c['category_id'],'name':c['category'],'sourceCategoryId':c['source_category_id'],
+                 'count':sum(counts[id] for id in self.category_leaves[c['category_id']])}
+                for c in self.catalog['taxonomy']['categories'] if c['parent_id'] is None]
         brands=Counter(p['brand'] for p in self.products)
         return {'snapshotId':self.snapshot_id,'algorithm':ALGORITHM,'productCount':len(self.products),
             'lexicalTokenizer':dict(TOKENIZER_INFO),
-            'categories':categories,'brands':[{'name':b,'count':n} for b,n in sorted(brands.items())],
+            'categories':categories,'groups':groups,'brands':[{'name':b,'count':n} for b,n in sorted(brands.items())],
             'productTypes':[{'id':t,'count':n} for t,n in Counter(self.types.tolist()).items()],
             'model':self.manifest['model'],'dimensions':768,'maxTokens':self.manifest['max_tokens'],
-            'availabilityNote':self.catalog['availability_note'],'source':self.catalog['source']}
+            'availabilityNote':self.catalog['availability_note'],'source':self.catalog['source'],
+            'exportGeneratedAt':self.catalog.get('export_generated_at')}
 
     def close(self):
         self.pool.shutdown(wait=True)
