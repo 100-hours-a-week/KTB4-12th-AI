@@ -4,10 +4,14 @@
 실행: docker compose up -d && uv run alembic upgrade head && uv run pytest tests/integration -q
 시험용 수신자 ID(99xxxx)를 쓰고 끝에 지운다 (test_db_stores.py와 같은 규칙)."""
 
+import json
+
+import httpx
 import pytest
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
+from profiling.backend import HttpBackendPort
 from profiling.catalog import FILE_CATALOG_VERSION_ID
 from profiling.settings import get_settings
 from profiling.stores import DbProfileRunStore, DbRecipientProfileStore
@@ -147,27 +151,34 @@ def test_app_boots_on_db_catalog(engine, cleanup, monkeypatch) -> None:
 
 
 def test_same_version_resend_does_not_reanalyze(engine, cleanup) -> None:
-    """Backend 재전송(같은 sourceVersion) — 진짜 DB로.
+    """Backend 재전송(같은 sourceVersion) — 진짜 DB · **진짜 BackendPort**로.
 
-    두 번째 요청은 분석을 다시 돌리지 않고 저장된 콜백 본문을 그대로 다시 보낸다. 그래서
+    가짜 BackendPort를 쓰면 to_callback()을 거치지 않아 "재전송이 DELIVERED를 거부한다"는 버그를 놓친다
+    (실제로 놓쳤다). 그래서 여기서는 httpx.MockTransport만 끼운 진짜 HttpBackendPort를 쓴다.
+
       attempt            1 그대로 (분석은 한 번만)
       callback_attempts  2 (7.7은 두 번 나갔다)
-      callback_hash      동일 (같은 요청 → 같은 결과)
+      본문               두 번 다 같다
     """
     get_settings.cache_clear()
     from profiling.main import app
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"message": "ok", "data": {"recipientUserId": RID, "sourceVersion": 21,
+                                                                  "profileStatus": "COMPLETED"}})
+
     body = {"recipientUserId": RID, "sourceVersion": 21, "dislikedCategories": [],
             "giftPreference": None, "reviews": []}
     with TestClient(app) as client:
-        fake = RecordingBackend()
-        app.state.backend = fake
+        app.state.backend = HttpBackendPort("http://backend.test", "t", 5.0, transport=httpx.MockTransport(handler))
         assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202
-        assert len(fake.sent) == 1
-        first = list(fake.sent[0].search.product_ids)
+        assert len(sent) == 1 and len(sent[0]["recommendedProductIds"]) == 30
 
         assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202   # 같은 번호 재전송
-        assert len(fake.sent) == 2
-        assert list(fake.sent[1].search.product_ids) == first                 # 최초와 같은 30개
+        assert len(sent) == 2                                                 # 재전송이 실제로 나갔다
+        assert sent[1] == sent[0]                                             # 최초와 완전히 같은 본문
 
     with engine.connect() as c:
         row = c.execute(sa.text("select attempt, callback_attempts, status, callback_hash "

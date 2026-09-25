@@ -31,9 +31,21 @@ def test_to_callback_maps_fields_and_no_tags() -> None:
     assert "preferredTags" not in body.model_dump() and "dislikedTags" not in body.model_dump()   # DR-035
 
 
+def test_to_callback_allows_resend_of_delivered_and_superseded() -> None:
+    """이미 보낸 결과를 다시 보내는 경로 — Backend가 같은 sourceVersion으로 재요청하면 그 본문을 그대로 쓴다.
+
+    이 시험이 없어서 실제로 놓쳤다: 재전송이 DELIVERED를 거부해 실행 기록이 FAILED로 뒤집혔다(로컬 끝단 시험에서 발견).
+    """
+    ready = to_callback(_outcome())
+    for status in (RunStatus.DELIVERED, RunStatus.SUPERSEDED):
+        assert to_callback(_outcome(status=status)) == ready      # 같은 본문
+
+
 def test_to_callback_rejects_non_ready_or_no_search() -> None:
     with pytest.raises(ValueError):
         to_callback(_outcome(status=RunStatus.FAILED))
+    with pytest.raises(ValueError, match="결과가 있는 상태만"):
+        to_callback(_outcome(status=RunStatus.RUNNING))
     with pytest.raises(ValueError):
         to_callback(ProfileOutcome(recipient_user_id=1, source_version=0, status=RunStatus.RESULT_READY))
 

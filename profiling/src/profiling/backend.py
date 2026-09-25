@@ -51,10 +51,16 @@ def callback_body(outcome: ProfileOutcome) -> ProfileCallbackRequest:
     )
 
 
+## 콜백을 보낼 수 있는 상태 — 결과(callback_payload)가 있는 상태들.
+## RESULT_READY는 최초 전송, DELIVERED·SUPERSEDED는 **재전송**이다 (Backend가 같은 sourceVersion으로 다시 요청했을 때).
+## RUNNING·FAILED는 보낼 결과가 없다.
+SENDABLE = (RunStatus.RESULT_READY, RunStatus.DELIVERED, RunStatus.SUPERSEDED)
+
+
 def to_callback(outcome: ProfileOutcome) -> ProfileCallbackRequest:
-    """전송용 — RESULT_READY만 허용. 호출자(run_and_callback)가 이미 거르지만 여기서도 막아서 잘못된 본문이 나가지 않게 한다."""
-    if outcome.status != RunStatus.RESULT_READY:
-        raise ValueError(f"콜백은 RESULT_READY만 보낸다: status={outcome.status}")
+    """전송용 — 결과가 있는 상태만 허용. 호출자가 이미 거르지만 여기서도 막아서 잘못된 본문이 나가지 않게 한다."""
+    if outcome.status not in SENDABLE:
+        raise ValueError(f"콜백은 결과가 있는 상태만 보낸다({' · '.join(s.value for s in SENDABLE)}): status={outcome.status}")
     return callback_body(outcome)
 
 

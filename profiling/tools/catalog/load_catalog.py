@@ -2,7 +2,9 @@
 
   적재:      uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1
   확인만:    … --dry-run
-  ID 회신 반영: … --id-map returned/product-id-map.jsonl --category-id-map returned/category-id-map.jsonl
+  회신 반영:  … --id-map returned/product-id-map.jsonl --category-id-map returned/category-id-map.jsonl
+              … --metrics returned/metrics.jsonl        (재고·조회수)
+              회신 xlsx 를 이 jsonl 로 바꾸는 것은 tools/catalog/import_be_ids.py
 
 패키지는 `product-catalog-20260922-v1` 모양을 기대한다 (data/categories.json · data/products.jsonl · data/summary.json).
 적재는 트랜잭션 하나다 — 도중에 실패하면 아무것도 남지 않고 활성 버전도 그대로다.
@@ -28,6 +30,7 @@ import sqlalchemy as sa
 from profiling.settings import get_settings
 
 SCHEMA = "ai_catalog"
+AVAILABILITY = ("available", "unavailable", "unknown")   # 마이그레이션 0003 의 CHECK 와 같은 값
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +193,40 @@ def apply_id_map(engine: sa.Engine, path: Path, *, kind: str) -> dict[str, int]:
     return {"updated": updated, "skipped": skipped, "missing": len(rows) - updated}
 
 
+def apply_metrics(engine: sa.Engine, path: Path) -> dict[str, int]:
+    """재고·조회수 회신(JSONL) → availability · view_count 채우기. 그 두 열만 건드린다.
+
+    한 줄: {"sourceProductId": "KAKAO_GIFT:1", "availability": "available", "viewCount": 47753}
+    availability 는 3값만 받는다 — 이상한 값은 DB CHECK 가 막지만 여기서 먼저 거른다.
+    """
+    rows, skipped = [], 0
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            av, vc = item.get("availability"), item.get("viewCount")
+            if av is None and vc is None:
+                skipped += 1
+                continue
+            if av is not None and av not in AVAILABILITY:
+                raise PackageError(f"재고 상태가 3값이 아니다: {av} ({item.get('sourceProductId')})")
+            rows.append({"sid": item["sourceProductId"], "av": av, "vc": None if vc is None else int(vc)})
+    if not rows:
+        return {"updated": 0, "skipped": skipped, "missing": 0}
+
+    stmt = sa.text(f"""update {SCHEMA}.products set
+                           availability = coalesce(:av, availability),
+                           view_count   = coalesce(:vc, view_count),
+                           updated_at   = now()
+                       where source_product_id = :sid""")
+    updated = 0
+    with engine.begin() as conn:
+        for row in rows:
+            updated += conn.execute(stmt, row).rowcount
+    return {"updated": updated, "skipped": skipped, "missing": len(rows) - updated}
+
+
 # ---------------------------------------------------------------------------
 # 보고
 # ---------------------------------------------------------------------------
@@ -213,8 +250,9 @@ def report(engine: sa.Engine) -> None:
             print("                  ⚠ 아직 하나도 없다 — 7.7로 상품 번호를 내보낼 수 없다. Backend 회신 뒤 --id-map 으로 채운다")
         av = q(f"select count(*) from {SCHEMA}.products where availability <> 'unknown'")
         vc = q(f"select count(view_count) from {SCHEMA}.products")
-        print(f"  availability    {av}건 확인됨 (나머지는 unknown — 재고 정보가 없는 상품. 7.9 export 가 채운다)")
-        print(f"  view_count      {vc}건 있음 — v1 풀 정렬 기준. Backend 7.9 export 로 채운다")
+        total = q(f"select count(*) from {SCHEMA}.products")
+        print(f"  availability    {av}/{total} 확인됨" + ("" if av == total else " (나머지는 unknown — 재고 정보가 없는 상품)"))
+        print(f"  view_count      {vc}/{total} 있음 — v1 풀 정렬 기준" + ("" if vc == total else ". Backend 회신으로 채운다"))
         mismatch = conn.execute(sa.text(f"""
             select c.source_category_id, c.product_count, count(p.source_product_id)
             from {SCHEMA}.categories c left join {SCHEMA}.products p on p.source_category_id = c.source_category_id
@@ -231,12 +269,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--package", type=Path, help="패키지 폴더 (product-catalog-YYYYMMDD-vN)")
     ap.add_argument("--id-map", type=Path, help="회신 product-id-map.jsonl — backend_product_id 채우기")
     ap.add_argument("--category-id-map", type=Path, help="회신 category-id-map.jsonl — backend_category_id 채우기")
+    ap.add_argument("--metrics", type=Path, help="회신 metrics.jsonl — availability · view_count 채우기")
     ap.add_argument("--dry-run", action="store_true", help="확인만 하고 쓰지 않는다")
     ap.add_argument("--no-activate", action="store_true", help="적재는 하되 활성 버전으로 바꾸지 않는다")
     args = ap.parse_args(argv)
 
-    if not (args.package or args.id_map or args.category_id_map):
-        ap.error("--package 또는 --id-map / --category-id-map 중 하나는 필요하다")
+    if not (args.package or args.id_map or args.category_id_map or args.metrics):
+        ap.error("--package 또는 --id-map / --category-id-map / --metrics 중 하나는 필요하다")
 
     pkg = None
     if args.package:
@@ -275,8 +314,14 @@ def main(argv: list[str] | None = None) -> int:
             if path:
                 r = apply_id_map(engine, path, kind=kind)
                 print(f"  ✓ {kind} ID 회신 — 채움 {r['updated']} · null 건너뜀 {r['skipped']} · 우리 표에 없는 ID {r['missing']}")
+        if args.metrics:
+            r = apply_metrics(engine, args.metrics)
+            print(f"  ✓ 재고·조회수 회신 — 채움 {r['updated']} · 값 없어 건너뜀 {r['skipped']} · 우리 표에 없는 ID {r['missing']}")
         print("\n현재 상태")
         report(engine)
+    except PackageError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
     except sa.exc.SQLAlchemyError as e:
         print(f"✗ DB 오류: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

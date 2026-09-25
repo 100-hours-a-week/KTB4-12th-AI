@@ -43,7 +43,7 @@ def lines(x, y, rows, dy=14):
         t(x, y + i * dy, s, c)
 
 
-t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-25 코드 기준 · 접수 단계 중복 판정)', 'title')
+t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-25 코드 기준 · 중복 판정 + Backend 회신 반영)', 'title')
 t(40, 70, '위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.', 'small')
 
 # ───────────────────── 0. 조립 (main.py lifespan) ─────────────────────
@@ -178,7 +178,7 @@ AH = 126
 adapters = [
     ('DbCatalogReader / FileCatalogReader', 'catalog.py', [
         'DB: active() → 활성 버전 id 질의 1개 · 바뀌었을 때만 다시 읽음',
-        '  상품번호 = backend_product_id, 없으면 수집처 ID 숫자부(임시)',
+        '  상품번호 = backend_product_id (09-25 회신으로 전건 채움)',
         '  번호 충돌·활성 없음·상품 0건 → NoActiveCatalog',
         '파일: JSON 1회 로드 · 두 형식 판별 · 고정 UUID (로컬 전용)',
         'by_id(product_id) → ProductRecord | None  (v3 리뷰 조인)']),
@@ -213,7 +213,7 @@ EY = AY0 + AH + 38
 EH = 76
 ext = [
     ('PostgreSQL  ai_chat → ai_catalog (0003)', ['catalog_versions 활성 1행 · products 4,231 · categories 67',
-                                                 '배포 기본(CATALOG_SOURCE=db) · 파일은 로컬 시험용으로 남김'], 'db'),
+                                                 'Backend 번호·재고·조회수 전건 채움 (09-25 회신)'], 'db'),
     ('PostgreSQL  ai_chat → ai_profile.profile_runs', ['실행 1건 = 1행 · (recipient_user_id, source_version) UNIQUE', 'status CHECK · callback_payload jsonb · alembic 0002'], 'db'),
     ('PostgreSQL  ai_chat → ai_profile.recipient_profiles', ['수신자 1명 = 1행 · recipient_user_id PK (시퀀스 없음)', 'preferred/disliked_tags · disliked_categories jsonb · 0001'], 'db'),
     ('Backend  (로컬: tools/fake_backend  :8081)', ['POST 7.7 수신 (실패 주입 ok/409/400/500/timeout)', 'GET 7.9 export · 시험 콘솔 /console'], 'ext'),
@@ -236,7 +236,7 @@ t(110, NY + 22, 'ProfileExtractRequest(camel) → to_internal → ProfileRequest
 t(40, NY + 44, '실패 경로', 'h2')
 t(110, NY + 44, '400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.', 'sub')
 t(40, NY + 66, '시험', 'h2')
-t(110, NY + 66, '단위(tests/unit, 83): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 32): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
+t(110, NY + 66, '단위(tests/unit, 94): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 34): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
 parts.append('</svg>')
 (P / 'pipeline-map.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')
 print('svg ok')

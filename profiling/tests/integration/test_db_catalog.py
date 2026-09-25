@@ -13,6 +13,7 @@ from tools.catalog import load_catalog as lc
 
 SCHEMA = "ai_catalog"
 GID, CID = "TEST-GROUP", "TEST-CAT-01"
+FAKE_BE = 9_000_000_000            # 실제 Backend 번호(1~수천)와 겹치지 않는 시험용 번호대
 PIDS = ["TEST_SRC:1", "TEST_SRC:2"]
 
 
@@ -119,13 +120,13 @@ def test_load_keeps_backend_id_and_availability(engine, clean) -> None:
     """재적재가 Backend ID·재고 상태를 지우면 안 된다 — 그 두 열은 다른 경로(회신·7.9)로 채운다."""
     lc.load(engine, _pkg(), activate=False)
     with engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = 777, availability = 'available', view_count = 42 "
-                          "where source_product_id = :p"), {"p": PIDS[0]})
+        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :be, availability = 'available', view_count = 42 "
+                          "where source_product_id = :p"), {"p": PIDS[0], "be": FAKE_BE + 777})
     lc.load(engine, _pkg(), activate=False)
     with engine.begin() as c:
         row = c.execute(sa.text(f"select backend_product_id, availability, view_count from {SCHEMA}.products "
                                 "where source_product_id = :p"), {"p": PIDS[0]}).mappings().one()
-    assert row["backend_product_id"] == 777 and row["availability"] == "available" and row["view_count"] == 42
+    assert row["backend_product_id"] == FAKE_BE + 777 and row["availability"] == "available" and row["view_count"] == 42
 
 
 # ---------------------------------------------------------------- Backend ID 회신
@@ -135,16 +136,16 @@ def test_apply_id_map_fills_and_reports(engine, clean, tmp_path) -> None:
     lc.load(engine, _pkg(), activate=False)
     path = tmp_path / "product-id-map.jsonl"
     path.write_text("\n".join(json.dumps(x) for x in [
-        {"sourceProductId": PIDS[0], "backendProductId": 101},
+        {"sourceProductId": PIDS[0], "backendProductId": FAKE_BE + 101},
         {"sourceProductId": PIDS[1], "backendProductId": None},        # 아직 안 준 것 → 건너뜀
-        {"sourceProductId": "TEST_SRC:없음", "backendProductId": 999},   # 우리 표에 없는 것
+        {"sourceProductId": "TEST_SRC:없음", "backendProductId": FAKE_BE + 999},   # 우리 표에 없는 것
     ]), encoding="utf-8")
 
     r = lc.apply_id_map(engine, path, kind="product")
     assert r == {"updated": 1, "skipped": 1, "missing": 1}
     with engine.begin() as c:
         assert c.execute(sa.text(f"select backend_product_id from {SCHEMA}.products where source_product_id = :p"),
-                         {"p": PIDS[0]}).scalar_one() == 101
+                         {"p": PIDS[0]}).scalar_one() == FAKE_BE + 101
         assert c.execute(sa.text(f"select backend_product_id from {SCHEMA}.products where source_product_id = :p"),
                          {"p": PIDS[1]}).scalar_one() is None
 
@@ -153,6 +154,43 @@ def test_backend_product_id_is_unique(engine, clean) -> None:
     """두 상품이 같은 Backend ID 를 가질 수 없다 — 회신 파일이 잘못돼도 DB가 막는다."""
     lc.load(engine, _pkg(), activate=False)
     with engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = 555 where source_product_id = :p"), {"p": PIDS[0]})
+        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :be where source_product_id = :p"),
+                  {"p": PIDS[0], "be": FAKE_BE + 555})
     with pytest.raises(sa.exc.IntegrityError), engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = 555 where source_product_id = :p"), {"p": PIDS[1]})
+        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :be where source_product_id = :p"),
+                  {"p": PIDS[1], "be": FAKE_BE + 555})
+
+
+def test_apply_metrics_fills_only_stock_and_views(engine, clean, tmp_path) -> None:
+    """재고·조회수 회신은 그 두 열만 바꾼다 — Backend ID·이름·가격은 그대로."""
+    lc.load(engine, _pkg(), activate=False)
+    with engine.begin() as c:
+        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :be where source_product_id = :p"),
+                  {"p": PIDS[0], "be": FAKE_BE + 888})
+
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in [
+        {"sourceProductId": PIDS[0], "availability": "available", "viewCount": 47753},
+        {"sourceProductId": PIDS[1], "availability": "unavailable", "viewCount": 0},
+        {"sourceProductId": "TEST_SRC:없음", "availability": "available", "viewCount": 1},   # 우리 표에 없는 것
+    ]), encoding="utf-8")
+
+    r = lc.apply_metrics(engine, path)
+    assert r == {"updated": 2, "skipped": 0, "missing": 1}
+    with engine.begin() as c:
+        rows = {x["source_product_id"]: x for x in c.execute(sa.text(
+            f"select source_product_id, availability, view_count, backend_product_id, name, unit_price "
+            f"from {SCHEMA}.products where source_product_id like 'TEST_SRC:%'")).mappings()}
+    assert (rows[PIDS[0]]["availability"], rows[PIDS[0]]["view_count"]) == ("available", 47753)
+    assert (rows[PIDS[1]]["availability"], rows[PIDS[1]]["view_count"]) == ("unavailable", 0)
+    assert rows[PIDS[0]]["backend_product_id"] == FAKE_BE + 888                      # 다른 경로로 채운 값은 그대로
+    assert rows[PIDS[0]]["name"] == "상품0" and rows[PIDS[0]]["unit_price"] == 1000
+
+
+def test_apply_metrics_rejects_bad_availability(engine, clean, tmp_path) -> None:
+    """3값 밖은 파일 단계에서 막는다 (DB CHECK 까지 가기 전에)."""
+    lc.load(engine, _pkg(), activate=False)
+    path = tmp_path / "bad.jsonl"
+    path.write_text(json.dumps({"sourceProductId": PIDS[0], "availability": "품절", "viewCount": 1}), encoding="utf-8")
+    with pytest.raises(lc.PackageError, match="3값이 아니다"):
+        lc.apply_metrics(engine, path)

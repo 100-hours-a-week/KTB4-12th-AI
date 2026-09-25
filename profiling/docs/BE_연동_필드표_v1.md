@@ -446,7 +446,7 @@ sequenceDiagram
 
 | # | 요청 | 지금 상태 |
 |---|---|---|
-| 1 | **Backend 상품·카테고리 ID 회신** (`product-id-map.jsonl` · `category-id-map.jsonl`) | AI `ai_catalog`에 4,231건이 있으나 `backend_product_id`는 0/4,231. 회신 전에는 7.7로 보내는 번호가 Backend에 없는 번호다 |
-| 2 | **7.9 export에 재고·조회수 포함** — 재고를 모르는 상품은 `available`을 빼거나 `null`로 | AI는 3값(`available`·`unavailable`·`unknown`)으로 저장하고 `unknown`을 추정하지 않는다. 지금 적재분은 전건 `unknown` |
+| 1 | ~~Backend 상품·카테고리 ID 회신~~ **받음 (09-25)** | xlsx 2종으로 회신. 상품 4,231/4,231 · 카테고리 67/67 반영 완료. 7.7로 나가는 번호가 이제 Backend 번호다 |
+| 2 | ~~재고·조회수~~ **받음 (09-25)** · 확인 하나 | 회신의 재고가 **전건 100**이라 전부 `available`로 저장했다. 실제 재고가 아니라 MVP 기본값이면, 실값이 생길 때 다시 보내 주면 `--metrics`로 덮는다. 조회수(102~49,989)는 그대로 정렬에 쓴다 |
 | 3 | 7.7 태그 포함 여부 · 7.9 조회수 필드명 · 비선호 제외 vs 감점 | 09-22 이후 미결 |
 

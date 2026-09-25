@@ -53,7 +53,9 @@ def test_reads_active_version_and_maps_fields(engine, active) -> None:
         row = c.execute(sa.text(
             f"select p.name, p.unit_price, p.availability, c.name as cname from {SCHEMA}.products p "
             f"join {SCHEMA}.categories c on c.source_category_id = p.source_category_id "
-            "where split_part(p.source_product_id, ':', 2)::bigint = :pid"), {"pid": p.productId}).mappings().one()
+            # Backend 번호가 채워졌으면 그것이 상품 번호, 아직이면 수집처 ID 의 숫자부(임시)
+            "where coalesce(p.backend_product_id, split_part(p.source_product_id, ':', 2)::bigint) = :pid"),
+            {"pid": p.productId}).mappings().one()
     assert (p.name, p.price, p.availability, p.categoryName) == (row["name"], row["unit_price"], row["availability"], row["cname"])
     assert cat.by_id(p.productId) is p and cat.by_id(-1) is None
 
@@ -67,41 +69,47 @@ def test_same_version_is_not_reread(engine) -> None:
 
 
 def test_provisional_id_gives_way_to_backend_id(engine, active) -> None:
-    """Backend 번호가 채워진 상품은 그 번호로 나온다. 아직 없는 동안에는 수집처 ID 숫자부(임시)."""
+    """Backend 번호가 있으면 그 번호가 상품 번호. 비어 있는 동안에만 수집처 ID 숫자부(임시)를 쓴다."""
     _, package_id, _ = active
     with engine.connect() as c:
-        sid = c.execute(sa.text(f"select source_product_id from {SCHEMA}.products where package_id = :p "
-                                "and backend_product_id is null order by source_product_id limit 1"),
-                        {"p": package_id}).scalar_one()
+        row = c.execute(sa.text(f"select source_product_id, backend_product_id from {SCHEMA}.products "
+                                "where package_id = :p and backend_product_id is not null "
+                                "order by source_product_id limit 1"), {"p": package_id}).first()
+    if row is None:
+        pytest.skip("Backend 번호가 아직 없음 — import_be_ids + load_catalog --id-map 뒤 실행")
+    sid, backend_id = row
     provisional = int(sid.split(":")[1])
-    fake_backend_id = 9_000_000_001                            # 실제 번호와 겹치지 않을 큰 값
 
     cat = DbCatalogReader(engine)
     cat.active()
-    assert cat.by_id(provisional) is not None and cat.provisional_ids is True
+    assert cat.by_id(backend_id) is not None            # Backend 번호로 찾힌다
+    assert cat.by_id(provisional) is None or provisional == backend_id
+    assert cat.provisional_ids is False                 # 전건 채워졌으면 표시가 없다
 
-    with engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :b where source_product_id = :s"),
-                  {"b": fake_backend_id, "s": sid})
+    with engine.begin() as c:                           # 한 건만 비워 임시 번호 경로를 확인
+        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = null where source_product_id = :s"), {"s": sid})
     try:
-        fresh = DbCatalogReader(engine)                        # 같은 버전이라 캐시는 안 바뀐다 — 새로 읽는 쪽으로 확인
+        fresh = DbCatalogReader(engine)
         fresh.active()
-        assert fresh.by_id(fake_backend_id) is not None        # Backend 번호가 있으면 그것이 상품 번호
-        assert fresh.by_id(provisional) is None                # 임시 번호는 더 이상 쓰지 않는다
-        assert fresh.provisional_ids is True                   # 나머지 상품은 아직 임시 — 표시는 유지
+        assert fresh.by_id(provisional) is not None     # 번호가 없으면 임시 번호로
+        assert fresh.by_id(backend_id) is None
+        assert fresh.provisional_ids is True            # 한 건이라도 임시면 표시
     finally:
         with engine.begin() as c:
-            c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = null where source_product_id = :s"), {"s": sid})
+            c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :b where source_product_id = :s"),
+                      {"b": backend_id, "s": sid})
 
 
 def test_duplicate_product_number_is_refused(engine, active) -> None:
     """임시 번호와 Backend 번호가 겹치면 다른 상품을 추천하게 된다 — 읽기 자체를 거부한다."""
     _, package_id, _ = active
     with engine.connect() as c:
-        row = c.execute(sa.text(f"select source_product_id, source_category_id from {SCHEMA}.products "
-                                "where package_id = :p order by source_product_id limit 1"), {"p": package_id}).one()
-    sid, cid = row
-    clash = f"DUPTEST:{sid.split(':')[1]}"                     # 숫자부가 같은 다른 수집처 ID → 같은 임시 번호
+        row = c.execute(sa.text(f"select source_product_id, source_category_id, "
+                                "coalesce(backend_product_id, split_part(source_product_id, ':', 2)::bigint) "
+                                f"from {SCHEMA}.products where package_id = :p order by source_product_id limit 1"),
+                        {"p": package_id}).one()
+    _sid, cid, taken = row
+    clash = f"DUPTEST:{taken}"                                 # 숫자부가 기존 Backend 번호와 같다 → 임시 번호가 충돌
     with engine.begin() as c:
         c.execute(sa.text(f"insert into {SCHEMA}.products (source_product_id, name, brand, source_category_id, product_kind, "
                           "product_type, description, unit_price, source_provider, source_product_url, source_image_url, package_id) "

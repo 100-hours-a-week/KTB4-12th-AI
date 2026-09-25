@@ -7,7 +7,7 @@ AI가 **소유한** 표가 무엇이고 서로 어떻게 이어지는지. 정본
 | DB | PostgreSQL 16 + pgvector (`pgvector/pgvector:pg16`) · 데이터베이스 `ai_chat` · 계정 `ai_user` |
 | 스키마 | `ai_profile`(프로파일링 2표) · `ai_catalog`(카탈로그 3표) · `ai_search`(팀원 검색기 1표, §7) |
 | 마이그레이션 | `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog 3표 — `uv run alembic upgrade head` |
-| 행 수 | 2026-09-23 확인: 상품 4,231 · 카테고리 67(대분류 10·소분류 57) · 활성 카탈로그 버전 1. `ai_profile` 두 표는 로컬 시험 행뿐 |
+| 행 수 | 2026-09-25 확인: 상품 4,231(Backend 번호·재고·조회수 전건 채움) · 카테고리 67(대분류 10·소분류 57) · 활성 카탈로그 버전 1. `ai_profile` 두 표는 로컬 시험 행뿐 |
 | 절 | 1 한눈에 · 2 `ai_profile` · 3 `ai_catalog` · 4 관계(FK와 FK 아닌 것) · 5 키·인덱스·제약 · 6 바깥 ID 대응 · 7 팀원 표 · 8 아직 없는 것 |
 
 그림은 `docs/assets/erd/`. 이 문서의 mermaid를 고치면 `python3 assets/build_be_sequences.py`를 다시 돌린다 — 그림과 본문이 한 소스다.
@@ -213,14 +213,14 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 | `unit_price` | integer | NOT NULL | `>= 0` (CHECK) |
 | `list_price` | integer | NULL | 정가. 충돌·미확인 4건은 NULL — 할인율을 만들지 않는다 |
 | `currency` | text | NOT NULL `'KRW'` | |
-| `stock_quantity` | integer | NULL | 미확인. 패키지는 **전건 NULL** |
-| `availability` | text | NOT NULL `'unknown'` | `available`·`unavailable`·`unknown` (CHECK). 패키지 적재분은 전건 `unknown` |
-| `view_count` | integer | NULL | 패키지에 없음 → **전건 NULL**. v1 풀 정렬 키 |
+| `stock_quantity` | integer | NULL | 미확인. 패키지는 전건 NULL이고 회신도 수량을 따로 주지 않았다(재고는 `availability`로만 들어왔다) |
+| `availability` | text | NOT NULL `'unknown'` | `available`·`unavailable`·`unknown` (CHECK). 09-25 회신으로 **전건 `available`** (BE 재고가 일률 100이었다) |
+| `view_count` | integer | NULL | 09-25 회신으로 **전건 채움** (102 ~ 49,989). v1 풀 정렬 키 |
 | `source_provider` · `source_product_url` · `source_image_url` | text | NOT NULL | |
 | `image_asset_id` | text | NULL | 변환 이미지 3종 키 |
 | `package_id` | text | NOT NULL | 어느 적재분인지 |
 
-**재적재해도 덮지 않는 열이 셋 있다** — `backend_product_id` · `availability` · `view_count`. 각각 Backend 회신(`--id-map`)과 7.9 export가 채우는 자리이므로, 패키지를 다시 넣어도 UPSERT가 건드리지 않는다.
+**재적재해도 덮지 않는 열이 셋 있다** — `backend_product_id` · `availability` · `view_count`. 각각 Backend 회신(`--id-map` · `--metrics`)이 채우는 자리이므로, 패키지를 다시 넣어도 UPSERT가 건드리지 않는다.
 
 ---
 
@@ -263,12 +263,12 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 | 우리 열 | 바깥 | 지금 상태 |
 |---|---|---|
 | `recipient_profiles.recipient_user_id` · `profile_runs.recipient_user_id` | Backend `users.id` | 그대로 쓴다 — 변환 없음 |
-| `products.backend_product_id` | Backend `products.id` (DB 적재 시 자동 발급) | **0 / 4,231.** 회신이 오면 `load_catalog --id-map`으로 채운다 |
-| `categories.backend_category_id` | Backend `categories.id` | **0 / 67.** 7.6 `dislikedCategories[].categoryId`가 이 값 |
+| `products.backend_product_id` | Backend `products.id` (DB 적재 시 자동 발급) | **4,231 / 4,231 (09-25 회신 반영)** — 7.7로 이 번호를 보낸다 |
+| `categories.backend_category_id` | Backend `categories.id` | **67 / 67 (09-25 회신 반영)** — 7.6 `dislikedCategories[].categoryId`가 이 값 |
 | `products.source_product_id` | 수집처(`KAKAO_GIFT:…`) · 팀원 `ai_search.products.product_id` | 같은 체계 |
 | `catalog_versions.id` | — (AI 내부) | 7.7에는 나가지 않는다. 감사용 |
 
-Backend 번호가 없는 동안 `DbCatalogReader`는 수집처 ID의 숫자부를 **임시 번호**로 쓰고 `/health`에 `provisional_ids: true`를 띄운다. 그 번호로 7.7을 보내면 Backend에 없는 번호가 된다 — 배포는 되지만 추천이 맞으려면 회신이 먼저다.
+번호가 비어 있는 동안에는 `DbCatalogReader`가 수집처 ID의 숫자부를 **임시 번호**로 쓰고 `/health`에 `provisional_ids: true`를 띄운다. 09-25 회신을 반영한 뒤로는 전건 채워져 그 표시가 나오지 않는다.
 
 ---
 
