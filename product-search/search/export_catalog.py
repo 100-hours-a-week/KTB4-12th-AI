@@ -5,7 +5,7 @@ import json
 from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
 
-WireId = Annotated[int, Field(strict=True,ge=1,le=2**53-1)]
+WireId = Annotated[int, Field(strict=True,ge=1,le=2**63-1)]
 
 
 class Contract(BaseModel):
