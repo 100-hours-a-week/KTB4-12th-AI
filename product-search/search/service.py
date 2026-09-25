@@ -55,7 +55,7 @@ class SearchService:
         self._build_categories()
         self.categories = np.asarray([p['category_id'] for p in self.products], dtype=np.int64)
         self.brands = np.asarray([normalize(p['brand']) for p in self.products])
-        self.types = np.asarray([p['product_type'] for p in self.products])
+        self.types = np.asarray([p['product_type'] for p in self.products], dtype=object)
         self.availability = np.asarray([p['availability'] for p in self.products])
         self.brand_keys = set(self.brands.tolist())
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieval")
