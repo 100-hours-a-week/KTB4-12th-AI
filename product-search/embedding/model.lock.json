@@ -1,0 +1,31 @@
+{
+  "model": "jinaai/jina-embeddings-v5-text-nano-retrieval",
+  "revision": "ac5d898c8d382b17167c33e5c8af644a3519b47d",
+  "license": "CC-BY-NC-4.0",
+  "files": [
+    {
+      "path": "model_q4f16.onnx",
+      "remotePath": "onnx/model_q4f16.onnx",
+      "bytes": 130307,
+      "sha256": "2f139a9c44942032ef6fff72e792e67ed06dc15d9badef261cb99e0ec25054ca"
+    },
+    {
+      "path": "model_q4f16.onnx_data",
+      "remotePath": "onnx/model_q4f16.onnx_data",
+      "bytes": 123503104,
+      "sha256": "6857e07e7e93f4de8855904f86090c51a6117e855272530aaf559a284114229c"
+    },
+    {
+      "path": "tokenizer.json",
+      "remotePath": "tokenizer.json",
+      "bytes": 17210235,
+      "sha256": "98d4a1d32152d6cedf85b5e88f3b205106dca1fe72aaab34e0ac13c238421069"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "remotePath": "tokenizer_config.json",
+      "bytes": 487,
+      "sha256": "6c4640d432db970b2436a4386d3ee992b99e756b62c37446c3f581c8d09cbb05"
+    }
+  ]
+}

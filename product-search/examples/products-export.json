@@ -1,0 +1,41 @@
+{
+  "message": "합성 예제",
+  "data": {
+    "generatedAt": "2026-09-25T00:00:00Z",
+    "products": [
+      {
+        "productId": 1,
+        "name": "예제 텀블러",
+        "brand": "테스트",
+        "description": "실제 판매 상품이 아닌 실행 확인용 예제입니다.",
+        "categoryId": 11,
+        "categoryName": "음료",
+        "price": 10000,
+        "available": true,
+        "updatedAt": "2026-09-25T00:00:00Z"
+      },
+      {
+        "productId": 2,
+        "name": "예제 무선 스피커",
+        "brand": "테스트",
+        "description": "실제 판매 상품이 아닌 실행 확인용 예제입니다.",
+        "categoryId": 12,
+        "categoryName": "전자",
+        "price": 10000,
+        "available": true,
+        "updatedAt": "2026-09-25T00:00:00Z"
+      },
+      {
+        "productId": 3,
+        "name": "예제 머그컵",
+        "brand": "테스트",
+        "description": "실제 판매 상품이 아닌 실행 확인용 예제입니다.",
+        "categoryId": 11,
+        "categoryName": "음료",
+        "price": 10000,
+        "available": false,
+        "updatedAt": "2026-09-25T00:00:00Z"
+      }
+    ]
+  }
+}
