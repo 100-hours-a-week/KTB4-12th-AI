@@ -3,6 +3,8 @@
   7.7 수신   POST /api/internal/v1/recipients/{recipientUserId}/profile   ← AI 콜백을 받아 검증·기록
   7.9 제공   GET  /internal/v1/ai/products/export                          ← AI Catalog 빌드가 가져감 (tests/fixtures/catalog_sample.json)
   콘솔       GET  /console  · POST /console/send-7.6 (AI로 대신 보냄) · GET /console/health-ai · GET /console/catalog · PUT /console/mode
+  Backend 흉내 POST /console/be/change (비선호 변경) · GET /console/be/state · GET /console/be/events · PUT /console/be/policy · DELETE /console/be/state
+             디바운스→7.6→202→(타임아웃)같은 번호 재전송 2회→FAILED 까지 lifecycle.py 규칙대로 돈다 (09-25 합의)
 
 실행:  uv run uvicorn tools.fake_backend.app:app --port 8081        (profiling 앱은 8000)
 환경:  AI_BASE_URL(기본 http://localhost:8000) · AI_SERVICE_TOKEN(기본 dev-token) · FAKE_BACKEND_CATALOG(기본 tests/fixtures/catalog_sample.json)
@@ -47,6 +49,7 @@ from profiling.schemas import (
     SuccessResponse,
 )
 from profiling.settings import get_settings
+from tools.fake_backend import lifecycle as lc
 
 logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s fake_backend: %(message)s")
 log = logging.getLogger("fake_backend")
@@ -70,6 +73,27 @@ _lock = threading.Lock()
 # 수신자별 sourceVersion — 실제 Backend는 수신자의 비선호·취향·리뷰가 바뀔 때마다 이 값을 올려서 7.6에 싣는다.
 # 시험 환경에는 Backend가 없으므로 fake가 흉내 낸다: 같은 수신자로 보낼 때마다 +1 (콘솔의 "자동 증가"가 켜져 있을 때).
 _source_versions: dict[int, int] = {}
+
+# ---- Backend 생애주기 흉내 (§3 · 09-25 재전송 합의) ------------------------------
+# 실제 Backend가 수신자마다 들고 있어야 하는 값과 그 전이를 lifecycle.py 가 판단하고, 여기서는 시간을 재고 HTTP를 보낸다.
+# 디바운스 1시간·타임아웃 10분을 그대로 쓰면 시나리오 한 번에 한 시간이 걸리므로 기본값을 초 단위로 줄였다.
+_recipients: dict[int, lc.Recipient] = {}
+_policy = lc.Policy(
+    debounce_s=float(os.environ.get("FAKE_BACKEND_DEBOUNCE_S", "5")),
+    window_s=float(os.environ.get("FAKE_BACKEND_WINDOW_S", "30")),
+    pending_timeout_s=float(os.environ.get("FAKE_BACKEND_PENDING_TIMEOUT_S", "10")),
+    max_retry=int(os.environ.get("FAKE_BACKEND_MAX_RETRY", "2")),
+)
+TICK_S = float(os.environ.get("FAKE_BACKEND_TICK_S", "1"))
+_events: list[dict] = []          # 무슨 일이 언제 일어났는지 — 시나리오 확인용
+
+
+def _event(kind: str, r: lc.Recipient, **extra: Any) -> None:
+    item = {"at": datetime.now(UTC).isoformat(timespec="milliseconds"), "kind": kind, **r.snapshot(), **extra}
+    with _lock:
+        _events.append(item)
+    log.info("BE %s recipient=%s status=%s v=%s analyzed=%s retry=%s %s", kind, r.recipient_user_id, r.profile_status,
+             r.source_version, r.analyzed_source_version, r.retry_count, extra or "")
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -117,6 +141,14 @@ async def receive_profile_callback(
         _received.append(record)
     log.info("7.7 수신 recipient=%s source_version=%s ids=%d first=%s",
              body.recipientUserId, body.sourceVersion, len(body.recommendedProductIds), body.recommendedProductIds[:3])
+
+    # 생애주기를 쓰는 수신자면 버전 규칙대로 저장·판정한다 (§3.4 ③). 콘솔로 직접 쏜 수신자는 그냥 기록만.
+    r = _recipients.get(recipientUserId)
+    if r is not None:
+        status, code = lc.on_callback(r, body.sourceVersion, list(body.recommendedProductIds))
+        _event("7.7 수신", r, http=status, code=code)
+        if status != 200:
+            return _error(status, code or "STALE_SOURCE_VERSION", "더 새로운 sourceVersion이 이미 저장되어 있습니다.")
 
     return JSONResponse(
         status_code=200,
@@ -224,6 +256,103 @@ def console_send_extract(body: Annotated[dict, Body()], auto_source_version: boo
     return {"ok": res.status_code == 202, "status": res.status_code, "body": payload, "elapsedMs": round((time.perf_counter() - t0) * 1000),
             "sentSourceVersion": body.get("sourceVersion"), "mode": MODE,
             "sent": {"url": f"{AI_BASE_URL}{EXTRACT_AND_POOL_PATH}", "authorization": "Bearer ***"}}
+
+
+# ---------------------------------------------------------------------------
+# Backend 흉내 — 비선호 변경 → (디바운스) 7.6 → 202 → (타임아웃) 재전송 → FAILED
+# 판단은 lifecycle.py, 여기서는 시간을 재고 HTTP 를 보낸다.
+# ---------------------------------------------------------------------------
+
+
+def _send_7_6(r: lc.Recipient, version: int, kind: str) -> None:
+    """7.6 을 실제로 보내고 202 면 생애주기에 반영한다. 오류 응답은 상태를 바꾸지 않는다(§3.3)."""
+    changed_at_when_sent = r.last_changed_at          # 보내기 직전 값을 기억 (§3.4 ②)
+    body = {"recipientUserId": r.recipient_user_id, "sourceVersion": version,
+            "dislikedCategories": r.disliked_categories, "giftPreference": None, "reviews": []}
+    try:
+        with httpx.Client(base_url=AI_BASE_URL, timeout=10) as cli:
+            res = cli.post(EXTRACT_AND_POOL_PATH, json=body, headers={"Authorization": f"Bearer {AI_SERVICE_TOKEN}"})
+        status = res.status_code
+    except httpx.RequestError as e:
+        _event("7.6 실패", r, kind=kind, error=f"{type(e).__name__}", sentVersion=version)
+        return
+    if status == 202:
+        lc.on_accepted(r, version, changed_at_when_sent, time.time())
+        _event(f"7.6 {kind} → 202", r, sentVersion=version)
+    else:
+        _event(f"7.6 {kind} → {status}", r, sentVersion=version)   # 503·500 등: 상태 그대로, 다음 주기에 다시
+
+
+async def _ticker() -> None:
+    """주기적으로 모든 수신자를 훑는다. 실제 Backend 의 스케줄러 자리."""
+    while True:
+        await asyncio.sleep(TICK_S)
+        now = time.time()
+        for r in list(_recipients.values()):
+            action = lc.due_send(r, now, _policy)
+            if action == lc.SEND_NEW:
+                await asyncio.to_thread(_send_7_6, r, lc.start_new(r), "신규")
+            elif action == lc.SEND_RETRY:
+                await asyncio.to_thread(_send_7_6, r, lc.start_retry(r), f"재전송{r.retry_count}")
+            elif lc.expire(r, now, _policy):
+                _event("타임아웃 → FAILED", r)
+
+
+@app.on_event("startup")
+async def _start_ticker() -> None:
+    asyncio.create_task(_ticker())
+
+
+@app.post("/console/be/change")
+def console_change(body: Annotated[dict, Body()]) -> dict:
+    """FE 대신 "사용자가 비선호를 바꿨다"를 알린다. 번호도 상태도 여기서는 안 바뀐다 — 디바운스 뒤 7.6 이 나간다."""
+    rid = int(body["recipientUserId"])
+    cats = body.get("dislikedCategories") or []
+    r = _recipients.setdefault(rid, lc.Recipient(recipient_user_id=rid))
+    lc.on_change(r, cats, time.time())
+    _event("비선호 변경", r, categories=[c.get("categoryId") for c in cats])
+    return {"ok": True, "state": r.snapshot(), "policy": _policy.__dict__}
+
+
+@app.get("/console/be/state")
+def console_be_state(recipientUserId: int | None = None) -> dict:
+    """수신자 상태 — 시나리오의 기대값을 이걸로 확인한다."""
+    if recipientUserId is not None:
+        r = _recipients.get(recipientUserId)
+        return {"found": r is not None, "state": r.snapshot() if r else None,
+                "recommendedProductIds": r.recommended_product_ids[:5] if r else []}
+    return {"count": len(_recipients), "states": [r.snapshot() for r in _recipients.values()], "policy": _policy.__dict__}
+
+
+@app.get("/console/be/events")
+def console_be_events(recipientUserId: int | None = None, limit: int = 50) -> dict:
+    """무슨 일이 언제 일어났는지 — 시나리오 결과를 읽는 곳."""
+    with _lock:
+        items = [e for e in _events if recipientUserId is None or e["recipientUserId"] == recipientUserId]
+    return {"count": len(items), "items": items[-limit:]}
+
+
+@app.delete("/console/be/state")
+def console_be_reset() -> dict:
+    """시나리오 사이 초기화."""
+    n = len(_recipients)
+    _recipients.clear()
+    with _lock:
+        _events.clear()
+    return {"cleared": n}
+
+
+@app.put("/console/be/policy")
+def console_be_policy(body: Annotated[dict, Body()]) -> dict:
+    """디바운스·타임아웃을 실행 중에 바꾼다 (시나리오마다 다른 값이 필요하다)."""
+    global _policy
+    _policy = lc.Policy(
+        debounce_s=float(body.get("debounce_s", _policy.debounce_s)),
+        window_s=float(body.get("window_s", _policy.window_s)),
+        pending_timeout_s=float(body.get("pending_timeout_s", _policy.pending_timeout_s)),
+        max_retry=int(body.get("max_retry", _policy.max_retry)),
+    )
+    return {"policy": _policy.__dict__}
 
 
 @app.get("/console/source-versions")
