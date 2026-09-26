@@ -41,7 +41,7 @@ def lines(x, y, rows, dy=15):
 
 
 # ---------------------------------------------------------------- 머리
-t(40, 46, 'profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-23)', 'title')
+t(40, 46, 'profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-26)', 'title')
 t(40, 70, 'Ports & Adapters(헥사고날). 업무 코드는 바깥(HTTP·파일·DB)을 모른다. 바깥이 업무가 정한 "포트(모양)"에 맞춰 들어온다 — 화살표는 항상 안쪽을 향한다.', 'small')
 
 LANES = [(170, 350), (546, 350), (922, 350), (1298, 350)]   # (x, w) — 포트 4개가 세로로 한 줄씩
@@ -50,7 +50,7 @@ LANES = [(170, 350), (546, 350), (922, 350), (1298, 350)]   # (x, w) — 포트 
 box(40, 92, W - 80, 62, 'band')
 t(56, 114, 'main.py', 'monob')
 t(140, 114, '[조립 · Composition Root]  여기서만 구체 클래스를 안다 — lifespan에서 4개를 만들어 app.state에 두고, 종료 때 정리한다 (아래 회색 점선).', 'msg')
-t(56, 136, 'FileCatalogReader(CATALOG_FILE) · _connect_db(DATABASE_URL) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine) · HttpBackendPort(BACKEND_BASE_URL) · Supervisor(PROFILING_SLOTS)', 'mono')
+t(56, 136, '_connect_db(DATABASE_URL) → Db/FileCatalogReader(CATALOG_SOURCE) · DbProfileRunStore(engine) · DbRecipientProfileStore(engine) · HttpBackendPort(BACKEND_BASE_URL) · Supervisor(PROFILING_SLOTS)', 'mono')
 t(W - 56, 114, 'settings.py — 환경변수 PROFILING_* 한 곳', 'sub', 'end')
 t(W - 56, 136, '__init__.py — 공개 표면(profile · 자료형 · Settings)', 'sub', 'end')
 
@@ -118,8 +118,8 @@ t(1548, PORT_Y - 10, '포트 모양으로만 부른다', 'sub', 'end')
 # ---------------------------------------------------------------- 구현
 IMPL_Y = 590
 t(40, IMPL_Y - 10, '구현 — 포트에 꽂히는 실제 코드. 업무 코드는 이 파일들을 import하지 않는다', 'tag')
-IMPL = [('catalog.py', 'FileCatalogReader', ['active() → (버전, 상품 전체)', 'by_id(product_id)', '7.9 형식·원형 자동 판별·검증']),
-        ('stores.py', 'DbProfileRunStore', ['save() — UPSERT 한 문장', 'get() — 최신 1행', 'payload_hash · delete_recipient']),
+IMPL = [('catalog.py', 'DbCatalogReader / FileCatalogReader', ['active() → (버전, 상품 전체)', 'DB: 활성 버전 id만 묻고 바뀔 때만 다시 읽음', '상품번호 = backend_product_id']),
+        ('stores.py', 'DbProfileRunStore', ['save() — UPSERT 한 문장', 'get() 최신 1행 · get_run(rid, sv)', 'payload_hash · delete_recipient']),
         ('stores.py', 'DbRecipientProfileStore', ['upsert() — 버전 가드', 'get() · delete()', '낮은 버전은 DB가 무시']),
         ('backend.py', 'HttpBackendPort', ['send_profile_callback()', '→ CallbackResult(상태·코드)', 'to_callback · callback_body'])]
 for (x, w), (mod, cls_, rows) in zip(LANES, IMPL):
@@ -133,7 +133,7 @@ t(LANES[3][0] + LANES[3][1] / 2 + 12, PORT_Y + 78, '«구현»', 'sub')
 # ---------------------------------------------------------------- 바깥
 OUT_Y = 760
 t(40, OUT_Y - 10, '바깥 — 실제 자원', 'tag')
-OUT = [('카탈로그 JSON 파일', 'ext', ['PROFILING_CATALOG_FILE', '예시 111건 · 전체 4,231건', 'BE 7.9 export 형식']),
+OUT = [('PostgreSQL  ai_catalog (0003)', 'db', ['products 4,231 · categories 67', 'Backend 번호·재고·조회수 채움 (09-25)', '파일 카탈로그는 로컬 시험용']),
        ('PostgreSQL  ai_profile.profile_runs', 'db', ['실행 1건 = 1행', '(수신자, source_version) UNIQUE', 'alembic 0002']),
        ('PostgreSQL  ai_profile.recipient_profiles', 'db', ['수신자 1명 = 1행', '태그는 여기 보관 (DR-035)', 'alembic 0001']),
        ('Backend', 'ext', ['POST 7.7 상품 ID ≤30', '200 DELIVERED · 409 SUPERSEDED', '4xx FAILED · 5xx 재전송 대상'])]
@@ -149,7 +149,7 @@ parts.append(f'<line x1="40" y1="{NY}" x2="{W-40}" y2="{NY}" class="rule"/>')
 lines(40, NY + 26, [
     ('이름 규칙 — HTTP 경계만 camelCase(schemas.py). 그 밖의 파이썬은 전부 snake_case. 두 세계를 잇는 변환은 pipeline.to_internal() 과 backend.to_callback() 두 함수뿐이다.', 'small'),
     ('바꿔 끼우기 — 포트가 같은 모양이면 무엇이든 꽂힌다. 단위 테스트는 가짜 구현을, 운영은 위 4개를 쓴다. 파일 카탈로그를 DB로 바꿔도 pipeline.py 는 한 줄도 바뀌지 않는다.', 'small'),
-    ('아직 없는 것 — 팀원 Search 호출(v3, 질의어가 생길 때) · ProfileModel(LLM 태그 추출, v3) · 카탈로그 DB adapter. 그때 포트가 하나씩 늘고 구현 칸이 채워진다.', 'small'),
+    ('아직 없는 것 — 팀원 Search 호출(v3, 질의어가 생길 때) · ProfileModel(LLM 태그 추출, v3). 그때 포트가 하나씩 늘고 구현 칸이 채워진다.', 'small'),
 ], 22)
 
 parts.append('</svg>')

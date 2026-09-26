@@ -42,7 +42,7 @@ cls(222,258,150,'ReviewDto',['productId: int >0','rating: int 1..5','reviewText:
 cls(330,360,164,'ProfileAccepted',['recipientUserId','sourceVersion','profileStatus="PENDING"'],stereo='«7.6 응답 data»',blue=True)
 cls(56,360,250,'ProfileCallbackRequest',['recipientUserId: int >0','sourceVersion: int ≥0','profileStatus = "COMPLETED"','recommendedProductIds: list[int] ≤30','(태그 없음 — DR-035)'],stereo='«7.7 요청»',blue=True)
 cls(56,500,150,'ProfileCallbackAccepted',['recipientUserId','sourceVersion','profileStatus'],stereo='«7.7 응답 data»',blue=True)
-cls(330,585,164,'ProductRecord',['productId · name · brand','description: str|None','categoryId · categoryName','price · available','updatedAt'],stereo='«7.9 상품»',blue=True)
+cls(330,585,164,'ProductRecord',['productId · name · brand','description: str|None','categoryId · categoryName','price · availability','updatedAt'],stereo='«7.9 상품»',blue=True)
 cls(222,500,272,'SuccessResponse[T]  /  ErrorResponse',['message: str','data: T   |   error: ErrorBody{code, traceId}'],blue=True)
 line('M131 258 V246','has'); line('M297 258 V246','has')   # ExtractRequest ◇ Dto들
 
@@ -67,15 +67,16 @@ line('M576 470 H312','conv'); t(444,463,'backend.to_callback()','small','middle'
 pkg(1040,92,520,392,'ports.py — 포트 (typing.Protocol)')
 cls(1056,124,330,'CatalogReader',[],['active() → (version_id, list[ProductRecord])','by_id(product_id) → ProductRecord | None'],stereo='«Protocol»',yellow=True)
 cls(1400,124,144,'NoActiveCatalog',['(Exception)','7.6에서 503으로'])
-cls(1056,222,330,'ProfileRunStore',[],['save(outcome: ProfileOutcome) → None','get(recipient_user_id) → ProfileOutcome | None'],stereo='«Protocol»',yellow=True)
-cls(1056,320,330,'BackendPort',[],['send_profile_callback(outcome) → RunStatus'],stereo='«Protocol»',yellow=True)
-cls(1400,222,144,'(v3) ProfileModel',[],['analyze(prompt,','  schema, seed)','→ ExtractDraft'],stereo='«Protocol»',yellow=True)
-cls(1400,320,144,'(v3) Embedder',[],['embed_docs()','embed_query()'],stereo='«Protocol»',yellow=True)
+cls(1056,222,330,'ProfileRunStore',[],['save(outcome: ProfileOutcome) → None','get(recipient_user_id) → ProfileOutcome | None','get_run(rid, sv) → ProfileOutcome | None'],stereo='«Protocol»',yellow=True)
+cls(1056,332,330,'BackendPort',[],['send_profile_callback(outcome) → RunStatus'],stereo='«Protocol»',yellow=True)
+cls(1400,222,144,'RecipientProfileStore',[],['upsert(profile)','get(rid) · delete(rid)'],stereo='«Protocol»',yellow=True)
+cls(1400,332,144,'(v3 예정)',['ProfileModel','Embedder','— ports.py 에 없다'])
 t(1256,470,'ProductRecord(schemas) · ProfileOutcome(types)를 인자·반환으로 씀 → 회색 실선은 생략','st','middle')
 
 # ---------------- adapters  x 1040..1560
 pkg(1040,510,520,190,'adapters/ — 구현 (바깥과 닿는 코드). 스테레오타입이 어느 포트를 구현하는지')
-cls(1056,542,150,'FileCatalogReader',['path: Path','_products: list','_by_id: dict'],['active()','by_id()'],stereo='«CatalogReader 구현»')
+cls(1056,542,160,'Db/FileCatalogReader',['DbCatalogReader(engine)','FileCatalogReader(path)','provisional_ids'],['active()','by_id()'],stereo='«CatalogReader 구현»')
+cls(1232,542,166,'Db 스토어 2개',['DbProfileRunStore','DbRecipientProfileStore','engine: Engine'],['save · get · get_run','upsert · get · delete'],stereo='«Store 구현»')
 cls(1406,542,140,'HttpBackendPort',['base_url · token','timeout_s','_client: httpx.Client'],['send_profile_callback()','close()'],stereo='«BackendPort 구현»')
 
 # ---------------- pipeline.py  x 560..990
@@ -99,6 +100,6 @@ line('M1471 700 V740 H1206 V753','use'); t(1340,733,'httpx POST 7.7','small')
 
 parts.append(f'<line x1="40" y1="{H-70}" x2="{W-40}" y2="{H-70}" class="rule"/>')
 t(40,H-44,'의존 방향: transport → pipeline → ports ←(구현)— adapters.  업무 코드는 adapters를 import하지 않고, 조립(main.py)만 구체 클래스를 안다. 내일 DB adapter(SQLAlchemy)는 ProfileRunStore·CatalogReader를 그대로 구현해 main.py 세 줄만 교체.','small')
-t(40,H-22,'v3 추가: ProfileModel(Ollama·규칙 추출기) · Embedder(BGE-m3-ko) · Search 호출 — pipeline.profile() 안의 needs_model 분기 뒤에 붙는다. 자료형은 types.py의 DraftItem·ExtractDraft·ValidatedTag·Decision.','small')
+t(40,H-22,'v3 추가(아직 ports.py 에 선언 없음): ProfileModel(Ollama·규칙 추출기) · Embedder(BGE-m3-ko) · Search 호출 — pipeline.profile() 안의 needs_model 분기 뒤에 붙는다. 자료형은 types.py의 DraftItem·ExtractDraft·ValidatedTag·Decision.','small')
 parts.append('</svg>')
 (P/'class-diagram.svg').write_text('\n'.join(parts)+'\n',encoding='utf-8'); print('svg ok')

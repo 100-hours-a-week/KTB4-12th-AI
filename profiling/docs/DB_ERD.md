@@ -195,7 +195,7 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 | `name` | text | NOT NULL | |
 | `level` | smallint | NOT NULL | `1` 대분류 · `2` 소분류 (CHECK) |
 | `product_count` | integer | NOT NULL | 패키지가 선언한 수 |
-| `backend_category_id` | bigint **UNIQUE** | NULL | Backend `categories.id`. **아직 전건 NULL** |
+| `backend_category_id` | bigint **UNIQUE** | NULL | Backend `categories.id`. **67/67 채움 (09-25 회신)** — 7.6 `dislikedCategories[].categoryId`가 이 값 |
 | `taxonomy_version` | text | NOT NULL | |
 
 두 CHECK가 계층을 강제한다 — `level IN (1,2)`, 그리고 `(level = 1) = (parent IS NULL)`(대분류는 부모가 없고 소분류는 반드시 있다).
@@ -205,7 +205,7 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 | 열 | 타입 | NULL | 뜻 |
 |---|---|---|---|
 | `source_product_id` | text **PK** | — | `KAKAO_GIFT:10002797`. 지금 우리가 가진 유일한 키 |
-| `backend_product_id` | bigint **UNIQUE** | NULL | Backend `products.id`. **아직 전건 NULL** — 7.7로 내보낼 번호가 이것 |
+| `backend_product_id` | bigint **UNIQUE** | NULL | Backend `products.id`. **4,231/4,231 채움 (09-25 회신)** — 7.7로 내보내는 번호가 이것 |
 | `name` · `brand` · `product_kind` · `description` | text | NOT NULL | |
 | `source_category_id` | text **FK→categories** | NOT NULL | 소분류만 온다 |
 | `product_type` | text | NOT NULL | `Shipping`(3,824) · `Voucher`(405) · `Pickup`(2) (CHECK) |

@@ -59,7 +59,7 @@
 <text x="338" y="632" class="m">productId · name · brand</text>
 <text x="338" y="647" class="m">description: str|None</text>
 <text x="338" y="662" class="m">categoryId · categoryName</text>
-<text x="338" y="677" class="m">price · available</text>
+<text x="338" y="677" class="m">price · availability</text>
 <text x="338" y="692" class="m">updatedAt</text>
 <rect x="222" y="500" width="272" height="70" rx="3" fill="#f5f8fd" stroke="#9db0d2" stroke-width="1.3"/>
 <text x="358.0" y="518" class="cn" text-anchor="middle">SuccessResponse[T]  /  ErrorResponse</text>
@@ -147,47 +147,56 @@
 <line x1="1400" y1="150" x2="1544" y2="150" stroke="#bcc5cd"/>
 <text x="1408" y="163" class="m">(Exception)</text>
 <text x="1408" y="178" class="m">7.6에서 503으로</text>
-<rect x="1056" y="222" width="330" height="86" rx="3" fill="#fffbe6" stroke="#e6d98a" stroke-width="1.3"/>
+<rect x="1056" y="222" width="330" height="101" rx="3" fill="#fffbe6" stroke="#e6d98a" stroke-width="1.3"/>
 <text x="1221.0" y="236" class="st" text-anchor="middle">«Protocol»</text>
 <text x="1221.0" y="251" class="cn" text-anchor="middle">ProfileRunStore</text>
 <line x1="1056" y1="256" x2="1386" y2="256" stroke="#e6d98a"/>
 <line x1="1056" y1="264" x2="1386" y2="264" stroke="#e6d98a"/>
 <text x="1064" y="277" class="m">save(outcome: ProfileOutcome) → None</text>
 <text x="1064" y="292" class="m">get(recipient_user_id) → ProfileOutcome | None</text>
-<rect x="1056" y="320" width="330" height="71" rx="3" fill="#fffbe6" stroke="#e6d98a" stroke-width="1.3"/>
-<text x="1221.0" y="334" class="st" text-anchor="middle">«Protocol»</text>
-<text x="1221.0" y="349" class="cn" text-anchor="middle">BackendPort</text>
-<line x1="1056" y1="354" x2="1386" y2="354" stroke="#e6d98a"/>
-<line x1="1056" y1="362" x2="1386" y2="362" stroke="#e6d98a"/>
-<text x="1064" y="375" class="m">send_profile_callback(outcome) → RunStatus</text>
-<rect x="1400" y="222" width="144" height="101" rx="3" fill="#fffbe6" stroke="#e6d98a" stroke-width="1.3"/>
+<text x="1064" y="307" class="m">get_run(rid, sv) → ProfileOutcome | None</text>
+<rect x="1056" y="332" width="330" height="71" rx="3" fill="#fffbe6" stroke="#e6d98a" stroke-width="1.3"/>
+<text x="1221.0" y="346" class="st" text-anchor="middle">«Protocol»</text>
+<text x="1221.0" y="361" class="cn" text-anchor="middle">BackendPort</text>
+<line x1="1056" y1="366" x2="1386" y2="366" stroke="#e6d98a"/>
+<line x1="1056" y1="374" x2="1386" y2="374" stroke="#e6d98a"/>
+<text x="1064" y="387" class="m">send_profile_callback(outcome) → RunStatus</text>
+<rect x="1400" y="222" width="144" height="86" rx="3" fill="#fffbe6" stroke="#e6d98a" stroke-width="1.3"/>
 <text x="1472.0" y="236" class="st" text-anchor="middle">«Protocol»</text>
-<text x="1472.0" y="251" class="cn" text-anchor="middle">(v3) ProfileModel</text>
+<text x="1472.0" y="251" class="cn" text-anchor="middle">RecipientProfileStore</text>
 <line x1="1400" y1="256" x2="1544" y2="256" stroke="#e6d98a"/>
 <line x1="1400" y1="264" x2="1544" y2="264" stroke="#e6d98a"/>
-<text x="1408" y="277" class="m">analyze(prompt,</text>
-<text x="1408" y="292" class="m">  schema, seed)</text>
-<text x="1408" y="307" class="m">→ ExtractDraft</text>
-<rect x="1400" y="320" width="144" height="86" rx="3" fill="#fffbe6" stroke="#e6d98a" stroke-width="1.3"/>
-<text x="1472.0" y="334" class="st" text-anchor="middle">«Protocol»</text>
-<text x="1472.0" y="349" class="cn" text-anchor="middle">(v3) Embedder</text>
-<line x1="1400" y1="354" x2="1544" y2="354" stroke="#e6d98a"/>
-<line x1="1400" y1="362" x2="1544" y2="362" stroke="#e6d98a"/>
-<text x="1408" y="375" class="m">embed_docs()</text>
-<text x="1408" y="390" class="m">embed_query()</text>
+<text x="1408" y="277" class="m">upsert(profile)</text>
+<text x="1408" y="292" class="m">get(rid) · delete(rid)</text>
+<rect x="1400" y="332" width="144" height="85" rx="3" fill="#fff" stroke="#bcc5cd" stroke-width="1.3"/>
+<text x="1472.0" y="350" class="cn" text-anchor="middle">(v3 예정)</text>
+<line x1="1400" y1="358" x2="1544" y2="358" stroke="#bcc5cd"/>
+<text x="1408" y="371" class="m">ProfileModel</text>
+<text x="1408" y="386" class="m">Embedder</text>
+<text x="1408" y="401" class="m">— ports.py 에 없다</text>
 <text x="1256" y="470" class="st" text-anchor="middle">ProductRecord(schemas) · ProfileOutcome(types)를 인자·반환으로 씀 → 회색 실선은 생략</text>
 <rect x="1040" y="510" width="520" height="190" rx="6" class="pkgbg"/>
 <text x="1052" y="532" class="pkg">adapters/ — 구현 (바깥과 닿는 코드). 스테레오타입이 어느 포트를 구현하는지</text>
-<rect x="1056" y="542" width="150" height="131" rx="3" fill="#fff" stroke="#bcc5cd" stroke-width="1.3"/>
-<text x="1131.0" y="556" class="st" text-anchor="middle">«CatalogReader 구현»</text>
-<text x="1131.0" y="571" class="cn" text-anchor="middle">FileCatalogReader</text>
-<line x1="1056" y1="576" x2="1206" y2="576" stroke="#bcc5cd"/>
-<text x="1064" y="589" class="m">path: Path</text>
-<text x="1064" y="604" class="m">_products: list</text>
-<text x="1064" y="619" class="m">_by_id: dict</text>
-<line x1="1056" y1="629" x2="1206" y2="629" stroke="#bcc5cd"/>
+<rect x="1056" y="542" width="160" height="131" rx="3" fill="#fff" stroke="#bcc5cd" stroke-width="1.3"/>
+<text x="1136.0" y="556" class="st" text-anchor="middle">«CatalogReader 구현»</text>
+<text x="1136.0" y="571" class="cn" text-anchor="middle">Db/FileCatalogReader</text>
+<line x1="1056" y1="576" x2="1216" y2="576" stroke="#bcc5cd"/>
+<text x="1064" y="589" class="m">DbCatalogReader(engine)</text>
+<text x="1064" y="604" class="m">FileCatalogReader(path)</text>
+<text x="1064" y="619" class="m">provisional_ids</text>
+<line x1="1056" y1="629" x2="1216" y2="629" stroke="#bcc5cd"/>
 <text x="1064" y="642" class="m">active()</text>
 <text x="1064" y="657" class="m">by_id()</text>
+<rect x="1232" y="542" width="166" height="131" rx="3" fill="#fff" stroke="#bcc5cd" stroke-width="1.3"/>
+<text x="1315.0" y="556" class="st" text-anchor="middle">«Store 구현»</text>
+<text x="1315.0" y="571" class="cn" text-anchor="middle">Db 스토어 2개</text>
+<line x1="1232" y1="576" x2="1398" y2="576" stroke="#bcc5cd"/>
+<text x="1240" y="589" class="m">DbProfileRunStore</text>
+<text x="1240" y="604" class="m">DbRecipientProfileStore</text>
+<text x="1240" y="619" class="m">engine: Engine</text>
+<line x1="1232" y1="629" x2="1398" y2="629" stroke="#bcc5cd"/>
+<text x="1240" y="642" class="m">save · get · get_run</text>
+<text x="1240" y="657" class="m">upsert · get · delete</text>
 <rect x="1406" y="542" width="140" height="131" rx="3" fill="#fff" stroke="#bcc5cd" stroke-width="1.3"/>
 <text x="1476.0" y="556" class="st" text-anchor="middle">«BackendPort 구현»</text>
 <text x="1476.0" y="571" class="cn" text-anchor="middle">HttpBackendPort</text>
@@ -256,5 +265,5 @@
 <text x="1340" y="733" class="small">httpx POST 7.7</text>
 <line x1="40" y1="1070" x2="1560" y2="1070" class="rule"/>
 <text x="40" y="1096" class="small">의존 방향: transport → pipeline → ports ←(구현)— adapters.  업무 코드는 adapters를 import하지 않고, 조립(main.py)만 구체 클래스를 안다. 내일 DB adapter(SQLAlchemy)는 ProfileRunStore·CatalogReader를 그대로 구현해 main.py 세 줄만 교체.</text>
-<text x="40" y="1118" class="small">v3 추가: ProfileModel(Ollama·규칙 추출기) · Embedder(BGE-m3-ko) · Search 호출 — pipeline.profile() 안의 needs_model 분기 뒤에 붙는다. 자료형은 types.py의 DraftItem·ExtractDraft·ValidatedTag·Decision.</text>
+<text x="40" y="1118" class="small">v3 추가(아직 ports.py 에 선언 없음): ProfileModel(Ollama·규칙 추출기) · Embedder(BGE-m3-ko) · Search 호출 — pipeline.profile() 안의 needs_model 분기 뒤에 붙는다. 자료형은 types.py의 DraftItem·ExtractDraft·ValidatedTag·Decision.</text>
 </svg>

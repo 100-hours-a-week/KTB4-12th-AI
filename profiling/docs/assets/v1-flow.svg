@@ -21,7 +21,7 @@
 <line x1="600" y1="172" x2="600" y2="905" class="life"/>
 <rect x="735.0" y="100" width="190" height="58" rx="4" fill="#fff" stroke="#bcc5cd" stroke-width="1.3"/>
 <text x="830" y="122" class="head" text-anchor="middle">catalog.py</text>
-<text x="830" y="140" class="sub" text-anchor="middle">CatalogReader (파일)</text>
+<text x="830" y="140" class="sub" text-anchor="middle">CatalogReader (DB·파일)</text>
 <line x1="830" y1="158" x2="830" y2="905" class="life"/>
 <rect x="925.0" y="100" width="190" height="58" rx="4" fill="#fff" stroke="#bcc5cd" stroke-width="1.3"/>
 <text x="1020" y="122" class="head" text-anchor="middle">stores.py</text>
@@ -54,6 +54,10 @@
 <text x="212.4" y="329" class="msg" text-anchor="middle">202 SuccessResponse[ProfileAccepted]</text>
 <text x="120" y="352" class="mono">profileStatus = PENDING</text>
 <text x="350" y="372" class="small" text-anchor="middle">── 여기서 HTTP 응답 끝. 아래는 Supervisor 슬롯 안의 백그라운드 (같은 프로세스, 응답과 무관) ──</text>
+<rect x="860" y="318" width="470" height="59" rx="3" class="note"/>
+<text x="868" y="333" class="mono">202 직전 — 접수 단계 중복 판정 (decide)</text>
+<text x="868" y="348" class="mono">store.get_run(수신자, sourceVersion) + input_hash 비교</text>
+<text x="868" y="363" class="mono">analyze 아래대로 · resend 재분석 없이 7.7만 · skip 이미 RUNNING</text>
 <path d="M350 400 H592" class="call"/>
 <circle cx="367.6" cy="387" r="10" fill="#3b6fb6"/><text x="367.6" y="391" text-anchor="middle" class="num">4</text>
 <text x="492.6" y="394" class="msg" text-anchor="middle">to_internal(body)</text>
@@ -73,7 +77,7 @@
 <text x="715.0" y="543" class="small" text-anchor="middle">(1, [ProductRecord…])</text>
 <rect x="615" y="562" width="420" height="59" rx="3" class="note"/>
 <text x="623" y="577" class="mono">validation = ValidationResult(disliked_tags=비선호 이름, 나머지 [])</text>
-<text x="623" y="592" class="mono">search = build_pool(products, 비선호 제외, 30)  (결정 a)</text>
+<text x="623" y="592" class="mono">search = build_pool(재고 unavailable 제외 · 비선호 제외 · 조회수↓ 30)</text>
 <text x="623" y="607" class="mono">outcome = ProfileOutcome(RESULT_READY, validation, search)</text>
 <path d="M600 650 H1012" class="call"/>
 <circle cx="617.6" cy="637" r="10" fill="#3b6fb6"/><text x="617.6" y="641" text-anchor="middle" class="num">7</text>
@@ -101,7 +105,7 @@
 <text x="780.0" y="879" class="small" text-anchor="middle">RunStatus  DELIVERED · SUPERSEDED · FAILED · RESULT_READY(재시도 대상)</text>
 <text x="350" y="900" class="small" text-anchor="middle">log.info("7.7 콜백 결과 … → DELIVERED")   ※ 실행 기록 상태 갱신·재시도는 DB adapter 뒤(#23)</text>
 <line x1="40" y1="919" x2="1420" y2="919" class="rule"/>
-<text x="40" y="945" class="small">조립 (main.py, 시작 1회):  lifespan에서 FileCatalogReader(settings.CATALOG_FILE) · DbProfileRunStore(engine) · HttpBackendPort(settings.BACKEND_BASE_URL, token)를 만들어 app.state에 두고, 라우터는 Depends로 꺼내 pipeline에 넘긴다.</text>
+<text x="40" y="945" class="small">조립 (main.py, 시작 1회):  lifespan에서 Db/FileCatalogReader(settings.CATALOG_SOURCE) · DbProfileRunStore(engine) · HttpBackendPort(settings.BACKEND_BASE_URL, token)를 만들어 app.state에 두고, 라우터는 Depends로 꺼내 pipeline에 넘긴다.</text>
 <text x="40" y="967" class="small">의존 방향:  api → pipeline → ports(Protocol 모양)  ←구현─ adapters.   pipeline은 adapters 파일을 import하지 않는다. 테스트(tests/unit)는 ports 모양의 가짜를 넣어 5·6·7만 돌린다.</text>
 <text x="40" y="989" class="small">v3에서 바뀌는 곳: 5단계 안에서 needs_model → True면 카탈로그 조인 → ProfileModel.analyze() → validator → Search. 1~4, 7~9는 그대로.</text>
 </svg>

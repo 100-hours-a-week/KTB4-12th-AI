@@ -91,7 +91,7 @@ uv sync                                     # .venv + 의존성 (uv.lock 기준)
 cp .env.example .env                        # 필요 시 값 수정
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
 uv run alembic upgrade head                 # 테이블 생성 (0001~0003)
-uv run pytest -q                            # 74 passed, 2 skipped (DB 꺼져 있으면 통합 18개 skip)
+uv run pytest -q                            # 142 passed, 2 skipped (DB 꺼져 있으면 통합 34개 skip)
 uv run ruff check src tests tools alembic   # lint
 ```
 
