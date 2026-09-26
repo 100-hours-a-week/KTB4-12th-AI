@@ -1,0 +1,16 @@
+# 이미지에 넣지 않는 것 — 시험·문서·로컬 산출물
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.git/
+.env
+tests/
+docs/
+tools/fake_backend/
+tools/catalog/returned/
+이름_대조표.md
+docker-compose.yml
+Dockerfile
+.dockerignore

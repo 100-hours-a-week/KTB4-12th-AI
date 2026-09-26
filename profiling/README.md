@@ -32,7 +32,8 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | `tests/unit/` | 가짜 구현 · `httpx.MockTransport` — DB·네트워크 없이 돈다 |
 | `tests/integration/` | 진짜 PostgreSQL — 마이그레이션 결과 · upsert · 상태 규칙 · 앱 e2e. DB 꺼져 있으면 skip |
 | `alembic/versions/` | `0001` recipient_profiles(수신자 프로필) · `0002` profile_runs(실행 기록) · `0003` ai_catalog(상품·카테고리·적재 버전) |
-| `docker-compose.yml` | 로컬 DB (pgvector/pg16 · `ai_chat` · `ai_user` · 5432) |
+| `docker-compose.yml` | `ai-db`(pgvector/pg16 · `ai_chat` · 5432) · `ai-migrate`(alembic 한 번) · `ai-app`(:8000) |
+| `Dockerfile` · `.dockerignore` | 앱 이미지 — python 3.12-slim + uv(`uv.lock` 그대로) · 비루트(uid 10001) · 시험·문서는 넣지 않는다 |
 | `docs/코드_안내서.md` | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
 | `docs/FE_연동_시험_시나리오.md` | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
 | `docs/FE_연동_시험_결과_2026-09-25.md` | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
@@ -112,6 +113,28 @@ uv run uvicorn profiling.main:app --port 8000 --reload
 ```
 
 앱은 DB 없이 뜨지 않는다 — `docker compose up -d && uv run alembic upgrade head`를 먼저 한다.
+
+### 컨테이너로 한 번에 (배포와 같은 모양)
+
+```bash
+docker compose up -d --build        # ai-db(healthy) → ai-migrate(한 번 돌고 종료) → ai-app(:8000)
+docker compose logs -f ai-app
+curl localhost:8000/health
+```
+
+| 서비스 | 하는 일 |
+|---|---|
+| `ai-db` | PostgreSQL 16 + pgvector |
+| `ai-migrate` | **앱과 같은 이미지**로 `alembic upgrade head` 한 번 돌고 끝난다. 앱이 여러 개여도 마이그레이션은 한 번이어야 하므로 앱 시작과 섞지 않는다 |
+| `ai-app` | FastAPI(:8000). `CATALOG_SOURCE=db` — 컨테이너 안에는 카탈로그 파일이 없다 |
+
+카탈로그 적재도 같은 이미지로 한다(일회성 작업):
+
+```bash
+docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --package /경로/product-catalog-...
+```
+
+배포 환경에서는 `PROFILING_BACKEND_BASE_URL`·`PROFILING_SERVICE_TOKEN`을 주입한다(로컬 기본값은 호스트의 fake_backend).
 
 브라우저 `http://localhost:8081/` → 콘솔.
 

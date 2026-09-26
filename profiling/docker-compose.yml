@@ -1,5 +1,11 @@
-# 로컬 시험용 DB — 팀원 골격의 compose(ai-db)와 같은 이미지·DB·계정 이름을 쓴다 (합칠 때 그대로 교체 가능).
-# 실행:  docker compose up -d      중지: docker compose down      데이터까지 삭제: docker compose down -v
+# 로컬에서 DB + 마이그레이션 + 앱을 한 번에. 팀원 골격의 compose(ai-db)와 같은 이미지·DB·계정 이름을 쓴다.
+#
+#   docker compose up -d --build     ai-db(健康) → ai-migrate(한 번 돌고 종료) → ai-app
+#   docker compose logs -f ai-app    로그
+#   docker compose down              중지 (데이터까지 지우려면 -v)
+#
+# 뜨는 순서가 중요하다: 마이그레이션이 **앱보다 먼저, 한 번만** 돌아야 한다 (앱을 여러 개로 늘려도 마찬가지).
+# 카탈로그 적재는 앱과 별개다 — `docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --package …`
 services:
   ai-db:
     image: pgvector/pgvector:pg16
@@ -20,6 +26,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # 마이그레이션 — 앱과 같은 이미지로 한 번 돌고 종료한다 (restart: no)
+  ai-migrate:
+    build: .
+    image: profiling-ai-app
+    container_name: profiling-ai-migrate
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      PROFILING_DATABASE_URL: postgresql+psycopg://ai_user:ai_password@ai-db:5432/ai_chat
+    depends_on:
+      ai-db:
+        condition: service_healthy
+    restart: "no"
+
+  ai-app:
+    build: .
+    image: profiling-ai-app
+    container_name: profiling-ai-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      PROFILING_DATABASE_URL: postgresql+psycopg://ai_user:ai_password@ai-db:5432/ai_chat
+      PROFILING_CATALOG_SOURCE: db                  # 컨테이너 안에는 카탈로그 파일이 없다
+      # Backend 주소·토큰은 배포 환경에서 넣는다. 로컬 기본값은 호스트에서 도는 fake_backend.
+      PROFILING_BACKEND_BASE_URL: ${PROFILING_BACKEND_BASE_URL:-http://host.docker.internal:8081}
+      PROFILING_SERVICE_TOKEN: ${PROFILING_SERVICE_TOKEN:-dev-token}
+      PROFILING_LOG_LEVEL: ${PROFILING_LOG_LEVEL:-INFO}
+    depends_on:
+      ai-db:
+        condition: service_healthy
+      ai-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   ai_pgdata:
