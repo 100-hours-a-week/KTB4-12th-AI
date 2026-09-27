@@ -203,7 +203,7 @@ def test_resend_records_callback_failure() -> None:
             return CallbackResult(status=RunStatus.RESULT_READY, code=ErrorCode.CALLBACK_UNREACHABLE, message="타임아웃")
 
     existing, store, backend = _outcome(RunStatus.RESULT_READY), FakeStore(), Unreachable()
-    intake.resend_callback(existing, backend, store)
+    intake.resend_callback(existing, backend, store, max_attempts=1)          # 즉시 재시도는 test_callback_retry 가 본다
     assert store.saved[0].status is RunStatus.RESULT_READY
     assert store.saved[0].failure_code is ErrorCode.CALLBACK_UNREACHABLE
     assert store.saved[0].callback_attempts == existing.callback_attempts + 1

@@ -189,6 +189,36 @@ def test_same_version_resend_does_not_reanalyze(engine, cleanup) -> None:
     assert row["status"] == "DELIVERED" and row["callback_hash"]
 
 
+def test_callback_5xx_is_retried_immediately_with_real_port(engine, cleanup) -> None:
+    """7.7 이 500 이면 같은 슬롯 안에서 0.5초 뒤 다시 보낸다 — 진짜 HttpBackendPort + MockTransport(가짜 포트로는 못 보는 경로).
+
+      callback_attempts  2 (500 한 번, 200 한 번)
+      status             DELIVERED · 두 번 다 같은 본문
+    """
+    get_settings.cache_clear()
+    from profiling.main import app
+    answers = [500, 200]
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        if answers.pop(0) == 500:
+            return httpx.Response(500, json={"message": "추천 결과 저장 실패", "error": {"code": "INTERNAL_SERVER_ERROR"}})
+        return httpx.Response(200, json={"message": "ok", "data": {"recipientUserId": RID, "sourceVersion": 22,
+                                                                  "profileStatus": "COMPLETED"}})
+
+    body = {"recipientUserId": RID, "sourceVersion": 22, "dislikedCategories": [], "giftPreference": None, "reviews": []}
+    with TestClient(app) as client:
+        app.state.backend = HttpBackendPort("http://backend.test", "t", 5.0, transport=httpx.MockTransport(handler))
+        assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202
+    assert len(sent) == 2 and sent[0] == sent[1]                              # 500 뒤 같은 본문을 다시 보냈다
+
+    with engine.connect() as c:
+        row = c.execute(sa.text("select callback_attempts, status from ai_profile.profile_runs "
+                                "where recipient_user_id = :r and source_version = 22"), {"r": RID}).mappings().one()
+    assert row["callback_attempts"] == 2 and row["status"] == "DELIVERED"
+
+
 def test_503_carries_retry_after_and_recovery_runs(engine, monkeypatch) -> None:
     """활성 카탈로그가 없을 때 503 + `Retry-After` — 없으면 Backend 가 매 주기 곧바로 다시 보낸다(필드표 §3.6).
 

@@ -15,6 +15,8 @@ Transport 역할만 한다: 인증 → 스키마 검증 → 활성 카탈로그 
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -101,7 +103,7 @@ def require_service_token(
 
 def run_and_callback(
     rq: ProfileRequest, catalog: CatalogReader, store: ProfileRunStore, backend: BackendPort,
-    pool_size: int, recipient_store: RecipientProfileStore,
+    pool_size: int, recipient_store: RecipientProfileStore, *, max_attempts: int = 3, backoff_s: float = 0.5,
 ) -> None:
     """pipeline.profile() → 결과가 RESULT_READY일 때만 7.7 콜백 → 콜백 결과를 실행 기록에 저장.
 
@@ -122,10 +124,13 @@ def run_and_callback(
         log.warning("profile 결과 %s recipient=%s reason=%s — 콜백 없음", outcome.status, rid, outcome.failure_reason)
         return
 
-    _send_and_record(outcome, backend, store)
+    _send_and_record(outcome, backend, store, max_attempts=max_attempts, backoff_s=backoff_s)
 
 
-def resend_callback(outcome: ProfileOutcome, backend: BackendPort, store: ProfileRunStore) -> None:
+def resend_callback(
+    outcome: ProfileOutcome, backend: BackendPort, store: ProfileRunStore, *,
+    max_attempts: int = 3, backoff_s: float = 0.5, sleep: Callable[[float], None] = time.sleep,
+) -> None:
     """**재분석 없이** 저장해 둔 결과를 7.7로 다시 보낸다 (Backend가 같은 sourceVersion으로 재전송했을 때).
 
     보내는 본문은 최초와 같다 — `backend.callback_body()`가 저장된 search에서 같은 상품 번호 목록을 만든다.
@@ -133,17 +138,34 @@ def resend_callback(outcome: ProfileOutcome, backend: BackendPort, store: Profil
     """
     log.info("7.7 재전송 recipient=%s source_version=%s (기존 %s · 재분석 없음)",
              outcome.recipient_user_id, outcome.source_version, outcome.status)
-    _send_and_record(outcome, backend, store)
+    _send_and_record(outcome, backend, store, max_attempts=max_attempts, backoff_s=backoff_s, sleep=sleep)
 
 
-def _send_and_record(outcome: ProfileOutcome, backend: BackendPort, store: ProfileRunStore) -> None:
-    """7.7 송신 → 그 결과를 실행 기록에 저장. 최초 전송과 재전송이 같은 경로를 쓴다."""
+def _send_and_record(
+    outcome: ProfileOutcome, backend: BackendPort, store: ProfileRunStore, *,
+    max_attempts: int = 3, backoff_s: float = 0.5, sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """7.7 송신 → 그 결과를 실행 기록에 저장. 최초 전송과 재전송이 같은 경로를 쓴다.
+
+    **즉시 재시도**: 결과가 RESULT_READY(5xx·타임아웃·연결 실패)면 같은 슬롯 안에서 backoff_s × (1, 4, 16…) 초 기다렸다
+    다시 보낸다 — 최대 max_attempts 회(기본 3회: 0.5초·2초 뒤). 그래도 안 되면 RESULT_READY 로 남겨 Backend 가 같은 번호로
+    다시 요청할 때 재전송한다(decide → RESEND). 200·409·4xx 는 그 자리에서 끝난다 — 다시 보내도 답이 같다.
+    저장은 마지막에 한 번, callback_attempts 는 실제로 보낸 횟수만큼 더한다. sleep 은 시험에서 바꿔 끼운다.
+    """
     rid, sv = outcome.recipient_user_id, outcome.source_version
-    res = backend.send_profile_callback(outcome)
-    log.info("7.7 콜백 결과 recipient=%s source_version=%s → %s%s", rid, sv, res.status,
-             f" ({res.code}: {res.message})" if res.code else "")
+    attempts = 0
+    while True:
+        attempts += 1
+        res = backend.send_profile_callback(outcome)
+        log.info("7.7 콜백 결과 recipient=%s source_version=%s 시도 %d/%d → %s%s", rid, sv, attempts, max_attempts, res.status,
+                 f" ({res.code}: {res.message})" if res.code else "")
+        if res.status is not RunStatus.RESULT_READY or attempts >= max_attempts:
+            break
+        wait = backoff_s * (4 ** (attempts - 1))
+        log.warning("7.7 미전달 recipient=%s source_version=%s — %.1f초 뒤 다시 보낸다 (%d/%d)", rid, sv, wait, attempts + 1, max_attempts)
+        sleep(wait)
     try:
-        store.save(outcome.model_copy(update={"status": res.status, "callback_attempts": outcome.callback_attempts + 1,
+        store.save(outcome.model_copy(update={"status": res.status, "callback_attempts": outcome.callback_attempts + attempts,
                                               "failure_code": res.code, "failure_reason": res.message}))
     except Exception:
         log.exception("7.7 콜백 결과 저장 실패 recipient=%s source_version=%s (콜백은 %s)", rid, sv, res.status)
@@ -210,6 +232,7 @@ def _existing_run(store: ProfileRunStore, rq: ProfileRequest) -> ProfileOutcome 
 def dispatch(
     rq: ProfileRequest, catalog: CatalogReader, store: ProfileRunStore, backend: BackendPort,
     pool_size: int, recipient_store: RecipientProfileStore, stale_after_s: int,
+    callback_max_attempts: int = 3, callback_backoff_s: float = 0.5,
 ) -> None:
     """**잠금 → 판정 → 실행**을 한 덩어리로. Supervisor 슬롯 안(응답 뒤)에서 돈다.
 
@@ -226,11 +249,12 @@ def dispatch(
         action, why = decide(existing, pipeline.input_hash(rq), stale_after_s=stale_after_s)
         log.info("7.6 중복 판정 recipient=%s source_version=%s → %s (%s)", rid, sv, action, why)
         if action == ANALYZE:
-            run_and_callback(rq, catalog, store, backend, pool_size, recipient_store)
+            run_and_callback(rq, catalog, store, backend, pool_size, recipient_store,
+                             max_attempts=callback_max_attempts, backoff_s=callback_backoff_s)
         elif action == RESEND and existing is not None:
             if existing.status is RunStatus.SUPERSEDED:   # 정상 흐름에서는 나오기 어렵다 — Backend 가 더 새 버전을 이미 저장했다는 뜻
                 log.warning("7.7 재전송 대상이 SUPERSEDED recipient=%s source_version=%s — Backend 가 다시 409 를 줄 수 있다", rid, sv)
-            resend_callback(existing, backend, store)
+            resend_callback(existing, backend, store, max_attempts=callback_max_attempts, backoff_s=callback_backoff_s)
 
 
 @router.post(
@@ -277,7 +301,8 @@ async def extract_and_pool(
              body.recipientUserId, body.sourceVersion, len(body.dislikedCategories), len(body.reviews), body.giftPreference is not None)
 
     # 중복 판정은 **슬롯 안에서** 한다(dispatch) — 판정과 실행 사이가 벌어지면 같은 요청이 동시에 와서 분석이 두 벌 돈다
-    supervisor.submit(bg, dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S)
+    supervisor.submit(bg, dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S,
+                      settings.CALLBACK_MAX_ATTEMPTS, settings.CALLBACK_BACKOFF_S)
 
     return SuccessResponse(
         message="프로파일 분석이 시작되었습니다.",

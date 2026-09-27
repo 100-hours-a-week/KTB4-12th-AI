@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     BACKEND_BASE_URL: str = Field(default="http://localhost:8081", description="7.7 콜백·7.9 export 대상. 로컬은 tools/fake_backend")
     SERVICE_TOKEN: str = Field(default="", description="Backend↔AI 서비스 토큰(Bearer). 비어 있으면 7.6 토큰 검사 생략(로컬 전용)")
     CALLBACK_TIMEOUT_S: float = Field(default=5.0, gt=0, description="7.7 POST 한 번의 타임아웃(초)")
+    CALLBACK_MAX_ATTEMPTS: int = Field(
+        default=3, ge=1,
+        description="7.7 이 5xx·네트워크로 실패하면 같은 슬롯 안에서 다시 보내는 최대 시도 수(최초 포함). 다 써도 실패면 "
+                    "RESULT_READY 로 남겨 Backend 가 같은 번호로 다시 요청할 때 재전송한다. 200·409·4xx 는 재시도하지 않는다")
+    CALLBACK_BACKOFF_S: float = Field(
+        default=0.5, gt=0,
+        description="재시도 대기의 첫 값(초). 다음은 4배씩 — 기본 0.5초·2초. 대기는 슬롯을 잡은 채 하므로 "
+                    "최악은 0.5 + 2 + 타임아웃 5초 × 3 ≈ 17.5초")
 
     # ---- DB (로컬 compose 기본값. 팀원 골격 이름은 DATABASE_URL — 합칠 때 접두사만 맞춤)
     DATABASE_URL: str = Field(default="postgresql+psycopg://ai_user:ai_password@localhost:5432/ai_chat",
