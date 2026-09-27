@@ -1,0 +1,489 @@
+"""페이크 Backend — Backend 역할 전부 + 시험 콘솔. 시험 전용, 운영 이미지에 넣지 않는다.
+
+  7.7 수신   POST /api/internal/v1/recipients/{recipientUserId}/profile   ← AI 콜백을 받아 검증·기록
+  7.9 제공   GET  /internal/v1/ai/products/export                          ← AI Catalog 빌드가 가져감 (tests/fixtures/catalog_sample.json)
+  콘솔       GET  /console  · POST /console/send-7.6 (AI로 대신 보냄) · GET /console/health-ai · GET /console/catalog · PUT /console/mode
+  Backend 흉내 POST /console/be/change (비선호 변경) · GET /console/be/state · GET /console/be/events · PUT /console/be/policy · DELETE /console/be/state
+             디바운스→7.6→202→(타임아웃)같은 번호 재전송 2회→FAILED 까지 lifecycle.py 규칙대로 돈다 (09-25 합의)
+
+실행:  uv run uvicorn tools.fake_backend.app:app --port 8081        (profiling 앱은 8000)
+환경:  AI_BASE_URL(기본 http://localhost:8000) · AI_SERVICE_TOKEN(기본 dev-token) · FAKE_BACKEND_CATALOG(기본 tests/fixtures/catalog_sample.json)
+       AI DB 확인(/console/db)은 AI 앱과 같은 PROFILING_DATABASE_URL(설정)을 읽는다 — 시험 도구라 DB를 직접 본다
+확인:  브라우저 http://localhost:8081/console  ·  curl localhost:8081/received
+
+실패 주입 (개발 이슈 #23 재시도 시험용):  FAKE_BACKEND_MODE = ok(기본) | 409 | 400 | 500 | timeout
+  409 → STALE_SOURCE_VERSION (AI는 재시도 없이 SUPERSEDED)   400 → INVALID_REQUEST (재시도 없음)
+  500 → INTERNAL_SERVER_ERROR (AI는 최대 3회 재시도)         timeout → 응답 없이 오래 기다리게 함
+
+검증 규칙 출처: 모델 API 설계 v3.2.7 §7.7
+  - 경로 {recipientUserId} ≠ 본문 recipientUserId → 400 RECIPIENT_ID_MISMATCH
+  - recommendedProductIds ≤30, profileStatus="COMPLETED", 태그 필드 없음 — ProfileCallbackRequest(extra="forbid")가 잡는다
+  - 200 SuccessResponse[ProfileCallbackAccepted]  message="수신자 프로필이 성공적으로 저장되었습니다."
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import threading
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated, Any
+
+import httpx
+import sqlalchemy as sa
+from fastapi import Body, FastAPI, Header, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+
+from profiling.catalog import FileCatalogReader
+from profiling.ports import NoActiveCatalog
+from profiling.schemas import (
+    ErrorBody,
+    ErrorResponse,
+    ProductExportData,
+    ProfileCallbackAccepted,
+    ProfileCallbackRequest,
+    SuccessResponse,
+)
+from profiling.settings import get_settings
+from tools.fake_backend import lifecycle as lc
+
+logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s fake_backend: %(message)s")
+log = logging.getLogger("fake_backend")
+
+app = FastAPI(title="fake backend (7.7 · 시험용)")
+
+MODE = os.environ.get("FAKE_BACKEND_MODE", "ok")
+MODES = ("ok", "409", "400", "500", "timeout")
+CALLBACK_PATH = "/api/internal/v1/recipients/{recipientUserId}/profile"
+EXPORT_PATH = "/internal/v1/ai/products/export"                       # 문서 1 §7.9
+EXTRACT_AND_POOL_PATH = "/api/internal/v1/ai/profile/extract-and-pool"  # 문서 1 §7.6 (AI 쪽 경로)
+
+HERE = Path(__file__).resolve().parent
+AI_BASE_URL = os.environ.get("AI_BASE_URL", "http://localhost:8000").rstrip("/")
+AI_SERVICE_TOKEN = os.environ.get("AI_SERVICE_TOKEN", "dev-token")
+CATALOG_FILE = Path(os.environ.get("FAKE_BACKEND_CATALOG", "tests/fixtures/catalog_sample.json"))
+
+# 받은 콜백을 순서대로 보관 — /received 로 확인. 프로세스 메모리라 재시작하면 사라진다.
+_received: list[dict] = []
+_lock = threading.Lock()
+# 수신자별 sourceVersion — 실제 Backend는 수신자의 비선호·취향·리뷰가 바뀔 때마다 이 값을 올려서 7.6에 싣는다.
+# 시험 환경에는 Backend가 없으므로 fake가 흉내 낸다: 같은 수신자로 보낼 때마다 +1 (콘솔의 "자동 증가"가 켜져 있을 때).
+_source_versions: dict[int, int] = {}
+
+# ---- Backend 생애주기 흉내 (§3 · 09-25 재전송 합의) ------------------------------
+# 실제 Backend가 수신자마다 들고 있어야 하는 값과 그 전이를 lifecycle.py 가 판단하고, 여기서는 시간을 재고 HTTP를 보낸다.
+# 디바운스 1시간·타임아웃 10분을 그대로 쓰면 시나리오 한 번에 한 시간이 걸리므로 기본값을 초 단위로 줄였다.
+_recipients: dict[int, lc.Recipient] = {}
+_policy = lc.Policy(
+    debounce_s=float(os.environ.get("FAKE_BACKEND_DEBOUNCE_S", "5")),
+    window_s=float(os.environ.get("FAKE_BACKEND_WINDOW_S", "30")),
+    pending_timeout_s=float(os.environ.get("FAKE_BACKEND_PENDING_TIMEOUT_S", "10")),
+    max_retry=int(os.environ.get("FAKE_BACKEND_MAX_RETRY", "2")),
+    backoff_s=float(os.environ.get("FAKE_BACKEND_BACKOFF_S", "2")),
+)
+TICK_S = float(os.environ.get("FAKE_BACKEND_TICK_S", "1"))
+_events: list[dict] = []          # 무슨 일이 언제 일어났는지 — 시나리오 확인용
+
+
+def _event(kind: str, r: lc.Recipient, **extra: Any) -> None:
+    item = {"at": datetime.now(UTC).isoformat(timespec="milliseconds"), "kind": kind, **r.snapshot(), **extra}
+    with _lock:
+        _events.append(item)
+    log.info("BE %s recipient=%s status=%s v=%s analyzed=%s retry=%s %s", kind, r.recipient_user_id, r.profile_status,
+             r.source_version, r.analyzed_source_version, r.retry_count, extra or "")
+
+
+def _error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content=ErrorResponse(message=message, error=ErrorBody(code=code)).model_dump())
+
+
+@app.exception_handler(RequestValidationError)
+async def on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """본문이 ProfileCallbackRequest에 어긋남(태그 필드 포함·31개 이상·타입 오류) → 400 INVALID_REQUEST.
+    AI 쪽 버그를 바로 보이게 어떤 필드가 문제인지 message에 남긴다."""
+    first = exc.errors()[0] if exc.errors() else {}
+    loc = ".".join(str(p) for p in first.get("loc", []) if p != "body")
+    msg = f"7.7 본문 오류: {loc} — {first.get('msg', '')}"
+    log.warning("400 %s", msg)
+    return _error(400, "INVALID_REQUEST", msg)
+
+
+@app.post(CALLBACK_PATH)
+async def receive_profile_callback(
+    recipientUserId: int,
+    body: ProfileCallbackRequest,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """7.7 수신. 검증 순서: 스키마(위 핸들러) → 경로·본문 ID 일치 → 실패 주입 모드 → 기록 → 200."""
+    if body.recipientUserId != recipientUserId:
+        log.warning("400 RECIPIENT_ID_MISMATCH path=%s body=%s", recipientUserId, body.recipientUserId)
+        return _error(400, "RECIPIENT_ID_MISMATCH", f"경로 {recipientUserId} ≠ 본문 {body.recipientUserId}")
+
+    # 실패 주입 — 오늘은 ok만 쓰고, 재시도 규칙(#23)을 만들 때 나머지를 켠다
+    if MODE == "409":
+        return _error(409, "STALE_SOURCE_VERSION", "더 새로운 sourceVersion이 이미 저장되어 있습니다.")
+    if MODE == "400":
+        return _error(400, "INVALID_REQUEST", "주입된 실패")
+    if MODE == "500":
+        return _error(500, "INTERNAL_SERVER_ERROR", "주입된 실패")
+    if MODE == "timeout":
+        await asyncio.sleep(60)
+
+    record = {
+        "receivedAt": datetime.now(UTC).isoformat(timespec="seconds"),
+        "authorization": authorization,  # AI가 서비스 토큰을 붙였는지 눈으로 확인
+        **body.model_dump(),
+    }
+    with _lock:
+        _received.append(record)
+    log.info("7.7 수신 recipient=%s source_version=%s ids=%d first=%s",
+             body.recipientUserId, body.sourceVersion, len(body.recommendedProductIds), body.recommendedProductIds[:3])
+
+    # 생애주기를 쓰는 수신자면 버전 규칙대로 저장·판정한다 (§3.4 ③). 콘솔로 직접 쏜 수신자는 그냥 기록만.
+    r = _recipients.get(recipientUserId)
+    if r is not None:
+        status, code = lc.on_callback(r, body.sourceVersion, list(body.recommendedProductIds))
+        _event("7.7 수신", r, http=status, code=code)
+        if status != 200:
+            return _error(status, code or "STALE_SOURCE_VERSION", "더 새로운 sourceVersion이 이미 저장되어 있습니다.")
+
+    return JSONResponse(
+        status_code=200,
+        content=SuccessResponse(
+            message="수신자 프로필이 성공적으로 저장되었습니다.",
+            data=ProfileCallbackAccepted(recipientUserId=body.recipientUserId, sourceVersion=body.sourceVersion, profileStatus="COMPLETED"),
+        ).model_dump(),
+    )
+
+
+@app.get("/received")
+def received() -> dict:
+    """지금까지 받은 콜백 전부 — E2E 확인용. 최신이 마지막."""
+    with _lock:
+        return {"mode": MODE, "count": len(_received), "items": list(_received)}
+
+
+@app.delete("/received")
+def clear() -> dict:
+    """시험 사이에 비우기."""
+    with _lock:
+        n = len(_received)
+        _received.clear()
+    return {"cleared": n}
+
+
+# ---------------------------------------------------------------------------
+# 7.9 상품 전체 export — Backend → AI Catalog 빌드가 가져간다. 예시 카탈로그(7.9 형식·111건)를 그대로 돌려준다.
+# ---------------------------------------------------------------------------
+
+
+def _catalog_products() -> list[dict[str, Any]]:
+    """FileCatalogReader로 읽어(검증 포함) 7.9 dict 목록으로. 파일이 바뀌면 다음 호출에 반영되도록 매번 읽는다(시험용이라 성능 무관)."""
+    _, products = FileCatalogReader(CATALOG_FILE).active()
+    return [p.model_dump(mode="json") for p in products]
+
+
+@app.get(EXPORT_PATH)
+def export_products(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """7.9. 서비스 토큰이 없거나 AI_SERVICE_TOKEN과 다르면 401 — AI Catalog CLI가 올바른 토큰을 붙이는지 확인하는 용도."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return _error(401, "UNAUTHORIZED", "서비스 토큰이 없습니다.")
+    if authorization.removeprefix("Bearer ").strip() != AI_SERVICE_TOKEN:
+        return _error(401, "UNAUTHORIZED", "서비스 토큰이 올바르지 않습니다.")
+    products = _catalog_products()
+    data = ProductExportData(generatedAt=datetime.now(UTC), products=products)
+    log.info("7.9 export 제공 products=%d", len(products))
+    return JSONResponse(status_code=200, content=SuccessResponse(message="상품 목록을 조회했습니다.", data=data).model_dump(mode="json"))
+
+
+# ---------------------------------------------------------------------------
+# 시험 콘솔 — 브라우저는 fake_backend에만 붙고, 7.6은 fake_backend가 AI로 대신 보낸다 (CORS 없음 · 토큰은 서버에만)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/")
+def root() -> RedirectResponse:
+    """루트를 열면 콘솔로 — 브라우저에서 :8081 만 쳐도 화면이 보이게."""
+    return RedirectResponse(url="/console")
+
+
+@app.get("/console")
+def console() -> FileResponse:
+    return FileResponse(HERE / "static" / "console.html")
+
+
+@app.get("/console/catalog")
+def console_catalog() -> dict:
+    """화면의 상품 검색·비선호 카테고리 토글용 요약 목록. 카탈로그를 못 읽으면 500 대신 이유를 돌려준다(화면에 표시)."""
+    try:
+        products = _catalog_products()
+    except NoActiveCatalog as e:
+        return {"file": str(CATALOG_FILE), "count": 0, "categories": [], "products": [], "error": str(e)}
+    cats = sorted({(p["categoryId"], p["categoryName"]) for p in products}, key=lambda c: c[1])
+    return {"file": str(CATALOG_FILE), "count": len(products),
+            "categories": [{"categoryId": i, "categoryName": n} for i, n in cats],
+            "products": [{k: p[k] for k in ("productId", "name", "brand", "categoryId", "categoryName", "available", "viewCount")} for p in products]}
+
+
+@app.post("/console/send-7.6")
+def console_send_extract(body: Annotated[dict, Body()], auto_source_version: bool = True) -> dict:
+    """본문(7.6 JSON, 검증하지 않음 — 일부러 틀린 본문도 보내 보게)을 AI로 전달하고 응답을 그대로 돌려준다.
+
+    auto_source_version=True(기본)면 Backend처럼 수신자별 sourceVersion을 fake가 관리한다: 마지막 값 + 1을 본문에 덮어쓴다
+    (처음 보는 수신자는 본문 값 또는 1부터). False면 본문의 sourceVersion을 그대로 보낸다 — 순서 역전(409) 시험용.
+    """
+    t0 = time.perf_counter()
+    rid = body.get("recipientUserId")
+    if auto_source_version and isinstance(rid, int):
+        with _lock:
+            base = _source_versions.get(rid)
+            nxt = (base + 1) if base is not None else max(int(body.get("sourceVersion") or 1), 1)
+            _source_versions[rid] = nxt
+        body = {**body, "sourceVersion": nxt}
+    try:
+        with httpx.Client(base_url=AI_BASE_URL, timeout=10) as cli:
+            res = cli.post(EXTRACT_AND_POOL_PATH, json=body, headers={"Authorization": f"Bearer {AI_SERVICE_TOKEN}"})
+    except httpx.RequestError as e:
+        return {"ok": False, "status": None, "error": f"AI 연결 실패 ({AI_BASE_URL}): {type(e).__name__}: {e}", "elapsedMs": round((time.perf_counter() - t0) * 1000)}
+    try:
+        payload = res.json()
+    except ValueError:
+        payload = res.text
+    log.info("콘솔 7.6 전달 recipient=%s sourceVersion=%s → %s", rid, body.get("sourceVersion"), res.status_code)
+    return {"ok": res.status_code == 202, "status": res.status_code, "body": payload, "elapsedMs": round((time.perf_counter() - t0) * 1000),
+            "sentSourceVersion": body.get("sourceVersion"), "mode": MODE,
+            "sent": {"url": f"{AI_BASE_URL}{EXTRACT_AND_POOL_PATH}", "authorization": "Bearer ***"}}
+
+
+# ---------------------------------------------------------------------------
+# Backend 흉내 — 비선호 변경 → (디바운스) 7.6 → 202 → (타임아웃) 재전송 → FAILED
+# 판단은 lifecycle.py, 여기서는 시간을 재고 HTTP 를 보낸다.
+# ---------------------------------------------------------------------------
+
+
+def _retry_after_s(res: httpx.Response) -> float | None:
+    """503 의 `Retry-After`(초). 없거나 해석할 수 없으면 None → 기본 백오프 (BE 5-1)."""
+    raw = res.headers.get("Retry-After")
+    try:
+        return float(raw) if raw is not None else None
+    except ValueError:
+        return None
+
+
+def _send_7_6(r: lc.Recipient, version: int, kind: str) -> None:
+    """7.6 을 실제로 보내고 202 면 생애주기에 반영한다. 오류 응답은 상태를 바꾸지 않고 **다음 재시도 시각만** 잡는다(BE 5-1).
+
+    번호는 호출자가 start_new/start_retry 로 이미 정했다. 실패해도 번호는 그대로 — 같은 번호로 다시 보낸다.
+    """
+    changed_at_when_sent = r.last_changed_at          # 보내기 직전 값을 기억 (§3.4 ②) — start_new 가 소비했으면 None
+    body = {"recipientUserId": r.recipient_user_id, "sourceVersion": version,
+            "dislikedCategories": r.disliked_categories, "giftPreference": None, "reviews": []}
+    try:
+        with httpx.Client(base_url=AI_BASE_URL, timeout=10) as cli:
+            res = cli.post(EXTRACT_AND_POOL_PATH, json=body, headers={"Authorization": f"Bearer {AI_SERVICE_TOKEN}"})
+        status = res.status_code
+    except httpx.RequestError as e:
+        lc.on_rejected(r, None, None, time.time(), _policy)                 # 연결 실패·타임아웃 → 백오프 뒤 같은 번호
+        _event("7.6 실패", r, kind=kind, error=f"{type(e).__name__}", sentVersion=version)
+        return
+    if status == 202:
+        lc.on_accepted(r, version, changed_at_when_sent, time.time())
+        _event(f"7.6 {kind} → 202", r, sentVersion=version)
+    else:
+        retry_after = _retry_after_s(res)
+        lc.on_rejected(r, status, retry_after, time.time(), _policy)      # 503 은 Retry-After 우선 · 400/401 은 재시도 없음
+        _event(f"7.6 {kind} → {status}", r, sentVersion=version, retryAfter=retry_after)
+
+
+async def _ticker() -> None:
+    """주기적으로 모든 수신자를 훑는다. 실제 Backend 의 스케줄러 자리."""
+    while True:
+        await asyncio.sleep(TICK_S)
+        now = time.time()
+        for r in list(_recipients.values()):
+            action = lc.due_send(r, now, _policy)
+            if action == lc.SEND_NEW:
+                await asyncio.to_thread(_send_7_6, r, lc.start_new(r, now), "신규")
+            elif action == lc.SEND_RETRY:
+                await asyncio.to_thread(_send_7_6, r, lc.start_retry(r, now), f"재시도{r.retry_count}")
+            elif lc.expire(r, now, _policy):
+                _event("타임아웃 → FAILED", r)
+
+
+@app.on_event("startup")
+async def _start_ticker() -> None:
+    asyncio.create_task(_ticker())
+
+
+@app.post("/console/be/change")
+def console_change(body: Annotated[dict, Body()]) -> dict:
+    """FE 대신 "사용자가 비선호를 바꿨다"를 알린다. 번호도 상태도 여기서는 안 바뀐다 — 디바운스 뒤 7.6 이 나간다."""
+    rid = int(body["recipientUserId"])
+    cats = body.get("dislikedCategories") or []
+    r = _recipients.setdefault(rid, lc.Recipient(recipient_user_id=rid))
+    lc.on_change(r, cats, time.time())
+    _event("비선호 변경", r, categories=[c.get("categoryId") for c in cats])
+    return {"ok": True, "state": r.snapshot(), "policy": _policy.__dict__}
+
+
+@app.get("/console/be/state")
+def console_be_state(recipientUserId: int | None = None) -> dict:
+    """수신자 상태 — 시나리오의 기대값을 이걸로 확인한다."""
+    if recipientUserId is not None:
+        r = _recipients.get(recipientUserId)
+        return {"found": r is not None, "state": r.snapshot() if r else None,
+                "recommendedProductIds": r.recommended_product_ids[:5] if r else []}
+    return {"count": len(_recipients), "states": [r.snapshot() for r in _recipients.values()], "policy": _policy.__dict__}
+
+
+@app.get("/console/be/events")
+def console_be_events(recipientUserId: int | None = None, limit: int = 50) -> dict:
+    """무슨 일이 언제 일어났는지 — 시나리오 결과를 읽는 곳."""
+    with _lock:
+        items = [e for e in _events if recipientUserId is None or e["recipientUserId"] == recipientUserId]
+    return {"count": len(items), "items": items[-limit:]}
+
+
+@app.delete("/console/be/state")
+def console_be_reset() -> dict:
+    """시나리오 사이 초기화."""
+    n = len(_recipients)
+    _recipients.clear()
+    with _lock:
+        _events.clear()
+    return {"cleared": n}
+
+
+@app.put("/console/be/policy")
+def console_be_policy(body: Annotated[dict, Body()]) -> dict:
+    """디바운스·타임아웃을 실행 중에 바꾼다 (시나리오마다 다른 값이 필요하다)."""
+    global _policy
+    _policy = lc.Policy(
+        debounce_s=float(body.get("debounce_s", _policy.debounce_s)),
+        window_s=float(body.get("window_s", _policy.window_s)),
+        pending_timeout_s=float(body.get("pending_timeout_s", _policy.pending_timeout_s)),
+        max_retry=int(body.get("max_retry", _policy.max_retry)),
+        backoff_s=float(body.get("backoff_s", _policy.backoff_s)),
+    )
+    return {"policy": _policy.__dict__}
+
+
+@app.get("/console/source-versions")
+def console_source_versions() -> dict:
+    """fake가 기억하는 수신자별 sourceVersion (Backend 흉내)."""
+    with _lock:
+        return {"versions": dict(_source_versions)}
+
+
+@app.delete("/console/source-versions")
+def console_source_versions_reset() -> dict:
+    with _lock:
+        n = len(_source_versions); _source_versions.clear()
+    return {"cleared": n}
+
+
+@app.get("/console/health-ai")
+def console_health_ai() -> dict:
+    try:
+        with httpx.Client(base_url=AI_BASE_URL, timeout=3) as cli:
+            res = cli.get("/health")
+        return {"ok": res.status_code == 200, "status": res.status_code, "body": res.json(), "url": AI_BASE_URL}
+    except (httpx.RequestError, ValueError) as e:
+        return {"ok": False, "status": None, "error": f"{type(e).__name__}: {e}", "url": AI_BASE_URL}
+
+
+@app.get("/console/mode")
+def console_mode_get() -> dict:
+    return {"mode": MODE, "modes": MODES}
+
+
+@app.put("/console/mode")
+def console_mode_put(body: Annotated[dict, Body()]) -> dict:
+    """실패 주입 모드를 실행 중에 바꾼다 (재시작 없이 409·500·timeout 갈래를 시험)."""
+    global MODE
+    mode = str(body.get("mode", "ok"))
+    if mode not in MODES:
+        return {"mode": MODE, "error": f"mode는 {MODES} 중 하나"}
+    MODE = mode
+    log.info("콘솔: 실패 주입 모드 = %s", MODE)
+    return {"mode": MODE, "modes": MODES}
+
+
+# ---------------------------------------------------------------------------
+# AI DB 들여다보기 — 콘솔 "DB" 탭. 7.6을 보낸 뒤 profile_runs(실행 기록)·recipient_profiles(수신자 프로필)에 무엇이 남았는지.
+# AI 앱과 같은 DATABASE_URL을 읽어 직접 SELECT 한다(시험 도구라서). 운영 Backend가 하는 일이 아니다.
+# ---------------------------------------------------------------------------
+
+_engine: sa.Engine | None = None
+
+
+def _db() -> sa.Engine:
+    global _engine
+    if _engine is None:
+        _engine = sa.create_engine(get_settings().DATABASE_URL, pool_pre_ping=True, future=True)
+    return _engine
+
+
+def _db_target() -> str:
+    return get_settings().DATABASE_URL.split("@")[-1]
+
+
+_RUNS = sa.text("""
+    select id, recipient_user_id, source_version, status, attempt, callback_attempts, input_hash, catalog_version_id,
+           callback_payload, error, created_at, updated_at
+    from ai_profile.profile_runs
+    where (cast(:rid as bigint) is null or recipient_user_id = cast(:rid as bigint))
+    order by updated_at desc limit :limit""")
+_PROFILES = sa.text("""
+    select recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories, created_at, updated_at
+    from ai_profile.recipient_profiles
+    where (cast(:rid as bigint) is null or recipient_user_id = cast(:rid as bigint))
+    order by updated_at desc limit :limit""")
+
+
+@app.get("/console/db")
+def console_db(recipient: int | None = None, limit: int = 20) -> dict:
+    """AI DB 두 테이블의 최근 행. recipient를 주면 그 수신자만. DB가 꺼져 있으면 ok=false와 이유."""
+    limit = max(1, min(limit, 200))
+    try:
+        with _db().connect() as conn:
+            migration = conn.execute(sa.text("select version_num from alembic_version")).scalar()
+            runs = conn.execute(_RUNS, {"rid": recipient, "limit": limit}).mappings().all()
+            profiles = conn.execute(_PROFILES, {"rid": recipient, "limit": limit}).mappings().all()
+    except sa.exc.SQLAlchemyError as e:
+        return {"ok": False, "url": _db_target(), "error": f"{type(e).__name__}: {str(e).splitlines()[0][:160]}",
+                "hint": "docker compose up -d && uv run alembic upgrade head"}
+    return {
+        "ok": True, "url": _db_target(), "migration": migration, "queriedAt": datetime.now(UTC).isoformat(timespec="seconds"),
+        "runs": [{
+            "id": str(r["id"]), "recipientUserId": r["recipient_user_id"], "sourceVersion": r["source_version"], "status": r["status"],
+            "attempt": r["attempt"], "callbackAttempts": r["callback_attempts"], "inputHash": r["input_hash"],
+            "catalogVersionId": str(r["catalog_version_id"]) if r["catalog_version_id"] else None,
+            "recommendedProductIds": (r["callback_payload"] or {}).get("recommendedProductIds"),
+            "errorCode": (r["error"] or {}).get("code"), "error": (r["error"] or {}).get("reason"),
+            "createdAt": r["created_at"].isoformat(timespec="seconds"), "updatedAt": r["updated_at"].isoformat(timespec="seconds"),
+        } for r in runs],
+        "profiles": [{
+            "recipientUserId": r["recipient_user_id"], "sourceVersion": r["source_version"],
+            "preferredTags": r["preferred_tags"], "dislikedTags": r["disliked_tags"], "dislikedCategories": r["disliked_categories"],
+            "createdAt": r["created_at"].isoformat(timespec="seconds"), "updatedAt": r["updated_at"].isoformat(timespec="seconds"),
+        } for r in profiles],
+    }
+
+
+@app.delete("/console/db")
+def console_db_delete(recipient: int) -> dict:
+    """시험 정리 — 한 수신자의 실행 기록·프로필 행을 지운다. recipient 필수(전체 삭제는 없음)."""
+    try:
+        with _db().begin() as conn:
+            n_runs = conn.execute(sa.text("delete from ai_profile.profile_runs where recipient_user_id = :rid"), {"rid": recipient}).rowcount
+            n_prof = conn.execute(sa.text("delete from ai_profile.recipient_profiles where recipient_user_id = :rid"), {"rid": recipient}).rowcount
+    except sa.exc.SQLAlchemyError as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e).splitlines()[0][:160]}"}
+    log.info("콘솔: DB 정리 recipient=%s runs=%d profiles=%d", recipient, n_runs, n_prof)
+    return {"ok": True, "deletedRuns": n_runs, "deletedProfiles": n_prof}
+

@@ -1,0 +1,112 @@
+"""포트 — 업무 코드(pipeline.py)가 바깥에 요구하는 "모양". 구현은 catalog.py · stores.py · backend.py 에 있고, 조립은 main.py에서만 한다.
+
+typing.Protocol 이라 상속이 필요 없다: 메서드 이름·인자·반환이 같으면 어떤 클래스든 이 자리에 꽂힌다
+(catalog.py·stores.py·backend.py의 실제 구현, tests/의 가짜, 팀원의 어댑터 전부). pipeline.py는 이 파일만 import하고
+구현 모듈을 import하지 않는다 — 그래야 카탈로그를 파일에서 DB로 바꿔도 pipeline이 안 바뀐다.
+
+이름은 팀원 3단계 구현 상세 §4와 맞춘다. 확정 전이라 오늘은 여기 이름이 기준이고, 합칠 때 그쪽 이름으로 바꾼다
+(후보: CatalogReader.active → Catalog.acquire()/SnapshotHandle, ProfileModel.analyze는 팀원 문서 이름 그대로).
+
+@runtime_checkable 을 붙여 두어 isinstance(obj, CatalogReader) 로 "모양이 맞는지"를 테스트에서 확인할 수 있다
+(메서드 존재만 검사하고 시그니처는 검사하지 않는다).
+"""
+
+from __future__ import annotations
+
+from contextlib import AbstractContextManager
+from typing import Protocol, runtime_checkable
+
+from profiling.schemas import ProductRecord
+from profiling.types import CallbackResult, ProfileOutcome, RecipientProfile
+
+# ---------------------------------------------------------------------------
+# 예외 — 포트가 던지고 Transport(api/)가 HTTP 상태로 바꾼다
+# ---------------------------------------------------------------------------
+
+
+class NoActiveCatalog(Exception):
+    """활성 카탈로그가 없다(파일 없음·비어 있음·DB에 활성 버전 없음). 7.6에서 503 SERVICE_UNAVAILABLE."""
+
+
+# ---------------------------------------------------------------------------
+# 포트 4개 — v1에서 모두 쓴다 (v3의 ProfileModel·Embedder는 그때 여기에 추가)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class CatalogReader(Protocol):
+    """활성 카탈로그 한 벌을 준다. 구현: catalog.FileCatalogReader (오늘) → DB adapter (내일)."""
+
+    def active(self) -> tuple[int, list[ProductRecord]]:
+        """(catalog_version_id, 활성 버전의 상품 전체). 활성 버전이 없으면 NoActiveCatalog.
+
+        한 요청 안에서는 한 번만 부르고 결과를 들고 다닌다 — 조인·검색·저장이 같은 버전을 보게(4단계 snapshot 원칙).
+        """
+        ...
+
+    def by_id(self, product_id: int) -> ProductRecord | None:
+        """상품 번호 하나 → 상품. 없으면 None. v3 리뷰 조인용(v1은 쓰지 않음)."""
+        ...
+
+
+@runtime_checkable
+class ProfileRunStore(Protocol):
+    """프로파일링 결과 보관. 구현: stores.DbProfileRunStore (ai_profile.profile_runs)."""
+
+    def save(self, outcome: ProfileOutcome) -> None:
+        """실행 기록 + 수신자 프로필 upsert. 같은 recipient_user_id면 덮어쓴다.
+
+        오늘은 source_version 순서를 보지 않는다(낮은 버전이 뒤에 와도 덮어씀). 순서 역전 처리(409·SUPERSEDED)는 #23.
+        """
+        ...
+
+    def get(self, recipient_user_id: int) -> ProfileOutcome | None:
+        """마지막으로 저장된 결과. 없으면 None. Chat이 대화 시작 시 읽는 것이 이것(6단계 1.2)."""
+        ...
+
+    def run_lock(self, recipient_user_id: int, source_version: int) -> AbstractContextManager[bool]:
+        """그 (수신자, 원본 버전)에 대한 **배타 잠금**. `with store.run_lock(rid, sv) as got:` 로 쓴다.
+
+        `got=False` 면 다른 실행이 이미 그 키를 처리하고 있다는 뜻이므로 아무것도 하지 않는다.
+        접수 판정(무엇을 할지 고르기)과 그 실행(분석·재전송)이 **한 잠금 안에서** 일어나야
+        같은 요청이 동시에 두 번 와도 분석이 두 벌 돌지 않는다.
+
+        구현은 프로세스 밖에서도 통하는 잠금이어야 한다(앱을 여러 개 띄울 수 있으므로) —
+        DbProfileRunStore 는 PostgreSQL advisory lock 을 쓴다.
+        """
+        ...
+
+    def get_run(self, recipient_user_id: int, source_version: int) -> ProfileOutcome | None:
+        """그 (수신자, 원본 버전) 한 행. 없으면 None.
+
+        접수 단계 중복 판정이 쓴다 — Backend가 같은 sourceVersion으로 재전송하면(10분 PENDING 타임아웃, 최대 2회)
+        이미 도는 분석을 또 돌리거나 이미 만든 결과를 다시 만들지 않기 위해. get()은 "최신 한 건"이라 키를 지정해 찾을 수 없다.
+        반환값의 updated_at으로 RUNNING이 아직 살아 있는지 본다.
+        """
+        ...
+
+
+@runtime_checkable
+class BackendPort(Protocol):
+    """Backend 정본으로 나가는 HTTP. 구현: backend.HttpBackendPort."""
+
+    def send_profile_callback(self, outcome: ProfileOutcome) -> CallbackResult:
+        """7.7 POST 한 번 → 실행 기록의 다음 상태 + 사유(3단계 §10.2). 예외를 밖으로 내지 않는다.
+
+        status: DELIVERED(200) · SUPERSEDED(409, 폐기) · FAILED(4xx, 재시도 없음) · RESULT_READY(5xx·네트워크, 아직 전달 못 함 = 재시도 대상).
+        code: CALLBACK_STALE(409) · CONTRACT_7_7_REJECTED(4xx) · CALLBACK_UNREACHABLE(5xx·네트워크) · DELIVERED면 None.
+        오늘은 1회만 보낸다. 재시도·백오프(#23)는 RESULT_READY를 받은 쪽이 아니라 이 adapter 안에서.
+        """
+        ...
+
+
+@runtime_checkable
+class RecipientProfileStore(Protocol):
+    """수신자 프로필(태그) 보관 — ai_profile.recipient_profiles. 구현: stores.DbRecipientProfileStore.
+    ProfileRunStore(실행 기록·전달 상태)와 분리: 실행 기록은 시도마다 한 행, 프로필은 수신자당 한 행(최신 분석이 덮어씀)."""
+
+    def upsert(self, profile: RecipientProfile) -> None: ...
+
+    def get(self, recipient_user_id: int) -> RecipientProfile | None: ...
+
+    def delete(self, recipient_user_id: int) -> bool: ...

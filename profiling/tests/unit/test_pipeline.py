@@ -1,0 +1,241 @@
+"""pipeline — 가짜 adapter(ports 모양)로 v1 흐름. DB·HTTP 없음."""
+
+from datetime import UTC, datetime
+from uuid import UUID
+
+import pytest
+
+from profiling import pipeline
+from profiling.ports import NoActiveCatalog
+from profiling.schemas import ProductRecord, ProfileExtractRequest
+from profiling.types import DislikedCategory, ProfileRequest, Review, RunStatus
+
+CV = UUID(int=7)   # 시험용 카탈로그 버전 ID
+
+# ---------------------------------------------------------------- 가짜
+
+
+def _product(pid: int, cat_id: int, cat_name: str, availability: str = "available", views: int = 0,
+             parent_id: int | None = None, parent_name: str | None = None) -> ProductRecord:
+    return ProductRecord(productId=pid, name=f"p{pid}", brand="b", description=None, categoryId=cat_id, categoryName=cat_name,
+                         parentCategoryId=parent_id, parentCategoryName=parent_name,
+                         price=1000, availability=availability, updatedAt=datetime(2026, 9, 21, tzinfo=UTC), viewCount=views)
+
+
+class FakeCatalog:
+    def __init__(self, products, version_id: UUID = CV, fail: bool = False):
+        self.products, self.version_id, self.fail = products, version_id, fail
+
+    def active(self):
+        if self.fail:
+            raise NoActiveCatalog("없음")
+        return self.version_id, self.products
+
+    def by_id(self, product_id):
+        return next((p for p in self.products if p.productId == product_id), None)
+
+
+class FakeStore:
+    def __init__(self):
+        self.saved = {}
+        self.history = []                      # save() 순서 — RUNNING → RESULT_READY 를 확인하기 위해
+
+    def save(self, outcome):
+        self.saved[outcome.recipient_user_id] = outcome
+        self.history.append(outcome.status)
+
+    def get(self, rid):
+        return self.saved.get(rid)
+
+
+class FakeRecipientStore:
+    def __init__(self, fail=False):
+        self.rows, self.fail = {}, fail
+
+    def upsert(self, profile):
+        if self.fail:
+            raise RuntimeError("profiles down")
+        self.rows[profile.recipient_user_id] = profile
+
+    def get(self, rid):
+        return self.rows.get(rid)
+
+    def delete(self, rid):
+        return self.rows.pop(rid, None) is not None
+
+
+# 카테고리 3종 × 재고 있음/없음 섞어 40개: 100번대=뷰티, 200번대=주방, 300번대=완구
+PRODUCTS = [_product(pid, cat, name, availability="unavailable" if pid % 10 == 0 else "available")
+            for pid, (cat, name) in enumerate(((c, n) for c, n in [(100, "뷰티"), (200, "주방"), (300, "완구")] for _ in range(14)), start=1)][:40]
+
+
+def _rq(disliked=(), pref=None, reviews=()) -> ProfileRequest:
+    return ProfileRequest(recipient_user_id=9073, source_version=3, gift_preference=pref,
+                          disliked_categories=[DislikedCategory(category_id=i, category_name=n) for i, n in disliked],
+                          reviews=list(reviews))
+
+
+# ---------------------------------------------------------------- to_internal · needs_model
+
+
+def test_to_internal_converts_nested_items() -> None:
+    body = ProfileExtractRequest(recipientUserId=1, sourceVersion=2, dislikedCategories=[{"categoryId": 701, "categoryName": "도서·음반"}],
+                                 giftPreference=None, reviews=[{"productId": 10, "rating": 5, "reviewText": None}])
+    rq = pipeline.to_internal(body)
+    assert rq.recipient_user_id == 1 and rq.source_version == 2 and rq.gift_preference is None
+    assert rq.disliked_categories[0].category_name == "도서·음반" and rq.reviews[0].product_id == 10
+
+
+@pytest.mark.parametrize("pref,reviews,expected", [
+    (None, (), False),                                             # v1
+    ("휴대용 좋아요", (), True),                                     # 취향만
+    (None, (Review(product_id=1, rating=5),), True),               # 리뷰만 (취향 null인 v3 수신자)
+])
+def test_needs_model(pref, reviews, expected) -> None:
+    assert pipeline.needs_model(_rq(pref=pref, reviews=reviews)) is expected
+
+
+# ---------------------------------------------------------------- build_pool
+
+
+def test_pool_excludes_disliked_and_unavailable_keeps_order() -> None:
+    rq = _rq(disliked=[(200, "주방")])
+    res = pipeline.build_pool(rq, PRODUCTS, pool_size=30, catalog_version_id=CV)
+    by_id = {p.productId: p for p in PRODUCTS}
+    assert res.catalog_version_id == CV and res.query_text == ""
+    assert all(by_id[i].categoryId != 200 and by_id[i].availability != "unavailable" for i in res.product_ids)
+    assert res.product_ids == sorted(res.product_ids)                          # 조회수가 전부 0이면 카탈로그 순서 (동점 규칙)
+    assert len(res.product_ids) == min(30, sum(1 for p in PRODUCTS if p.availability != "unavailable" and p.categoryId != 200))
+
+
+def test_pool_keeps_unknown_availability() -> None:
+    """재고를 모르는 상품(unknown)은 풀에 남는다 — 09-23 합의. 실제 재고 판단은 Backend 몫이고,
+    패키지로 적재한 카탈로그는 전건 unknown이라 이 규칙이 아니면 풀이 0건이 된다."""
+    products = [_product(1, 100, "뷰티", availability="unknown"), _product(2, 100, "뷰티", availability="unknown"),
+                _product(3, 100, "뷰티", availability="unavailable"), _product(4, 100, "뷰티", availability="available")]
+    res = pipeline.build_pool(_rq(), products, 30, CV)
+    assert res.product_ids == [1, 2, 4]                                        # unknown 유지 · unavailable만 제외
+
+
+def test_pool_sorted_by_view_count_desc_then_product_id() -> None:
+    products = [_product(1, 100, "뷰티", views=5), _product(2, 100, "뷰티", views=50), _product(3, 100, "뷰티", views=50),
+                _product(4, 200, "주방", views=999), _product(5, 100, "뷰티", views=7, availability="unavailable")]
+    res = pipeline.build_pool(_rq(disliked=[(200, "주방")]), products, 30, CV)
+    assert res.product_ids == [2, 3, 1]                                        # 50, 50(동점 → id 순), 5 · 주방(999)은 제외 · 재고 없음 제외
+
+
+def test_pool_matches_by_name_when_id_differs() -> None:
+    rq = _rq(disliked=[(999, "완구")])                                         # ID 체계가 달라도 이름으로 걸러짐
+    res = pipeline.build_pool(rq, PRODUCTS, 30, CV)
+    assert all(p.categoryName != "완구" for p in PRODUCTS if p.productId in res.product_ids)
+
+
+def test_pool_excludes_every_child_of_disliked_root_category() -> None:
+    """비선호는 대분류로 온다(09-27 BE 결정) — 그 대분류 밑의 소분류 상품이 전부 빠지고 다른 대분류는 남는다."""
+    products = [
+        _product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=9),
+        _product(2, 12, "메이크업", parent_id=1, parent_name="뷰티", views=8),
+        _product(3, 21, "여성의류", parent_id=2, parent_name="패션", views=7),
+        _product(4, 22, "가방·지갑", parent_id=2, parent_name="패션", views=6),
+    ]
+    picked = pipeline.build_pool(_rq(disliked=[(1, "뷰티")]), products, 30, CV).product_ids
+    assert picked == [3, 4]
+
+
+def test_pool_root_dislike_matches_by_parent_name_when_id_differs() -> None:
+    """ID가 어긋나도 대분류 이름이 같으면 제외 — 소분류와 같은 보조 규칙."""
+    products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티"), _product(2, 21, "여성의류", parent_id=2, parent_name="패션")]
+    assert pipeline.build_pool(_rq(disliked=[(999, "뷰티")]), products, 30, CV).product_ids == [2]
+
+
+def test_pool_without_parent_info_falls_back_to_leaf_only() -> None:
+    """대분류 정보가 없는 상품(파일 카탈로그)은 소분류 판정만 받는다 — 대분류 비선호로는 빠지지 않는다(알려진 한계)."""
+    products = [_product(1, 11, "스킨케어"), _product(2, 21, "여성의류")]
+    assert pipeline.build_pool(_rq(disliked=[(1, "뷰티")]), products, 30, CV).product_ids == [1, 2]
+    assert pipeline.build_pool(_rq(disliked=[(11, "스킨케어")]), products, 30, CV).product_ids == [2]
+
+
+def test_pool_size_cap() -> None:
+    assert len(pipeline.build_pool(_rq(), PRODUCTS, 5, CV).product_ids) == 5
+
+
+# ---------------------------------------------------------------- profile()
+
+
+def test_profile_v1_happy_path() -> None:
+    store = FakeStore()
+    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore(), pool_size=30)
+    assert out.status is RunStatus.RESULT_READY
+    assert out.validation.preferred_tags == [] and out.validation.disliked_tags == ["뷰티"]
+    assert out.search.catalog_version_id == CV and 0 < len(out.search.product_ids) <= 30
+    assert out.validator_version == "v1-skip"
+    assert store.get(9073) is out                                              # 저장됨
+
+
+def test_profile_empty_pool_is_result_ready_with_empty_list(caplog) -> None:
+    """비선호로 전부 걸러져 0개여도 실패가 아니다 — 빈 배열을 7.7로 보낸다(Backend 인기순 대체). 경고 로그 한 줄."""
+    from profiling.backend import callback_body
+    store = FakeStore()
+    only_beauty = [_product(1, 100, "뷰티", views=5), _product(2, 100, "뷰티", views=3)]
+    with caplog.at_level("WARNING", logger="profiling.pipeline"):
+        out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(only_beauty), store=store,
+                               recipient_store=FakeRecipientStore(), pool_size=30)
+    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == []
+    assert callback_body(out).recommendedProductIds == []                       # 본문도 빈 배열 (스키마가 허용)
+    assert any("풀 0개" in rec.message for rec in caplog.records)
+
+
+def test_profile_overwrites_same_recipient() -> None:
+    store = FakeStore(); cat = FakeCatalog(PRODUCTS)
+    pipeline.profile(_rq(), catalog=cat, store=store, recipient_store=FakeRecipientStore())
+    second = pipeline.profile(_rq(disliked=[(300, "완구")]), catalog=cat, store=store, recipient_store=FakeRecipientStore())
+    assert store.get(9073) is second
+
+
+def test_profile_no_catalog_is_failed_not_exception() -> None:
+    store = FakeStore()
+    out = pipeline.profile(_rq(), catalog=FakeCatalog([], fail=True), store=store, recipient_store=FakeRecipientStore())
+    assert out.status is RunStatus.FAILED and "카탈로그" in out.failure_reason
+    assert store.get(9073).status is RunStatus.FAILED                          # FAILED도 기록
+
+
+def test_profile_with_reviews_still_v1_path() -> None:
+    out = pipeline.profile(_rq(pref="휴대용", reviews=[Review(product_id=1, rating=5)]), catalog=FakeCatalog(PRODUCTS), store=FakeStore(), recipient_store=FakeRecipientStore())
+    assert out.status is RunStatus.RESULT_READY and out.validation.preferred_tags == []   # 모델 단계 미구현 → v1 경로
+
+
+def test_profile_store_failure_is_failed() -> None:
+    class BrokenStore(FakeStore):
+        def save(self, outcome):
+            raise RuntimeError("db down")
+    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=BrokenStore(), recipient_store=FakeRecipientStore())
+    assert out.status is RunStatus.FAILED and "저장 실패" in out.failure_reason
+
+
+def test_profile_records_running_then_result_with_same_hash() -> None:
+    store = FakeStore()
+    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore())
+    assert store.history == [RunStatus.RUNNING, RunStatus.RESULT_READY]          # 접수 기록이 결과보다 먼저
+    assert out.input_hash == pipeline.input_hash(_rq(disliked=[(100, "뷰티")])) and len(out.input_hash) == 64
+
+
+def test_input_hash_ignores_disliked_order_but_not_content() -> None:
+    a = pipeline.input_hash(_rq(disliked=[(100, "뷰티"), (200, "주방")]))
+    assert a == pipeline.input_hash(_rq(disliked=[(200, "주방"), (100, "뷰티")]))   # 순서만 다름 → 같은 입력
+    assert a != pipeline.input_hash(_rq(disliked=[(100, "뷰티")]))                  # 내용 다름 → 다른 입력
+
+
+def test_profile_upserts_recipient_profile() -> None:
+    store, rstore = FakeStore(), FakeRecipientStore()
+    out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=rstore)
+    row = rstore.get(9073)
+    assert out.status is RunStatus.RESULT_READY and row is not None
+    assert row.source_version == 3 and [c.category_name for c in row.disliked_categories] == ["뷰티"]
+    assert row.disliked_tags == ["뷰티"] and row.preferred_tags == [] and row.recommended_product_ids == out.search.product_ids
+
+
+def test_profile_recipient_store_failure_is_failed_no_callback() -> None:
+    store = FakeStore()
+    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore(fail=True))
+    assert out.status is RunStatus.FAILED and "프로필 저장 실패" in out.failure_reason
+    assert store.history[-1] is RunStatus.FAILED                                  # 실행 기록도 FAILED로 되돌림
