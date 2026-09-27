@@ -175,15 +175,19 @@ SCHEMA = "ai_catalog"
 
 _ACTIVE_VERSION = sa.text(f"select id, package_id from {SCHEMA}.catalog_versions where is_active")
 
-## 활성 버전의 **패키지에 속한** 상품만. products 에는 버전 FK가 없고 package_id 만 있다 —
-## 다른 패키지(예: 시험용)의 행이 섞여 있어도 활성 버전의 상품만 본다.
-_PRODUCTS = sa.text(f"""
-    select p.source_product_id, p.backend_product_id, p.name, p.brand, p.description,
+## 활성 버전과 그 패키지의 상품을 **한 문장으로** 읽는다. 두 문장으로 나누면 그 사이에 카탈로그가 교체될 때
+## "버전은 옛것, 상품은 새것"인 한 벌이 나온다 — PostgreSQL 기본 격리(READ COMMITTED)는 문장마다 스냅샷이
+## 새로 잡히므로 같은 커넥션으로 묶어도 마찬가지다. 한 문장이면 한 스냅샷이라 정의상 어긋날 수 없다.
+## products 에는 버전 FK가 없고 package_id 만 있어 그 열로 잇는다(시험용 행이 섞여 있어도 활성 패키지만 본다).
+_ACTIVE_PRODUCTS = sa.text(f"""
+    select v.id as version_id, v.package_id,
+           p.source_product_id, p.backend_product_id, p.name, p.brand, p.description,
            p.source_category_id, c.backend_category_id, c.name as category_name,
            p.unit_price, p.availability, p.view_count, p.updated_at
-    from {SCHEMA}.products p
+    from {SCHEMA}.catalog_versions v
+    join {SCHEMA}.products p on p.package_id = v.package_id
     join {SCHEMA}.categories c on c.source_category_id = p.source_category_id
-    where p.package_id = :package_id""")
+    where v.is_active""")
 
 _SOURCE_PRODUCT_ID = re.compile(r"^[A-Z_]+:(\d+)$")        # KAKAO_GIFT:10002797
 _SOURCE_CATEGORY_ID = re.compile(r"^CAT-(\d+)-(\d+)$")     # CAT-01-02
@@ -225,12 +229,19 @@ class DbCatalogReader:
     # ---- ports.CatalogReader ------------------------------------------------
 
     def active(self) -> tuple[UUID, list[ProductRecord]]:
-        version, package_id = self._active_version()
-        if version != self._version:
+        """(활성 버전 id, 상품 전체). **둘은 같은 스냅샷에서 나온 한 벌이다.**
+
+        값싼 폴링(_active_version)은 "바뀌었나"만 본다. 돌려주는 버전은 폴링 값이 아니라 **적재에 쓴 질의가
+        돌려준 값**이다 — 폴링과 적재 사이에 카탈로그가 교체돼도 버전과 상품이 어긋나지 않는다.
+        """
+        polled, _ = self._active_version()
+        if polled != self._version:
             with self._lock:
-                if version != self._version:          # 락을 기다리는 동안 다른 스레드가 이미 읽었을 수 있다
-                    self._load(version, package_id)
-        return version, self._products
+                if polled != self._version:           # 락을 기다리는 동안 다른 스레드가 이미 읽었을 수 있다
+                    self._load()
+        if self._version is None:                     # _load 가 성공하면 반드시 채워진다(방어)
+            raise NoActiveCatalog("활성 카탈로그를 읽지 못했습니다")
+        return self._version, self._products
 
     def by_id(self, product_id: int) -> ProductRecord | None:
         self.active()                                  # 버전이 바뀌었으면 먼저 따라잡는다
@@ -249,11 +260,13 @@ class DbCatalogReader:
             raise NoActiveCatalog(f"{SCHEMA}.catalog_versions 에 활성 버전이 없습니다 — tools/catalog/load_catalog.py 로 적재하세요")
         return row[0], row[1]                          # 부분 유니크 인덱스가 활성 1개를 보장한다
 
-    def _load(self, version: UUID, package_id: str) -> None:
+    def _load(self) -> None:
+        """활성 버전 + 그 상품을 한 문장으로 읽어 캐시를 바꾼다. 버전은 **그 결과에서** 꺼낸다."""
         with self._engine.connect() as conn:
-            rows = conn.execute(_PRODUCTS, {"package_id": package_id}).mappings().all()
+            rows = conn.execute(_ACTIVE_PRODUCTS).mappings().all()
         if not rows:
-            raise NoActiveCatalog(f"활성 버전 {version}(패키지 {package_id}) 에 상품이 없습니다")
+            raise NoActiveCatalog("활성 버전의 패키지에 상품이 없습니다 — tools/catalog/load_catalog.py 로 적재하세요")
+        version, package_id = rows[0]["version_id"], rows[0]["package_id"]
 
         products: list[ProductRecord] = []
         provisional_p = provisional_c = 0

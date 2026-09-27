@@ -238,7 +238,7 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 | 연결 | 왜 FK가 아닌가 |
 |---|---|
 | `profile_runs.catalog_version_id → catalog_versions.id` | `0002`가 `0003`보다 먼저 생겼고, 당시 카탈로그는 파일이었다(고정 UUID). 지금은 값이 실제로 `ai_catalog.catalog_versions.id`지만 **감사 목적이라 FK를 걸지 않는다** — 옛 카탈로그 버전을 지워도 실행 기록은 남아야 한다 |
-| `products.package_id → catalog_versions.package_id` | 상품은 "적재분"에 속하지 버전 행에 속하지 않는다. `DbCatalogReader`가 활성 버전의 `package_id`로 상품을 고른다 |
+| `products.package_id → catalog_versions.package_id` | 상품은 "적재분"에 속하지 버전 행에 속하지 않는다. `DbCatalogReader`는 이 열로 **활성 버전과 상품을 한 문장에서 조인**해 읽는다(따로 읽으면 교체 순간 버전과 상품이 어긋난다) |
 | `profile_runs.recipient_user_id → recipient_profiles.recipient_user_id` | 둘 다 **Backend의 사용자 번호**를 그대로 쓴다. 실행은 남았는데 프로필이 아직 없을 수 있어(FAILED) 부모–자식 관계가 아니다 |
 | `*.backend_*_id → Backend` | 다른 DB다. 대조는 `tools/catalog/fetch_export.py --compare-db` |
 

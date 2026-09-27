@@ -6,6 +6,8 @@
 실제 적재분을 읽는 시험이라 **행을 바꾸는 시험은 반드시 되돌린다**(try/finally). 활성 버전 포인터도 원래대로 돌려놓는다.
 """
 
+from uuid import UUID
+
 import pytest
 import sqlalchemy as sa
 
@@ -134,3 +136,33 @@ def test_no_active_version_raises(engine, active) -> None:
     finally:
         with engine.begin() as c:
             c.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = true where id = :v"), {"v": version_id})
+
+
+# ---------------------------------------------------------------- 버전과 상품이 한 벌인가
+
+
+def test_version_comes_from_the_same_statement_as_products(engine, active) -> None:
+    """폴링이 **틀린 버전**을 줘도, 돌려주는 버전은 상품을 읽은 그 질의의 값이어야 한다.
+
+    이 둘을 따로 읽으면 그 사이에 카탈로그가 교체될 때 "버전은 옛것, 상품은 새것"인 한 벌이 나온다.
+    폴링을 가짜로 바꿔 그 상황을 만든다 — 고치기 전에는 가짜 버전이 그대로 새어 나왔다.
+    """
+    version_id, _, _ = active
+    stale = UUID("00000000-0000-0000-0000-0000deadbeef")
+    cat = DbCatalogReader(engine)
+    cat._active_version = lambda: (stale, "없는-패키지")
+
+    got_version, products = cat.active()
+    assert got_version == version_id and got_version != stale
+    assert products and all(p.productId > 0 for p in products)
+
+
+def test_version_and_products_belong_together(engine, active) -> None:
+    """돌려준 버전의 패키지에 속한 상품 수와 목록 길이가 같아야 한다 (섞이지 않았다는 뜻)."""
+    cat = DbCatalogReader(engine)
+    version_id, products = cat.active()
+    with engine.connect() as c:
+        package = c.execute(sa.text(f"select package_id from {SCHEMA}.catalog_versions where id = :v"),
+                            {"v": version_id}).scalar_one()
+        n = c.execute(sa.text(f"select count(*) from {SCHEMA}.products where package_id = :p"), {"p": package}).scalar_one()
+    assert len(products) == n
