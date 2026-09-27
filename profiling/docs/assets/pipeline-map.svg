@@ -53,7 +53,7 @@
 <text x="52" y="484" class="sub">의존성(Depends): get_catalog · get_store · get_recipient_store</text>
 <text x="52" y="498" class="sub">· get_backend · get_supervisor  ← app.state</text>
 <text x="52" y="512" class="sub">_error() → HTTPException → main.on_http_error 봉투</text>
-<text x="52" y="526" class="sub">Backend는 10분 PENDING이면 같은 번호로 최대 2회 재전송(09-25)</text>
+<text x="52" y="526" class="sub">Backend는 실패·타임아웃이면 같은 번호로 최대 2회 재시도(09-27 BE 계획)</text>
 <text x="462" y="316" class="monob">submit(bg, fn, *args)</text>
 <text x="462" y="330" class="mono">  _submitted += 1 · bg.add_task(_run, fn, *args)</text>
 <text x="462" y="344" class="sub">  → FastAPI BackgroundTasks: 응답 전송 뒤 같은 프로세스에서</text>
@@ -90,11 +90,11 @@
 <text x="1282" y="386" class="sub">    Bearer SERVICE_TOKEN · timeout CALLBACK_TIMEOUT_S</text>
 <text x="1282" y="400" class="mono">  _status_from_response(code) → RunStatus</text>
 <text x="1282" y="414" class="sub">    200 DELIVERED · 409 SUPERSEDED · 4xx FAILED</text>
-<text x="1282" y="428" class="sub">    5xx·네트워크 RESULT_READY (미전달 = 재전송 대상)</text>
+<text x="1282" y="428" class="sub">    5xx·네트워크 RESULT_READY — 0.5초·2초 뒤 최대 3회, 그래도 실패면 보관</text>
 <text x="1282" y="442" class="mono">  _error_code(res)  로그용 · 예외는 밖으로 안 냄</text>
 <text x="1282" y="456" class="monob">store.save(status=result, callback_attempts+1)</text>
 <text x="1282" y="470" class="mono"></text>
-<text x="1282" y="484" class="sub">재시도·백오프는 아직 없음 (#23)</text>
+<text x="1282" y="484" class="sub">재시도는 intake._send_and_record (CALLBACK_MAX_ATTEMPTS·CALLBACK_BACKOFF_S)</text>
 <path d="M355 220 H520" class="call"/>
 <text x="437.5" y="214" class="sub" text-anchor="middle">run_and_callback + rq: ProfileRequest</text>
 <path d="M765 220 H930" class="call"/>

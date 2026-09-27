@@ -6,7 +6,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 |---|---|
 | 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
 | 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
-| 테스트 | 단위 115개(외부 의존 없음) + 통합 43개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 156 passed, 2 skipped |
+| 테스트 | 단위 131개(외부 의존 없음) + 통합 44개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 173 passed, 2 skipped |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
 
 ---
@@ -23,7 +23,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 | 폴더 · 파일 | 내용 |
 |---|---|
-| `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · **Backend 생애주기 흉내**(`lifecycle.py` — 디바운스→7.6→202→타임아웃 시 같은 번호 재전송 2회→FAILED) |
+| `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · **Backend 생애주기 흉내**(`lifecycle.py` — 디바운스→7.6→202→실패·타임아웃 시 같은 번호 재시도 2회(`Retry-After`·백오프)→FAILED) |
 | `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
 | `tools/catalog/load_catalog.py` | Backend 전달 패키지 → `ai_catalog` 적재 · 회신 반영(`--id-map` · `--metrics`) |
 | `tools/catalog/import_be_ids.py` | Backend 회신 xlsx 2종 → id-map · metrics jsonl (이름으로 매칭, 1:1 보장). 결과는 `tools/catalog/returned/날짜/` |
@@ -64,7 +64,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 1. `POST 7.6` → Pydantic 검증(위반 400 `INVALID_REQUEST`) → 서비스 토큰(401) → 활성 카탈로그 없으면 503 → **202 `PENDING`** (HTTP 끝)
 2. 백그라운드 `run_and_callback`: `to_internal` → `profile()` — `store.save(RUNNING, input_hash)` → `catalog.active()` 한 번(같은 버전 유지) → 비선호 이름만 담은 `ValidationResult` → `build_pool`(재고 없음(`unavailable`)만 제외 · 비선호 카테고리 제외 · 조회수 내림차순 · 30개) → `ProfileOutcome(RESULT_READY)` → `store.save`(콜백 본문을 DB에 먼저 커밋) → `recipient_store.upsert(from_outcome)`
-3. `RESULT_READY`면 `backend.send_profile_callback` → `POST 7.7` → 응답을 `RunStatus`로: `200→DELIVERED`, `409→SUPERSEDED`, `4xx→FAILED`, `5xx·네트워크→RESULT_READY`(재시도 대상) → `store.save(그 상태, callback_attempts+1)`. `FAILED` 결과는 콜백 없음(AI는 침묵, Backend가 판정). DB에 무엇이 언제 남는지: [docs/DB_전환_설명.md](docs/DB_전환_설명.md)
+3. `RESULT_READY`면 `backend.send_profile_callback` → `POST 7.7` → 응답을 `RunStatus`로: `200→DELIVERED`, `409→SUPERSEDED`, `4xx→FAILED`, `5xx·네트워크→RESULT_READY`(같은 슬롯에서 0.5초·2초 뒤 최대 3회 재시도) → `store.save(마지막 상태, callback_attempts + 시도 수)`. `FAILED` 결과는 콜백 없음(AI는 침묵, Backend가 판정). DB에 무엇이 언제 남는지: [docs/DB_전환_설명.md](docs/DB_전환_설명.md)
 
 ### 지금 정해진 규칙과 미결
 | 규칙 | 값 | 출처 |
@@ -95,7 +95,7 @@ uv sync                                     # .venv + 의존성 (uv.lock 기준)
 cp .env.example .env                        # 필요 시 값 수정
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
 uv run alembic upgrade head                 # 테이블 생성 (0001~0004)
-uv run pytest -q                            # 156 passed, 2 skipped (DB 꺼져 있으면 통합 43개 skip)
+uv run pytest -q                            # 173 passed, 2 skipped (DB 꺼져 있으면 통합 44개 skip)
 uv run ruff check src tests tools alembic   # lint
 ```
 
@@ -173,28 +173,29 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 4. 테스트
 
-원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 115개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 42개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
+원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 131개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 44개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
 
 | 파일 | 대상 | 방법 | 개수 |
 |---|---|---|---|
 | `test_schemas.py` | 7.6·7.7·7.9 DTO 경계 | Pydantic `ValidationError` — 11개 리뷰·rating 0/6·모르는 필드·조회수 별칭·재고 3값 변환·태그 포함 콜백 거부 | 12 |
-| `test_pipeline.py` | `to_internal`·`needs_model`·`input_hash`·`build_pool`·`profile()` | `FakeCatalog`·`FakeStore`·`FakeRecipientStore`(ports 모양). 비선호 제외·재고 `unavailable`만 제외(`unknown` 유지)·조회수 정렬·상한·FAILED 경로·저장 실패·RUNNING→RESULT_READY 순서·프로필 upsert | 18 |
+| `test_pipeline.py` | `to_internal`·`needs_model`·`input_hash`·`build_pool`·`profile()` | `FakeCatalog`·`FakeStore`·`FakeRecipientStore`(ports 모양). 비선호 제외·재고 `unavailable`만 제외(`unknown` 유지)·조회수 정렬·상한·FAILED 경로·저장 실패·RUNNING→RESULT_READY 순서·프로필 upsert·빈 풀은 빈 배열 | 19 |
 | `test_catalog.py` | `FileCatalogReader` | tmp JSON 두 형식 · 중복/오류 제외 · 재고 3값(상태 없으면 `unknown`) · `isinstance(…, Protocol)` 모양 검사 | 3 |
 | `test_backend.py` | `to_callback`·`HttpBackendPort` | `httpx.MockTransport` — 상태 코드 6종 → `CallbackResult(status, code)`, 헤더·경로·본문, 네트워크 오류 | 12 |
 | `test_fetch_export.py` | `tools/catalog/fetch_export` | 계약 점검(모르는 필드·별칭·필수 누락) · ID 대조 · 저장 정규화 · 종료 코드 | 7 |
 | `test_catalog_fixture.py` | 예시 카탈로그(파일만) | 111건·56카테고리·null 1·재고 없음 2 | 1 |
 | `test_load_catalog.py` | `tools/catalog/load_catalog` 읽기·검사 | 패키지 파일만(DB 없음) — 누락 파일·부모 없는 소분류·중복 ID·선언 수 불일치 | 5 |
 | `test_intake_dedupe.py` | 접수 단계 중복 판정 | `decide()` 표(12) + dispatch 분기(7) — 잠금 못 얻으면 아무것도 안 함 · RUNNING이면 분석 없음 · 결과 있으면 재전송만 · 본문 다르면 재분석 | 19 |
+| `test_callback_retry.py` | 7.7 즉시 재시도 | 스크립트 응답 + `sleep` 기록 — 5xx·5xx·200 → DELIVERED(대기 0.5·2초) · 5xx×3 → RESULT_READY · 409/4xx 즉시 종료 · 최대 1회 · 재전송 경로 | 6 |
 | `test_import_be_ids.py` | Backend 회신 매칭 | 키로 확정 · 진짜 중복은 결정적 1:1 · 남는 번호는 재사용 안 함 · 이름 없으면 보고 | 10 |
 | `test_stores_lock_key.py` | `run_lock` 주변(DB 없이) | 잠금 키가 수신자 ID 를 자르지 않음 · 커넥션·질의 어느 쪽이 실패해도 진행 | 4 |
-| `test_fake_backend_lifecycle.py` | 페이크 Backend 상태 기계 | 디바운스·상한·202 조건부 PENDING·409 판정·재전송 2회 후 FAILED — 시간만 바꿔가며 | 16 |
+| `test_fake_backend_lifecycle.py` | 페이크 Backend 상태 기계 | 디바운스·상한·202 조건부 PENDING·409 판정·같은 번호 재시도 2회 후 FAILED·접수 실패(500/503 `Retry-After`/연결 실패) 백오프·400/401 재시도 없음·새 수정이 옛 재시도를 이김 — 시간만 바꿔가며 | 25 |
 | `test_recipient_profile.py` | `from_outcome`·`should_replace`·`cap_tags` | 행 변환·버전 규칙·상한 (v3 함수 2개는 skip) | 6 |
 | `test_supervisor.py` | Supervisor | 슬롯 1이면 동시에 하나만 실행 | 1 |
 | `integration/test_db_catalog.py` | 마이그레이션 0003 + 적재 SQL | 표·CHECK·활성 버전 1개 · 재적재 멱등 · Backend ID/재고 보존 · `--id-map` 회신 반영 | 7 |
 | `integration/test_db_catalog_reader.py` | `DbCatalogReader` | 활성 버전 읽기·필드 매핑 · 같은 버전이면 재질의 없음 · Backend 번호 우선/임시 번호 · 번호 충돌 거부 · 활성 없음 · **버전과 상품이 한 스냅샷에서 나오는지** | 7 |
 | `integration/test_db_recipient_profiles.py` | 마이그레이션 결과 | 열 순서·PK 시퀀스 없음·유니크·CHECK·upsert 버전 규칙 | 5 |
 | `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED · 0004 열 주석 | 14 |
-| `integration/test_e2e_app.py` | **끝에서 끝** | `TestClient(app)` — lifespan(진짜 DB) → 7.6 202 → Supervisor 슬롯 → 가짜 BackendPort가 7.7 받음 → `profile_runs` DELIVERED·`recipient_profiles` upsert. 400은 백그라운드로 안 감. 모르는 필드 경고. `/health`. **배포 모양(`CATALOG_SOURCE=db`)으로 기동** | 6 |
+| `integration/test_e2e_app.py` | **끝에서 끝** | `TestClient(app)` — lifespan(진짜 DB) → 7.6 202 → Supervisor 슬롯 → 가짜 BackendPort가 7.7 받음 → `profile_runs` DELIVERED·`recipient_profiles` upsert. 400은 백그라운드로 안 감. 모르는 필드 경고. `/health`. **배포 모양(`CATALOG_SOURCE=db`)으로 기동** · **7.7 500 → 0.5초 뒤 재시도 → 200 (진짜 포트)** | 7 |
 | `integration/test_fetch_export_db.py` | `--compare-db` | 팀원 DDL로 `ai_search.products` 만들어 TEXT id·누락·이름 차이 보고 | 2 |
 | `test_backend.py::test_callback_path_matches_fake_backend` | 계약 문자열 | AI 송신 경로 == fake 수신 경로 | (포함) |
 
@@ -204,7 +205,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 5. 다음 순서와 건드리는 곳
 
-인수인계용 전체 목록은 [docs/파이프라인_지도/2026-09-25.md §5](docs/파이프라인_지도/2026-09-25.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 여기는 요약이다.
+인수인계용 전체 목록은 [docs/파이프라인_지도/2026-09-27.md §5](docs/파이프라인_지도/2026-09-27.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 여기는 요약이다.
 
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
@@ -212,7 +213,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | 2 | ~~Backend ID 회신 받기~~ **완료(09-25)** — xlsx 2종으로 받아 상품 4,231/4,231 · 카테고리 67/67 · 재고 · 조회수까지 반영했다. 7.7로 나가는 번호가 이제 Backend 번호다 | — | 코드 전부 |
 | 3 | ~~상품 카탈로그 DB~~ **완료(09-23)** — `0003` + `load_catalog.py`로 4,231건·67분류 적재, `DbCatalogReader`로 읽기까지. `PROFILING_CATALOG_SOURCE=db`가 배포 경로다. Backend 번호가 없는 동안은 임시 번호로 돌고 `/health`가 `provisional_ids`로 표시한다(2번이 끝나면 사라짐) | — | `pipeline.py`·`ports.py` |
 | 4 | ~~접수 단계 중복 판정~~ **완료(09-25)** — Backend가 같은 `sourceVersion`으로 최대 2회 재전송하기로 해서 필수가 됐다. `decide()`가 analyze/resend/skip으로 가른다 | — | 어댑터·ports |
-| 5 | 7.7 재시도(5xx 최대 3회) · 재시작 복구(RUNNING→FAILED 정리) | `backend.send_profile_callback` 안 · `main.lifespan` | 포트 시그니처 |
+| 5 | ~~7.7 재시도(5xx 최대 3회) · 재시작 복구(RUNNING→FAILED 정리)~~ **완료(09-26·27)** — `intake._send_and_record`가 0.5초·2초 뒤 최대 3회(`CALLBACK_MAX_ATTEMPTS`·`CALLBACK_BACKOFF_S`), `recover_stale_runs`가 시작 시 정리 | — | 포트 시그니처 |
 | 6 | 배포 — `Dockerfile` · compose에 `ai-app` · 시작 시 `alembic upgrade head` | `docker-compose.yml` · `Dockerfile` | |
 | 7 | **v3** 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) + **팀원 Search 호출** | `pipeline.profile` 2)단계 · `model.py` · `ports.py`에 `SearchPort`·`ProfileModel` 추가 | 접수·저장·콜백 |
 | 7′ | **v3 마이그레이션** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/000N_*.py` (`add_column`) · `types.RecipientProfile` 필드 · 통합 테스트 | 기존 마이그레이션 |

@@ -90,7 +90,7 @@ lines(x + 12, TOP + 84, [
     ('의존성(Depends): get_catalog · get_store · get_recipient_store', 'sub'),
     ('· get_backend · get_supervisor  ← app.state', 'sub'),
     ('_error() → HTTPException → main.on_http_error 봉투', 'sub'),
-    ('Backend는 10분 PENDING이면 같은 번호로 최대 2회 재전송(09-25)', 'sub'),
+    ('Backend는 실패·타임아웃이면 같은 번호로 최대 2회 재시도(09-27 BE 계획)', 'sub'),
 ])
 # 2 슬롯
 x = XS[1]
@@ -141,11 +141,11 @@ lines(x + 12, TOP + 84, [
     ('    Bearer SERVICE_TOKEN · timeout CALLBACK_TIMEOUT_S', 'sub'),
     ('  _status_from_response(code) → RunStatus', 'mono'),
     ('    200 DELIVERED · 409 SUPERSEDED · 4xx FAILED', 'sub'),
-    ('    5xx·네트워크 RESULT_READY (미전달 = 재전송 대상)', 'sub'),
+    ('    5xx·네트워크 RESULT_READY — 0.5초·2초 뒤 최대 3회, 그래도 실패면 보관', 'sub'),
     ('  _error_code(res)  로그용 · 예외는 밖으로 안 냄', 'mono'),
     ('store.save(status=result, callback_attempts+1)', 'monob'),
     ('', 'mono'),
-    ('재시도·백오프는 아직 없음 (#23)', 'sub'),
+    ('재시도는 intake._send_and_record (CALLBACK_MAX_ATTEMPTS·CALLBACK_BACKOFF_S)', 'sub'),
 ])
 
 # 단계 사이 화살표 (자료형) — 상자 위 띠에
