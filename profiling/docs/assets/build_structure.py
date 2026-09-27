@@ -41,7 +41,7 @@ def lines(x, y, rows, dy=15):
 
 
 # ---------------------------------------------------------------- 머리
-t(40, 46, 'profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-26)', 'title')
+t(40, 46, 'profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-27)', 'title')
 t(40, 70, 'Ports & Adapters(헥사고날). 업무 코드는 바깥(HTTP·파일·DB)을 모른다. 바깥이 업무가 정한 "포트(모양)"에 맞춰 들어온다 — 화살표는 항상 안쪽을 향한다.', 'small')
 
 LANES = [(170, 350), (546, 350), (922, 350), (1298, 350)]   # (x, w) — 포트 4개가 세로로 한 줄씩
@@ -68,7 +68,8 @@ lines(56, TOP + 44, [('POST 7.6 extract-and-pool', 'mono'), ('Authorization: Bea
 box(390, TOP, 420, 96, 'stage')
 t(406, TOP + 24, 'intake.py', 'monob')
 lines(406, TOP + 44, [('[Transport] 토큰 → 검증 → 202 PENDING', 'msg'),
-                      ('extract_and_pool() · run_and_callback()', 'mono'),
+                      ('extract_and_pool() → dispatch(잠금·판정)', 'mono'),
+                      ('  → run_and_callback | resend_callback', 'mono'),
                       ('여기서 Backend와의 HTTP가 끝난다', 'sub')])
 
 box(840, TOP, 360, 96, 'stage')
@@ -119,7 +120,7 @@ t(1548, PORT_Y - 10, '포트 모양으로만 부른다', 'sub', 'end')
 IMPL_Y = 590
 t(40, IMPL_Y - 10, '구현 — 포트에 꽂히는 실제 코드. 업무 코드는 이 파일들을 import하지 않는다', 'tag')
 IMPL = [('catalog.py', 'DbCatalogReader / FileCatalogReader', ['active() → (버전, 상품 전체)', 'DB: 활성 버전 id만 묻고 바뀔 때만 다시 읽음', '상품번호 = backend_product_id']),
-        ('stores.py', 'DbProfileRunStore', ['save() — UPSERT 한 문장', 'get() 최신 1행 · get_run(rid, sv)', 'payload_hash · delete_recipient']),
+        ('stores.py', 'DbProfileRunStore', ['save() — UPSERT 한 문장', 'get() · get_run(rid, sv) · run_lock(rid, sv)', 'recover_stale_runs() · undelivered_count()']),
         ('stores.py', 'DbRecipientProfileStore', ['upsert() — 버전 가드', 'get() · delete()', '낮은 버전은 DB가 무시']),
         ('backend.py', 'HttpBackendPort', ['send_profile_callback()', '→ CallbackResult(상태·코드)', 'to_callback · callback_body'])]
 for (x, w), (mod, cls_, rows) in zip(LANES, IMPL):

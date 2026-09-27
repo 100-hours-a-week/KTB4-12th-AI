@@ -12,7 +12,7 @@
 .box{fill:#fff;stroke:#bcc5cd;stroke-width:1.3}.stage{fill:#fff;stroke:#3b6fb6;stroke-width:1.6}.band{fill:#eef3fa;stroke:#9db0d2;stroke-width:1.2}
 .core{fill:#f4f8ff;stroke:#3b6fb6;stroke-width:1.8}.db{fill:#fff7f2;stroke:#e0a080;stroke-width:1.4}.ext{fill:#f7f8fa;stroke:#bcc5cd;stroke-width:1.2}
 .rule{stroke:#d9dee3;stroke-width:1}</style></defs><rect width="1700" height="1015" fill="white"/>
-<text x="40" y="46" class="title">profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-26)</text>
+<text x="40" y="46" class="title">profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-27)</text>
 <text x="40" y="70" class="small">Ports &amp; Adapters(헥사고날). 업무 코드는 바깥(HTTP·파일·DB)을 모른다. 바깥이 업무가 정한 "포트(모양)"에 맞춰 들어온다 — 화살표는 항상 안쪽을 향한다.</text>
 <rect x="40" y="92" width="1620" height="62" rx="5" class="band"/>
 <text x="56" y="114" class="monob">main.py</text>
@@ -33,8 +33,9 @@
 <rect x="390" y="186" width="420" height="96" rx="5" class="stage"/>
 <text x="406" y="210" class="monob">intake.py</text>
 <text x="406" y="230" class="msg">[Transport] 토큰 → 검증 → 202 PENDING</text>
-<text x="406" y="245" class="mono">extract_and_pool() · run_and_callback()</text>
-<text x="406" y="260" class="sub">여기서 Backend와의 HTTP가 끝난다</text>
+<text x="406" y="245" class="mono">extract_and_pool() → dispatch(잠금·판정)</text>
+<text x="406" y="260" class="mono">  → run_and_callback | resend_callback</text>
+<text x="406" y="275" class="sub">여기서 Backend와의 HTTP가 끝난다</text>
 <rect x="840" y="186" width="360" height="96" rx="5" class="stage"/>
 <text x="856" y="210" class="monob">schemas.py</text>
 <text x="856" y="230" class="msg">[바깥 계약] 7.6·7.7·7.9 DTO</text>
@@ -81,8 +82,8 @@
 <text x="562" y="616" class="h">DbProfileRunStore</text>
 <text x="880" y="616" class="mono" text-anchor="end">stores.py</text>
 <text x="562" y="638" class="mono">save() — UPSERT 한 문장</text>
-<text x="562" y="653" class="mono">get() 최신 1행 · get_run(rid, sv)</text>
-<text x="562" y="668" class="mono">payload_hash · delete_recipient</text>
+<text x="562" y="653" class="mono">get() · get_run(rid, sv) · run_lock(rid, sv)</text>
+<text x="562" y="668" class="mono">recover_stale_runs() · undelivered_count()</text>
 <path d="M 721.0 588 L 721.0 538" class="impl"/>
 <rect x="922" y="590" width="350" height="118" rx="5" class="box"/>
 <text x="938" y="616" class="h">DbRecipientProfileStore</text>

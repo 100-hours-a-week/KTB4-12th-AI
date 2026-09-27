@@ -43,7 +43,7 @@ def lines(x, y, rows, dy=14):
         t(x, y + i * dy, s, c)
 
 
-t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-25 코드 기준 · 중복 판정 + Backend 회신 반영)', 'title')
+t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-27 코드 기준 · 동시성·복구까지)', 'title')
 t(40, 70, '위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.', 'small')
 
 # ───────────────────── 0. 조립 (main.py lifespan) ─────────────────────
@@ -81,10 +81,10 @@ lines(x + 12, TOP + 84, [
     ('② require_service_token()  Bearer ≠ SERVICE_TOKEN → 401', 'mono'),
     ('③ catalog.active()  없으면 → 503 SERVICE_UNAVAILABLE', 'mono'),
     ('④ rq = pipeline.to_internal(body)   camel → snake', 'mono'),
-    ('⑤ decide(store.get_run(rid, sv), input_hash)  중복 판정', 'monob'),
-    ('· analyze → submit(run_and_callback)  처음·실패·본문 다름', 'sub'),
-    ('· resend  → submit(resend_callback)   결과 있음, 콜백만', 'sub'),
-    ('· skip    → 제출 없음                 이미 RUNNING', 'sub'),
+    ('⑤ supervisor.submit(bg, dispatch, …)  판정은 슬롯 안에서', 'monob'),
+    ('· dispatch: run_lock(rid, sv) → decide() → 아래 셋 중 하나', 'sub'),
+    ('· analyze 분석 · resend 콜백만 · skip 아무것도 안 함', 'sub'),
+    ('  잠금 못 얻으면(다른 실행 처리 중) 아무것도 안 한다', 'sub'),
     ('⑥ 202 SuccessResponse[ProfileAccepted] · PENDING', 'monob'),
     ('', 'mono'),
     ('의존성(Depends): get_catalog · get_store · get_recipient_store', 'sub'),
@@ -186,7 +186,7 @@ adapters = [
         'save(outcome): INSERT … ON CONFLICT (rid, sv) DO UPDATE',
         '  status·input_hash·attempt+1(RUNNING)·payload coalesce',
         '  callback_attempts greatest · error · callback_body()',
-        'get(rid) → 최신 1행 · get_run(rid, sv) → 그 키 1행(중복 판정)',
+        'get(rid) · get_run(rid, sv) · run_lock(rid, sv) 배타 잠금',
         'payload_hash() · delete_recipient()']),
     ('DbRecipientProfileStore', 'stores.py', [
         'upsert(profile): INSERT … ON CONFLICT (rid) DO UPDATE',
