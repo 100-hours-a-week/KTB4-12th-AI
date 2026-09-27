@@ -7,7 +7,7 @@ AI가 **소유한** 표가 무엇이고 서로 어떻게 이어지는지. 정본
 | DB | PostgreSQL 16 + pgvector (`pgvector/pgvector:pg16`) · 데이터베이스 `ai_chat` · 계정 `ai_user` |
 | 스키마 | `ai_profile`(프로파일링 2표) · `ai_catalog`(카탈로그 3표) · `ai_search`(팀원 검색기 1표, §7) |
 | 마이그레이션 | `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog 3표 · `0004` profile_runs 열 주석 정정(동작 변경 없음) — `uv run alembic upgrade head` |
-| 행 수 | 2026-09-25 확인: 상품 4,231(Backend 번호·재고·조회수 전건 채움) · 카테고리 67(대분류 10·소분류 57) · 활성 카탈로그 버전 1. `ai_profile` 두 표는 로컬 시험 행뿐(옛 파일-카탈로그 행 14건 — 삭제 대기, [문서_목록 §4 ⑤](문서_목록.md)) |
+| 행 수 | 2026-09-25 확인: 상품 4,231(Backend 번호·재고·조회수 전건 채움) · 카테고리 67(대분류 10·소분류 57) · 활성 카탈로그 버전 1. `ai_profile` 두 표는 비어 있다(09-27 옛 파일-카탈로그 시험 행 14건 삭제, [문서_목록 §4 ⑤](문서_목록.md)) |
 | 절 | 1 한눈에 · 2 `ai_profile` · 3 `ai_catalog` · 4 관계(FK와 FK 아닌 것) · 5 키·인덱스·제약 · 6 바깥 ID 대응 · 7 팀원 표 · 8 아직 없는 것 |
 
 그림은 `docs/assets/erd/`. 이 문서의 mermaid를 고치면 `python3 assets/build_be_sequences.py`를 다시 돌린다 — 그림과 본문이 한 소스다.
