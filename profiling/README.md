@@ -6,7 +6,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 |---|---|
 | 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
 | 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
-| 테스트 | 단위 110개(외부 의존 없음) + 통합 34개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 142 passed, 2 skipped |
+| 테스트 | 단위 111개(외부 의존 없음) + 통합 36개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 145 passed, 2 skipped |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
 
 ---
@@ -92,7 +92,7 @@ uv sync                                     # .venv + 의존성 (uv.lock 기준)
 cp .env.example .env                        # 필요 시 값 수정
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
 uv run alembic upgrade head                 # 테이블 생성 (0001~0003)
-uv run pytest -q                            # 142 passed, 2 skipped (DB 꺼져 있으면 통합 34개 skip)
+uv run pytest -q                            # 145 passed, 2 skipped (DB 꺼져 있으면 통합 36개 skip)
 uv run ruff check src tests tools alembic   # lint
 ```
 
@@ -170,7 +170,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 4. 테스트
 
-원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 110개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 34개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
+원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 111개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 36개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
 
 | 파일 | 대상 | 방법 | 개수 |
 |---|---|---|---|
@@ -181,7 +181,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | `test_fetch_export.py` | `tools/catalog/fetch_export` | 계약 점검(모르는 필드·별칭·필수 누락) · ID 대조 · 저장 정규화 · 종료 코드 | 7 |
 | `test_catalog_fixture.py` | 예시 카탈로그(파일만) | 111건·56카테고리·null 1·재고 없음 2 | 1 |
 | `test_load_catalog.py` | `tools/catalog/load_catalog` 읽기·검사 | 패키지 파일만(DB 없음) — 누락 파일·부모 없는 소분류·중복 ID·선언 수 불일치 | 5 |
-| `test_intake_dedupe.py` | 접수 단계 중복 판정 | `decide()` 표(11) + 라우터 분기(7) — RUNNING이면 제출 없음 · 결과 있으면 재전송만 · 본문 다르면 재분석 | 18 |
+| `test_intake_dedupe.py` | 접수 단계 중복 판정 | `decide()` 표(12) + dispatch 분기(7) — 잠금 못 얻으면 아무것도 안 함 · RUNNING이면 분석 없음 · 결과 있으면 재전송만 · 본문 다르면 재분석 | 19 |
 | `test_import_be_ids.py` | Backend 회신 매칭 | 키로 확정 · 진짜 중복은 결정적 1:1 · 남는 번호는 재사용 안 함 · 이름 없으면 보고 | 10 |
 | `test_fake_backend_lifecycle.py` | 페이크 Backend 상태 기계 | 디바운스·상한·202 조건부 PENDING·409 판정·재전송 2회 후 FAILED — 시간만 바꿔가며 | 16 |
 | `test_recipient_profile.py` | `from_outcome`·`should_replace`·`cap_tags` | 행 변환·버전 규칙·상한 (v3 함수 2개는 skip) | 6 |

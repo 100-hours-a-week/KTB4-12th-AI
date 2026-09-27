@@ -14,6 +14,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import sqlalchemy as sa
@@ -67,6 +69,12 @@ _RUN_LATEST = sa.text(f"""
 _RUN_BY_KEY = sa.text(f"""
     select {_RUN_COLUMNS}
     from {RUNS_TABLE} where recipient_user_id = :rid and source_version = :sv""")
+
+
+def _lock_key(recipient_user_id: int, source_version: int) -> int:
+    """(수신자, 버전) → advisory lock 키. 부호 있는 64비트 범위로 접는다."""
+    key = ((recipient_user_id & 0xFFFFFFFF) << 32) | (source_version & 0xFFFFFFFF)
+    return key - (1 << 64) if key >= (1 << 63) else key
 
 
 def payload_hash(payload: dict[str, Any]) -> str:
@@ -138,6 +146,40 @@ class DbProfileRunStore:
         with self._engine.begin() as conn:
             row = conn.execute(_RUN_BY_KEY, {"rid": recipient_user_id, "sv": source_version}).mappings().first()
         return _to_outcome(row)
+
+    @contextmanager
+    def run_lock(self, recipient_user_id: int, source_version: int) -> Iterator[bool]:
+        """(수신자, 버전) 배타 잠금 — PostgreSQL advisory lock. 얻으면 True, 이미 누가 잡고 있으면 False.
+
+        세션 단위 잠금이라 **한 커넥션을 잠금이 풀릴 때까지 들고 있는다**. 그래서 판정부터 콜백까지가
+        한 잠금 안에 들어간다. 프로세스 밖에서도 통하므로 앱을 여러 개 띄워도 같은 키가 겹쳐 돌지 않는다.
+        기다리지 않는다(try) — 이미 누가 처리 중이면 이번 요청은 할 일이 없다.
+
+        DB 오류로 잠금을 시도조차 못 하면 **True 로 진행한다**: 잠금은 중복을 줄이는 장치이지
+        접수를 막는 장치가 아니다(최악이 분석 한 번 더).
+        """
+        key = _lock_key(recipient_user_id, source_version)
+        try:
+            conn = self._engine.connect()
+        except sa.exc.SQLAlchemyError:
+            log.exception("잠금용 커넥션 실패 recipient=%s source_version=%s — 잠금 없이 진행", recipient_user_id, source_version)
+            yield True
+            return
+        try:
+            got = bool(conn.execute(sa.text("select pg_try_advisory_lock(:k)"), {"k": key}).scalar_one())
+            if not got:
+                log.info("이미 처리 중 recipient=%s source_version=%s — 이번 접수는 건너뛴다", recipient_user_id, source_version)
+            try:
+                yield got
+            finally:
+                if got:
+                    conn.execute(sa.text("select pg_advisory_unlock(:k)"), {"k": key})
+                    conn.commit()
+        except sa.exc.SQLAlchemyError:
+            log.exception("잠금 처리 실패 recipient=%s source_version=%s", recipient_user_id, source_version)
+            raise
+        finally:
+            conn.close()
 
     # ---- 편의 (시험·운영) ---------------------------------------------------------
 

@@ -193,3 +193,35 @@ def test_app_end_to_end_with_db(engine, monkeypatch, alembic_head) -> None:
         DbProfileRunStore(engine).delete_recipient(rid)
         DbRecipientProfileStore(engine).delete(rid)
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------- 같은 키 동시 처리 막기
+
+
+def test_run_lock_is_exclusive_across_connections(engine) -> None:
+    """advisory lock 은 **커넥션(=프로세스) 밖에서도** 통해야 한다.
+
+    이게 없으면 같은 (수신자, 버전)이 동시에 들어올 때 둘 다 "기록 없음"을 보고 둘 다 분석한다.
+    Backend 는 같은 번호로 최대 2회 재전송하므로 실제로 겹칠 수 있다.
+    """
+    rid, sv = 991_001, 7
+    a, b = DbProfileRunStore(engine), DbProfileRunStore(engine)
+    with a.run_lock(rid, sv) as first:
+        assert first is True
+        with b.run_lock(rid, sv) as second:
+            assert second is False                    # 두 번째는 기다리지 않고 바로 포기한다
+        with b.run_lock(rid, sv + 1) as other_key:
+            assert other_key is True                  # 다른 키는 서로 막지 않는다
+    with b.run_lock(rid, sv) as after:
+        assert after is True                          # 풀리면 다시 잡힌다
+
+
+def test_run_lock_releases_on_exception(engine) -> None:
+    """작업이 예외로 끝나도 잠금이 남으면 그 수신자는 영영 막힌다."""
+    rid, sv = 991_002, 1
+    store = DbProfileRunStore(engine)
+    with pytest.raises(RuntimeError), store.run_lock(rid, sv) as got:
+        assert got is True
+        raise RuntimeError("작업 실패")
+    with store.run_lock(rid, sv) as again:
+        assert again is True

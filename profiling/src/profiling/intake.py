@@ -207,6 +207,32 @@ def _existing_run(store: ProfileRunStore, rq: ProfileRequest) -> ProfileOutcome 
         return None
 
 
+def dispatch(
+    rq: ProfileRequest, catalog: CatalogReader, store: ProfileRunStore, backend: BackendPort,
+    pool_size: int, recipient_store: RecipientProfileStore, stale_after_s: int,
+) -> None:
+    """**잠금 → 판정 → 실행**을 한 덩어리로. Supervisor 슬롯 안(응답 뒤)에서 돈다.
+
+    판정을 접수(HTTP) 쪽에 두면 "읽고 나서 쓰기까지" 사이가 벌어져, 같은 (수신자, 버전)이 동시에 오면
+    둘 다 "기록 없음"을 보고 둘 다 분석한다. Backend 는 같은 번호로 최대 2회 재전송하므로 실제로 겹칠 수 있다.
+    그래서 판정과 그 실행을 같은 잠금 안에 넣는다 — 잠금을 못 얻으면 다른 실행이 그 키를 처리 중이라는 뜻이니
+    이번 것은 할 일이 없다.
+    """
+    rid, sv = rq.recipient_user_id, rq.source_version
+    with store.run_lock(rid, sv) as got:
+        if not got:
+            return
+        existing = _existing_run(store, rq)
+        action, why = decide(existing, pipeline.input_hash(rq), stale_after_s=stale_after_s)
+        log.info("7.6 중복 판정 recipient=%s source_version=%s → %s (%s)", rid, sv, action, why)
+        if action == ANALYZE:
+            run_and_callback(rq, catalog, store, backend, pool_size, recipient_store)
+        elif action == RESEND and existing is not None:
+            if existing.status is RunStatus.SUPERSEDED:   # 정상 흐름에서는 나오기 어렵다 — Backend 가 더 새 버전을 이미 저장했다는 뜻
+                log.warning("7.7 재전송 대상이 SUPERSEDED recipient=%s source_version=%s — Backend 가 다시 409 를 줄 수 있다", rid, sv)
+            resend_callback(existing, backend, store)
+
+
 @router.post(
     EXTRACT_AND_POOL_PATH,
     status_code=202,
@@ -233,7 +259,7 @@ async def extract_and_pool(
       4) Supervisor에 제출 — 응답 뒤 슬롯 안에서 백그라운드 실행
       5) 202 — 요청 값 그대로 + PENDING
     같은 (수신자, 버전)의 중복 접수: Backend는 10분 PENDING 타임아웃 시 **같은 sourceVersion으로 최대 2회** 재전송한다(09-25 합의).
-    그래서 접수 단계에서 기존 실행 기록을 보고 갈라진다 — decide() 참고. 어느 쪽이든 응답은 202 PENDING이다
+    그 판정(decide)은 응답 뒤 슬롯 안에서 한다 — dispatch() 참고. 어느 쪽이든 응답은 202 PENDING이다
     (Backend 입장에서는 "접수됐다"가 전부이고, 결과는 7.7로 간다).
     """
     try:
@@ -250,16 +276,8 @@ async def extract_and_pool(
     log.info("7.6 접수 recipient=%s source_version=%s disliked=%d reviews=%d pref=%s",
              body.recipientUserId, body.sourceVersion, len(body.dislikedCategories), len(body.reviews), body.giftPreference is not None)
 
-    existing = _existing_run(store, rq)
-    action, why = decide(existing, pipeline.input_hash(rq), stale_after_s=settings.RUNNING_STALE_S)
-    log.info("7.6 중복 판정 recipient=%s source_version=%s → %s (%s)", body.recipientUserId, body.sourceVersion, action, why)
-    if action == ANALYZE:
-        supervisor.submit(bg, run_and_callback, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store)   # 슬롯 안에서 실행
-    elif action == RESEND:
-        if existing.status is RunStatus.SUPERSEDED:   # 정상 흐름에서는 나오기 어렵다 — Backend가 더 새 버전을 이미 저장했다는 뜻
-            log.warning("7.7 재전송 대상이 SUPERSEDED recipient=%s source_version=%s — Backend가 다시 409를 줄 수 있다",
-                        body.recipientUserId, body.sourceVersion)
-        supervisor.submit(bg, resend_callback, existing, backend, store)      # 재분석 없음 — 콜백만
+    # 중복 판정은 **슬롯 안에서** 한다(dispatch) — 판정과 실행 사이가 벌어지면 같은 요청이 동시에 와서 분석이 두 벌 돈다
+    supervisor.submit(bg, dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S)
 
     return SuccessResponse(
         message="프로파일 분석이 시작되었습니다.",

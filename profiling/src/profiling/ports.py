@@ -13,6 +13,7 @@ typing.Protocol 이라 상속이 필요 없다: 메서드 이름·인자·반환
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from typing import Protocol, runtime_checkable
 
 from profiling.schemas import ProductRecord
@@ -61,6 +62,18 @@ class ProfileRunStore(Protocol):
 
     def get(self, recipient_user_id: int) -> ProfileOutcome | None:
         """마지막으로 저장된 결과. 없으면 None. Chat이 대화 시작 시 읽는 것이 이것(6단계 1.2)."""
+        ...
+
+    def run_lock(self, recipient_user_id: int, source_version: int) -> AbstractContextManager[bool]:
+        """그 (수신자, 원본 버전)에 대한 **배타 잠금**. `with store.run_lock(rid, sv) as got:` 로 쓴다.
+
+        `got=False` 면 다른 실행이 이미 그 키를 처리하고 있다는 뜻이므로 아무것도 하지 않는다.
+        접수 판정(무엇을 할지 고르기)과 그 실행(분석·재전송)이 **한 잠금 안에서** 일어나야
+        같은 요청이 동시에 두 번 와도 분석이 두 벌 돌지 않는다.
+
+        구현은 프로세스 밖에서도 통하는 잠금이어야 한다(앱을 여러 개 띄울 수 있으므로) —
+        DbProfileRunStore 는 PostgreSQL advisory lock 을 쓴다.
+        """
         ...
 
     def get_run(self, recipient_user_id: int, source_version: int) -> ProfileOutcome | None:

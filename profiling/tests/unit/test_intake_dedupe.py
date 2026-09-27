@@ -5,6 +5,7 @@ DB도 앱도 띄우지 않는다: decide()는 순수 함수이고, 라우터는 
 """
 
 import asyncio
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -84,8 +85,9 @@ class FakeCatalog:
 
 
 class FakeStore:
-    def __init__(self, existing=None):
-        self.existing, self.saved = existing, []
+    def __init__(self, existing=None, lock_free=True):
+        self.existing, self.saved, self.lock_free = existing, [], lock_free
+        self.locked = []
 
     def save(self, outcome):
         self.saved.append(outcome)
@@ -95,6 +97,12 @@ class FakeStore:
 
     def get_run(self, rid, sv):
         return self.existing if (rid, sv) == (RID, SV) else None
+
+    @contextmanager
+    def run_lock(self, rid, sv):
+        """lock_free=False 면 "다른 실행이 처리 중"을 흉내 낸다."""
+        self.locked.append((rid, sv))
+        yield self.lock_free
 
 
 class FakeBackend:
@@ -120,61 +128,71 @@ class FakeSupervisor:
             fn(*args, **kwargs)
 
 
-def _post(existing) -> tuple[FakeSupervisor, FakeStore, FakeBackend]:
-    store, backend, sup = FakeStore(existing), FakeBackend(), FakeSupervisor()
+def _post(existing, monkeypatch, *, lock_free=True, store=None) -> tuple[list[str], FakeStore, FakeBackend]:
+    """7.6 한 번 보내고 → 슬롯에 올라간 작업을 실행한다. 실제로 **무엇이 돌았는지**를 목록으로 돌려준다.
+
+    분석·재전송 자체는 다른 시험이 덮으므로 여기서는 기록만 한다(판정이 관심사).
+    """
+    store = store or FakeStore(existing, lock_free=lock_free)
+    backend, sup, done = FakeBackend(), FakeSupervisor(), []
+    monkeypatch.setattr(intake, "run_and_callback", lambda *a, **k: done.append("analyze"))
+    monkeypatch.setattr(intake, "resend_callback", lambda outcome, *a, **k: done.append(("resend", outcome)))
+
     res = asyncio.run(intake.extract_and_pool(
         body=_body(), bg=BackgroundTasks(), catalog=FakeCatalog(), store=store, recipient_store=object(),
         backend=backend, supervisor=sup, settings=Settings(),
     ))
     assert res.data.profileStatus == "PENDING" and res.data.sourceVersion == SV   # 어느 경로든 응답은 같다
-    return sup, store, backend
-
-
-def test_first_request_runs_analysis() -> None:
-    sup, _, _ = _post(None)
-    assert [fn for fn, _, _ in sup.submitted] == [intake.run_and_callback]
-
-
-def test_running_is_not_analyzed_again() -> None:
-    """이미 분석 중이면 아무것도 제출하지 않는다 — Backend 재전송이 분석을 두 번 돌리지 못하게."""
-    sup, _, backend = _post(_outcome(RunStatus.RUNNING))
-    assert sup.submitted == []
+    assert [fn for fn, _, _ in sup.submitted] == [intake.dispatch]                # 접수는 판정하지 않는다
     sup.run()
-    assert backend.sent == []
+    return done, store, backend
 
 
-def test_existing_result_is_resent_without_reanalysis() -> None:
-    """결과가 있으면 재분석 없이 같은 본문을 다시 보낸다. 실행 기록에는 콜백 시도만 늘어난다."""
+def test_first_request_runs_analysis(monkeypatch) -> None:
+    done, store, _ = _post(None, monkeypatch)
+    assert done == ["analyze"] and store.locked == [(RID, SV)]      # 판정 전에 잠갔다
+
+
+def test_running_is_not_analyzed_again(monkeypatch) -> None:
+    """이미 분석 중이면 아무것도 하지 않는다 — Backend 재전송이 분석을 두 번 돌리지 못하게."""
+    done, _, backend = _post(_outcome(RunStatus.RUNNING), monkeypatch)
+    assert done == [] and backend.sent == []
+
+
+def test_existing_result_is_resent_without_reanalysis(monkeypatch) -> None:
     existing = _outcome(RunStatus.RESULT_READY)
-    sup, store, backend = _post(existing)
-    assert [fn for fn, _, _ in sup.submitted] == [intake.resend_callback]
-    sup.run()
-    assert len(backend.sent) == 1
-    assert backend.sent[0].search.product_ids == existing.search.product_ids       # 최초와 같은 30개
-    assert len(store.saved) == 1 and store.saved[0].callback_attempts == existing.callback_attempts + 1
-    assert store.saved[0].status is RunStatus.DELIVERED
+    done, _, _ = _post(existing, monkeypatch)
+    assert [k for k, *_ in done] == ["resend"]
+    assert done[0][1] is existing                                    # 저장된 그 결과를 그대로 보낸다
 
 
-def test_failed_run_is_analyzed_again() -> None:
-    sup, _, _ = _post(_outcome(RunStatus.FAILED, search=False))
-    assert [fn for fn, _, _ in sup.submitted] == [intake.run_and_callback]
+def test_failed_run_is_analyzed_again(monkeypatch) -> None:
+    done, _, _ = _post(_outcome(RunStatus.FAILED, search=False), monkeypatch)
+    assert done == ["analyze"]
 
 
-def test_same_version_different_body_is_analyzed_again() -> None:
-    sup, _, _ = _post(_outcome(RunStatus.DELIVERED, input_hash="b" * 64))
-    assert [fn for fn, _, _ in sup.submitted] == [intake.run_and_callback]
+def test_same_version_different_body_is_analyzed_again(monkeypatch) -> None:
+    done, _, _ = _post(_outcome(RunStatus.DELIVERED, input_hash="b" * 64), monkeypatch)
+    assert done == ["analyze"]
 
 
-def test_lookup_failure_does_not_block_intake() -> None:
+def test_lock_held_elsewhere_does_nothing(monkeypatch) -> None:
+    """같은 (수신자, 버전)을 다른 실행이 잡고 있으면 판정도 실행도 하지 않는다.
+
+    이 잠금이 없으면 동시에 들어온 두 요청이 둘 다 "기록 없음"을 보고 둘 다 분석한다.
+    """
+    done, store, backend = _post(None, monkeypatch, lock_free=False)
+    assert done == [] and backend.sent == [] and store.locked == [(RID, SV)]
+
+
+def test_lookup_failure_does_not_block_intake(monkeypatch) -> None:
     """중복 판정용 조회가 깨져도 접수는 계속된다 — 분석을 한 번 더 돌릴 뿐."""
     class BrokenStore(FakeStore):
         def get_run(self, rid, sv):
             raise RuntimeError("DB 끊김")
 
-    store, backend, sup = BrokenStore(), FakeBackend(), FakeSupervisor()
-    asyncio.run(intake.extract_and_pool(body=_body(), bg=BackgroundTasks(), catalog=FakeCatalog(), store=store,
-                                        recipient_store=object(), backend=backend, supervisor=sup, settings=Settings()))
-    assert [fn for fn, _, _ in sup.submitted] == [intake.run_and_callback]
+    done, _, _ = _post(None, monkeypatch, store=BrokenStore())
+    assert done == ["analyze"]
 
 
 def test_resend_records_callback_failure() -> None:
