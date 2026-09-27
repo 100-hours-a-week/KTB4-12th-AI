@@ -145,6 +145,19 @@ def test_profile_v1_happy_path() -> None:
     assert store.get(9073) is out                                              # 저장됨
 
 
+def test_profile_empty_pool_is_result_ready_with_empty_list(caplog) -> None:
+    """비선호로 전부 걸러져 0개여도 실패가 아니다 — 빈 배열을 7.7로 보낸다(Backend 인기순 대체). 경고 로그 한 줄."""
+    from profiling.backend import callback_body
+    store = FakeStore()
+    only_beauty = [_product(1, 100, "뷰티", views=5), _product(2, 100, "뷰티", views=3)]
+    with caplog.at_level("WARNING", logger="profiling.pipeline"):
+        out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(only_beauty), store=store,
+                               recipient_store=FakeRecipientStore(), pool_size=30)
+    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == []
+    assert callback_body(out).recommendedProductIds == []                       # 본문도 빈 배열 (스키마가 허용)
+    assert any("풀 0개" in rec.message for rec in caplog.records)
+
+
 def test_profile_overwrites_same_recipient() -> None:
     store = FakeStore(); cat = FakeCatalog(PRODUCTS)
     pipeline.profile(_rq(), catalog=cat, store=store, recipient_store=FakeRecipientStore())

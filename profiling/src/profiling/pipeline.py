@@ -163,6 +163,10 @@ def profile(
 
         # 3) 풀 30개
         search = build_pool(rq, products, pool_size, catalog_version_id)
+        if not search.product_ids:
+            # 0개도 성공이다 — 빈 배열을 7.7로 보낸다. Backend는 저장된 추천이 없으면 인기순으로 대체한다(BE PR4 fallback).
+            # 침묵(FAILED)하면 Backend 타임아웃 10분 × 재시도 뒤에야 인기순이 되므로 보내는 쪽이 빠르다. BE 확인 요청 8번.
+            log.warning("profile recipient=%s source_version=%s 풀 0개(비선호·재고로 전부 제외) — 빈 배열 콜백, Backend가 인기순 대체", rid, sv)
 
         # 4) 결과
         outcome = ProfileOutcome(
