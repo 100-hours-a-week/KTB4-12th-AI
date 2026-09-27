@@ -7,7 +7,7 @@
 
 app.state에 두는 것 (lifespan에서 1회 생성):
   catalog          CatalogReader        DbCatalogReader(ai_catalog) 또는 FileCatalogReader — CATALOG_SOURCE 설정
-  store            ProfileRunStore      DbProfileRunStore (ai_profile.profile_runs)
+  store            ProfileRunStore      DbProfileRunStore (ai_profile.profile_runs) — 시작 시 끊긴 RUNNING 정리
   recipient_store  RecipientProfileStore  DbRecipientProfileStore (ai_profile.recipient_profiles)
   backend          BackendPort          HttpBackendPort
   supervisor       Supervisor
@@ -68,6 +68,14 @@ async def lifespan(app: FastAPI):
     app.state.store = DbProfileRunStore(app.state.engine)
     app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
 
+    # 끊긴 실행 정리 — 프로세스가 죽으면 그 행은 RUNNING 인 채 남는다. 남겨 두면 중복 판정이 "이미 분석 중"으로
+    # 읽어 Backend 재전송을 계속 건너뛴다. 다른 인스턴스가 **지금 돌리고 있는** 행까지 건드리지 않도록
+    # RUNNING_STALE_S 보다 오래된 것만 FAILED 로 내린다(중복 판정의 기준과 같은 값).
+    stale = app.state.store.recover_stale_runs(settings.RUNNING_STALE_S)
+    if stale:
+        log.warning("끊긴 실행 %d건을 FAILED 로 정리했습니다 (%d초 넘게 RUNNING) — Backend 가 다시 보내면 새로 분석합니다",
+                    stale, settings.RUNNING_STALE_S)
+
     app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS)   # 3단계 §12.1 시작값 1
     app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S)
     log.info("profiling 시작 backend=%s pool_size=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE)
@@ -123,9 +131,14 @@ app.include_router(intake.router)
 
 
 def _error_response(status: int, code: str, message: str, trace_id: str | None = None) -> JSONResponse:
-    """문서 1 §3 오류 봉투 {message, error: {code, traceId}}. 모든 오류 응답은 이 함수만 거친다."""
+    """문서 1 §3 오류 봉투 {message, error: {code, traceId}}. 모든 오류 응답은 이 함수만 거친다.
+
+    503 에는 `Retry-After` 를 붙인다 — 활성 카탈로그는 사람이 적재해야 돌아오므로 Backend 가 곧바로 다시 보내면
+    의미 없는 요청만 쌓인다(그동안 sourceVersion 만 올라간다). 필드표 v1 §3.6 이 이 헤더를 전제로 쓰여 있다.
+    """
     body = ErrorResponse(message=message, error=ErrorBody(code=code, traceId=trace_id))
-    return JSONResponse(status_code=status, content=body.model_dump())
+    headers = {"Retry-After": str(get_settings().RETRY_AFTER_S)} if status == 503 else None
+    return JSONResponse(status_code=status, content=body.model_dump(), headers=headers)
 
 
 @app.exception_handler(RequestValidationError)
@@ -178,6 +191,8 @@ def _store_health(request: Request) -> dict:
     try:
         with engine.connect() as conn:
             version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
-        return {"backend": "db", "connected": True, "migration": version}
+        # 결과는 만들었는데 Backend 에 전달하지 못한 행. 늘어나면 콜백 경로에 문제가 있다는 뜻이라 운영이 바로 봐야 한다.
+        return {"backend": "db", "connected": True, "migration": version,
+                "undelivered": request.app.state.store.undelivered_count()}
     except sa.exc.SQLAlchemyError as e:      # 연결 끊김·테이블 없음 등 DB 쪽 오류만 — 그 외는 500으로 드러나야 한다
         return {"backend": "db", "connected": False, "reason": type(e).__name__}

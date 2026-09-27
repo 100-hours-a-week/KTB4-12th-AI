@@ -175,7 +175,9 @@ def test_app_end_to_end_with_db(engine, monkeypatch, alembic_head) -> None:
         with TestClient(app) as client:
             assert isinstance(app.state.store, DbProfileRunStore) and isinstance(app.state.recipient_store, DbRecipientProfileStore)
             health = client.get("/health").json()
-            assert health["store"] == {"backend": "db", "connected": True, "migration": alembic_head}
+            assert health["store"]["backend"] == "db" and health["store"]["connected"] is True
+            assert health["store"]["migration"] == alembic_head
+            assert isinstance(health["store"]["undelivered"], int)   # 결과는 있는데 못 보낸 행 수
 
             fake = RecordingBackend()
             app.state.backend = fake
@@ -225,3 +227,45 @@ def test_run_lock_releases_on_exception(engine) -> None:
         raise RuntimeError("작업 실패")
     with store.run_lock(rid, sv) as again:
         assert again is True
+
+
+# ---------------------------------------------------------------- 시작 시 정리 · 미전달 수
+
+
+def test_recover_stale_runs_only_touches_old_running(engine, stores) -> None:
+    """끊긴 실행만 FAILED 로. **지금 돌고 있는 것(신선한 RUNNING)은 건드리지 않는다** —
+    다른 인스턴스가 처리 중인 행을 죽이면 그 요청이 통째로 사라진다."""
+    runs, _ = stores
+    rid_old, rid_new = RID + 40, RID + 41
+    try:
+        for rid in (rid_old, rid_new):
+            runs.save(ProfileOutcome(recipient_user_id=rid, source_version=1, status=RunStatus.RUNNING, input_hash="h"))
+        with engine.begin() as c:   # 하나만 과거로 밀어 "끊긴 실행"을 만든다
+            c.execute(sa.text("update ai_profile.profile_runs set updated_at = now() - interval '1 hour' "
+                              "where recipient_user_id = :r"), {"r": rid_old})
+
+        assert runs.recover_stale_runs(300) == 1
+        assert runs.get(rid_old).status is RunStatus.FAILED
+        assert runs.get(rid_old).failure_reason and "시작 시 정리" in runs.get(rid_old).failure_reason
+        assert runs.get(rid_new).status is RunStatus.RUNNING      # 신선한 것은 그대로
+        assert runs.recover_stale_runs(300) == 0                  # 두 번째 호출은 할 일이 없다
+    finally:
+        for rid in (rid_old, rid_new):
+            runs.delete_recipient(rid)
+
+
+def test_undelivered_count_counts_result_ready(engine, stores) -> None:
+    """결과는 있는데 못 보낸 행(RESULT_READY)만 센다 — /health 가 이 숫자를 보여준다."""
+    runs, _ = stores
+    rid = RID + 42
+    search = SearchResult(product_ids=[1, 2], query_text="", catalog_version_id=FILE_CATALOG_VERSION_ID)
+    try:
+        before = runs.undelivered_count()
+        runs.save(ProfileOutcome(recipient_user_id=rid, source_version=1, status=RunStatus.RESULT_READY,
+                                 input_hash="h", search=search))
+        assert runs.undelivered_count() == before + 1
+        runs.save(ProfileOutcome(recipient_user_id=rid, source_version=1, status=RunStatus.DELIVERED,
+                                 input_hash="h", search=search, callback_attempts=1))
+        assert runs.undelivered_count() == before      # 전달되면 빠진다
+    finally:
+        runs.delete_recipient(rid)

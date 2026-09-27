@@ -181,6 +181,39 @@ class DbProfileRunStore:
         finally:
             conn.close()
 
+    # ---- 운영 -------------------------------------------------------------------
+
+    def recover_stale_runs(self, older_than_s: int) -> int:
+        """끊긴 실행(오래된 RUNNING)을 FAILED 로 내린다. 바꾼 행 수. 시작할 때 한 번 부른다.
+
+        프로세스가 죽으면 그 행은 RUNNING 인 채 남고, 중복 판정이 "이미 분석 중"으로 읽어 Backend 재전송을
+        계속 건너뛴다. **`older_than_s` 보다 오래된 것만** 건드린다 — 다른 인스턴스가 지금 돌리고 있는 행을
+        죽이지 않기 위해서다(그래서 중복 판정의 기준과 같은 값을 쓴다).
+
+        FAILED 로 두면 Backend 가 다시 보낼 때 새로 분석한다. AI 는 FAILED 를 콜백하지 않는다(침묵).
+        """
+        with self._engine.begin() as conn:
+            return conn.execute(sa.text(f"""
+                update {RUNS_TABLE}
+                   set status = 'FAILED',
+                       error = cast(:error as jsonb),
+                       updated_at = now()
+                 where status = 'RUNNING'
+                   and updated_at < now() - make_interval(secs => :secs)"""),
+                {"secs": older_than_s,
+                 "error": json.dumps({"code": ErrorCode.PIPELINE_ERROR.value,
+                                      "reason": "프로세스가 끝나 실행 기록만 남음 — 시작 시 정리"}, ensure_ascii=False)},
+            ).rowcount
+
+    def undelivered_count(self) -> int:
+        """결과는 있는데 Backend 에 전달하지 못한 행 수(RESULT_READY). /health 가 보여준다.
+
+        0 이 정상이다. 늘어나면 7.7 경로(네트워크·Backend 5xx)에 문제가 있다는 뜻이고, 그 행들은 Backend 가
+        같은 번호로 다시 보낼 때 재전송된다.
+        """
+        with self._engine.begin() as conn:
+            return conn.execute(sa.text(f"select count(*) from {RUNS_TABLE} where status = 'RESULT_READY'")).scalar_one()
+
     # ---- 편의 (시험·운영) ---------------------------------------------------------
 
     def delete_recipient(self, recipient_user_id: int) -> int:

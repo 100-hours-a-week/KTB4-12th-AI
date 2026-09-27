@@ -187,3 +187,32 @@ def test_same_version_resend_does_not_reanalyze(engine, cleanup) -> None:
     assert row["attempt"] == 1                       # 분석은 한 번만 돌았다
     assert row["callback_attempts"] == 2             # 콜백은 두 번
     assert row["status"] == "DELIVERED" and row["callback_hash"]
+
+
+def test_503_carries_retry_after_and_recovery_runs(engine, monkeypatch) -> None:
+    """활성 카탈로그가 없을 때 503 + `Retry-After` — 없으면 Backend 가 매 주기 곧바로 다시 보낸다(필드표 §3.6).
+
+    같은 기동에서 "끊긴 실행 정리"(시작 시 1회)도 돌았는지 함께 본다.
+    """
+    monkeypatch.setenv("PROFILING_CATALOG_SOURCE", "db")
+    get_settings.cache_clear()
+    with engine.begin() as c:
+        row = c.execute(sa.text("select id from ai_catalog.catalog_versions where is_active")).first()
+        if row is None:
+            pytest.skip("활성 카탈로그가 없음 — load_catalog.py 로 적재 후 실행")
+        c.execute(sa.text("update ai_catalog.catalog_versions set is_active = false where id = :v"), {"v": row[0]})
+    try:
+        from profiling.main import app
+        with TestClient(app) as client:
+            assert client.get("/health").json()["catalog"]["active"] is False
+            res = client.post("/api/internal/v1/ai/profile/extract-and-pool",
+                              json={"recipientUserId": RID, "sourceVersion": 31, "dislikedCategories": [],
+                                    "giftPreference": None, "reviews": []})
+            assert res.status_code == 503
+            assert res.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+            assert res.headers["Retry-After"] == str(get_settings().RETRY_AFTER_S)
+    finally:
+        with engine.begin() as c:
+            c.execute(sa.text("update ai_catalog.catalog_versions set is_active = true where id = :v"), {"v": row[0]})
+        monkeypatch.undo()
+        get_settings.cache_clear()

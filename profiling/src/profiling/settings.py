@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     )
 
     # ---- 운영
+    RETRY_AFTER_S: int = Field(
+        default=300, ge=1,
+        description="503(활성 카탈로그 없음) 응답에 실어 보내는 Retry-After 초. Backend 가 언제 다시 보낼지 정하는 근거 "
+                    "(BE_연동_필드표 v1 §3.6). 없으면 Backend 가 매 주기 곧바로 다시 보낸다",
+    )
     LOG_LEVEL: str = Field(default="INFO", description="logging 레벨 이름")
 
 
