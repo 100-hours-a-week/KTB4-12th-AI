@@ -24,6 +24,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | 폴더 · 파일 | 내용 |
 |---|---|
 | `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · **Backend 생애주기 흉내**(`lifecycle.py` — 디바운스→7.6→202→실패·타임아웃 시 같은 번호 재시도 2회(`Retry-After`·백오프)→FAILED) |
+| `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버** `drive.py` — 로그인 → 비선호 저장 → 7.6 관찰 → 대분류 제외 검증 → (옵션) AI 다운 시 BE 재시도 관찰. 절차는 `docs/BE_연동_시험_결과_2026-09-27.md` §7 |
 | `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
 | `tools/catalog/load_catalog.py` | Backend 전달 패키지 → `ai_catalog` 적재 · 회신 반영(`--id-map` · `--metrics`) |
 | `tools/catalog/import_be_ids.py` | Backend 회신 xlsx 2종 → id-map · metrics jsonl (이름으로 매칭, 1:1 보장). 결과는 `tools/catalog/returned/날짜/` |
@@ -36,6 +37,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | `Dockerfile` · `.dockerignore` | 앱 이미지 — python 3.12-slim + uv(`uv.lock` 그대로) · 비루트(uid 10001) · 시험·문서는 넣지 않는다 |
 | [docs/코드_안내서.md](docs/코드_안내서.md) | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
 | [docs/FE_연동_시험_시나리오.md](docs/FE_연동_시험_시나리오.md) | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
+| [docs/BE_연동_시험_결과_2026-09-27.md](docs/BE_연동_시험_결과_2026-09-27.md) | **BE `develop` 실물 연동 시험** — 7.6·202·대분류 제외 정상, 7.7은 PR3 전이라 401, AI 다운 시 새 번호 반복·PENDING 고착 실측. §7 재현 절차 |
 | [docs/FE_연동_시험_결과_2026-09-25.md](docs/FE_연동_시험_결과_2026-09-25.md) | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
 | [docs/시퀀스_전체.md](docs/시퀀스_전체.md) | **구현된 프로파일링 전체 시퀀스** — 기동 · 성공 전체 · 접수 거절 · 분석 실패(침묵) · 콜백 4갈래 · 슬롯 (그림 6장) |
 | [docs/DB_ERD.md](docs/DB_ERD.md) | **AI가 소유한 표 구조(ERD)** — `ai_profile` 2표 · `ai_catalog` 3표 · 키·인덱스·제약 · FK인 것과 아닌 것 · 바깥 ID 대응 (그림 2장) |
