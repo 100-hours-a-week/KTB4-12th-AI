@@ -1,13 +1,13 @@
 # AI DB 표 구조 (ERD) — 2026-09-25
 
-AI가 **소유한** 표가 무엇이고 서로 어떻게 이어지는지. 정본은 `alembic/versions/`의 마이그레이션 세 개이고, 이 문서는 그것을 그림과 표로 옮긴 것이다. 코드가 이 표를 어떻게 쓰는지는 [DB_전환_설명.md](DB_전환_설명.md)와 [시퀀스_전체.md](시퀀스_전체.md)에 있다.
+AI가 **소유한** 표가 무엇이고 서로 어떻게 이어지는지. 정본은 `alembic/versions/`의 마이그레이션 네 개이고, 이 문서는 그것을 그림과 표로 옮긴 것이다. 코드가 이 표를 어떻게 쓰는지는 [DB_전환_설명.md](DB_전환_설명.md)와 [시퀀스_전체.md](시퀀스_전체.md)에 있다.
 
 | | |
 |---|---|
 | DB | PostgreSQL 16 + pgvector (`pgvector/pgvector:pg16`) · 데이터베이스 `ai_chat` · 계정 `ai_user` |
 | 스키마 | `ai_profile`(프로파일링 2표) · `ai_catalog`(카탈로그 3표) · `ai_search`(팀원 검색기 1표, §7) |
-| 마이그레이션 | `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog 3표 — `uv run alembic upgrade head` |
-| 행 수 | 2026-09-25 확인: 상품 4,231(Backend 번호·재고·조회수 전건 채움) · 카테고리 67(대분류 10·소분류 57) · 활성 카탈로그 버전 1. `ai_profile` 두 표는 로컬 시험 행뿐 |
+| 마이그레이션 | `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog 3표 · `0004` profile_runs 열 주석 정정(동작 변경 없음) — `uv run alembic upgrade head` |
+| 행 수 | 2026-09-25 확인: 상품 4,231(Backend 번호·재고·조회수 전건 채움) · 카테고리 67(대분류 10·소분류 57) · 활성 카탈로그 버전 1. `ai_profile` 두 표는 로컬 시험 행뿐(옛 파일-카탈로그 행 14건 — 삭제 대기, [문서_목록 §4 ⑤](문서_목록.md)) |
 | 절 | 1 한눈에 · 2 `ai_profile` · 3 `ai_catalog` · 4 관계(FK와 FK 아닌 것) · 5 키·인덱스·제약 · 6 바깥 ID 대응 · 7 팀원 표 · 8 아직 없는 것 |
 
 그림은 `docs/assets/erd/`. 이 문서의 mermaid를 고치면 `python3 assets/build_be_sequences.py`를 다시 돌린다 — 그림과 본문이 한 소스다.
@@ -48,8 +48,8 @@ erDiagram
     text callback_hash
     int callback_attempts
     jsonb error "실패 사유"
-    timestamptz created_at
-    timestamptz updated_at
+    timestamptz created_at "접수 시각"
+    timestamptz updated_at "저장마다 now() · 끊긴 RUNNING 판정 기준"
   }
   "ai_catalog.catalog_versions" {
     uuid id PK "SearchResult.catalog_version_id"
@@ -67,13 +67,13 @@ erDiagram
     text name
     smallint level "1 대분류 · 2 소분류"
     int product_count
-    bigint backend_category_id UK "Backend 발급 · 아직 NULL"
+    bigint backend_category_id UK "Backend 발급 · 67/67 채움"
     text taxonomy_version
     timestamptz updated_at
   }
   "ai_catalog.products" {
     text source_product_id PK "KAKAO_GIFT:10002797"
-    bigint backend_product_id UK "Backend 발급 · 아직 NULL"
+    bigint backend_product_id UK "Backend 발급 · 4,231/4,231 채움"
     text name
     text brand
     text source_category_id FK "소분류만"
@@ -86,7 +86,7 @@ erDiagram
     text currency "KRW"
     int stock_quantity "전건 NULL"
     text availability "available·unavailable·unknown"
-    int view_count "전건 NULL"
+    int view_count "전건 채움(09-25) · v1 정렬 키"
     text source_provider
     text source_product_url
     text source_image_url
@@ -137,7 +137,8 @@ erDiagram
 | `callback_hash` | text | NULL | | 위 본문의 sha256 — 재전송이 같은 결과인지 확인 |
 | `callback_attempts` | integer | NOT NULL | `0` | 콜백 시도 횟수 |
 | `error` | jsonb | NULL | | `{code, reason}`. 실패가 아니면 NULL |
-| `created_at` / `updated_at` | timestamptz | NOT NULL | `now()` | |
+| `created_at` | timestamptz | NOT NULL | `now()` | 접수 시각 |
+| `updated_at` | timestamptz | NOT NULL | `now()` | **저장할 때마다 `now()`**. 두 곳이 이 값을 기준으로 삼는다 — (1) 접수 단계 중복 판정: `RUNNING` 행이 `RUNNING_STALE_S`(300초)보다 오래됐으면 끊긴 실행으로 보고 새로 분석한다 (2) 시작 시 정리 `recover_stale_runs`: 같은 기준으로 `FAILED`로 내린다 |
 
 **DB가 지키는 순서 규칙이 하나 있다.** `ck_profile_runs_result_has_payload` — 상태가 `RESULT_READY`·`DELIVERED`·`SUPERSEDED`면 `callback_payload`와 `callback_hash`가 **반드시 있어야 한다**. "보낼 내용 없이 보냈다고 기록된 행"을 만들 수 없다.
 
@@ -149,7 +150,7 @@ stateDiagram-v2
   direction LR
   [*] --> RUNNING : 7.6 접수
   RUNNING --> RESULT_READY : 풀 30개 + 콜백 본문 커밋
-  RUNNING --> FAILED : 카탈로그 없음·저장 실패·업무 오류
+  RUNNING --> FAILED : 카탈로그 없음·저장 실패·업무 오류·시작 시 정리(끊긴 RUNNING)
   RESULT_READY --> DELIVERED : 200
   RESULT_READY --> SUPERSEDED : 409
   RESULT_READY --> FAILED : 4xx
@@ -197,6 +198,7 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 | `product_count` | integer | NOT NULL | 패키지가 선언한 수 |
 | `backend_category_id` | bigint **UNIQUE** | NULL | Backend `categories.id`. **67/67 채움 (09-25 회신)** — 7.6 `dislikedCategories[].categoryId`가 이 값 |
 | `taxonomy_version` | text | NOT NULL | |
+| `updated_at` | timestamptz | NOT NULL `now()` | 적재·회신(`--id-map`)으로 행이 바뀐 시각 |
 
 두 CHECK가 계층을 강제한다 — `level IN (1,2)`, 그리고 `(level = 1) = (parent IS NULL)`(대분류는 부모가 없고 소분류는 반드시 있다).
 
@@ -219,6 +221,7 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 | `source_provider` · `source_product_url` · `source_image_url` | text | NOT NULL | |
 | `image_asset_id` | text | NULL | 변환 이미지 3종 키 |
 | `package_id` | text | NOT NULL | 어느 적재분인지 |
+| `updated_at` | timestamptz | NOT NULL `now()` | 적재·회신(`--id-map`·`--metrics`)으로 행이 바뀐 시각. `DbCatalogReader`가 `ProductRecord.updatedAt`으로 내보낸다 |
 
 **재적재해도 덮지 않는 열이 셋 있다** — `backend_product_id` · `availability` · `view_count`. 각각 Backend 회신(`--id-map` · `--metrics`)이 채우는 자리이므로, 패키지를 다시 넣어도 UPSERT가 건드리지 않는다.
 
@@ -242,7 +245,7 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 | `profile_runs.recipient_user_id → recipient_profiles.recipient_user_id` | 둘 다 **Backend의 사용자 번호**를 그대로 쓴다. 실행은 남았는데 프로필이 아직 없을 수 있어(FAILED) 부모–자식 관계가 아니다 |
 | `*.backend_*_id → Backend` | 다른 DB다. 대조는 `tools/catalog/fetch_export.py --compare-db` |
 
-> **문서와 다른 곳 하나.** `0002`의 `catalog_version_id` 열 주석이 아직 `ai_search.catalog_versions.id`라고 되어 있다. 실제 들어가는 값은 `ai_catalog.catalog_versions.id`(또는 파일 카탈로그의 고정 UUID)다. 동작에는 영향이 없지만 주석은 고쳐야 한다.
+> `0002`의 `catalog_version_id` 열 주석은 `ai_search.catalog_versions.id`라고 되어 있었다 — `0004`가 `ai_catalog.catalog_versions.id`로 고쳤다(동작 변경 없음).
 
 ---
 
@@ -286,9 +289,8 @@ Backend 전달 패키지(`product-catalog-20260922-v1`)를 `tools/catalog/load_c
 
 | 무엇 | 언제 | 어디 |
 |---|---|---|
-| `recipient_profiles`에 `profile_run_id`(FK) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` | v3 — 설계서 §1.7의 나머지 열 | 새 마이그레이션 `0004` |
+| `recipient_profiles`에 `profile_run_id`(FK) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` | v3 — 설계서 §1.7의 나머지 열 | 새 마이그레이션 `0005` |
 | 임베딩 표 (pgvector) | v2·v3 | `vector` 확장은 `0001`에서 이미 켜 두었다 |
-| `backend_*_id` 채우기 | Backend 회신 즉시 | `load_catalog --id-map` (코드는 이미 있다) |
-| `availability`·`view_count` 채우기 | Backend 7.9 export | `tools/catalog/fetch_export.py` |
+| `backend_*_id`·`availability`·`view_count` **다시** 채우기 | 다음 Backend 회신 때 | 09-25 회신은 반영 끝(xlsx → `--id-map`·`--metrics`). 7.9 export 자동 경로 `tools/catalog/fetch_export.py`는 아직 안 씀 |
 
-마이그레이션 번호는 `0003`까지 썼다. **v3 마이그레이션은 `0004`다** — `0003`은 카탈로그가 쓰고 있다.
+마이그레이션 번호는 `0004`까지 썼다. **v3 마이그레이션은 `0005`다** — `0003`은 카탈로그, `0004`는 열 주석 정정이 쓰고 있다.

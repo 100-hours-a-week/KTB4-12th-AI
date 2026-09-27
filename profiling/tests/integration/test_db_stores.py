@@ -285,3 +285,16 @@ def test_run_lock_does_not_leave_transaction_open(engine) -> None:
                 "select count(*) from pg_stat_activity "
                 "where state = 'idle in transaction' and query like '%pg_try_advisory_lock%'")).scalar_one()
     assert open_tx == 0
+
+
+def test_profile_runs_column_comments_match_0004(engine) -> None:
+    """0004 — 열 주석이 실제 값(ai_catalog)과 updated_at 의 역할을 말하는지. 09-27 점검에서 한 번 어긋났던 것이라 잠근다."""
+    with engine.connect() as c:
+        comments = dict(c.execute(sa.text("""
+            select column_name, col_description('ai_profile.profile_runs'::regclass, ordinal_position)
+            from information_schema.columns
+            where table_schema = 'ai_profile' and table_name = 'profile_runs'
+              and column_name in ('catalog_version_id', 'updated_at')""")).all())
+    assert "ai_catalog.catalog_versions.id" in comments["catalog_version_id"]
+    assert "ai_search" not in comments["catalog_version_id"]
+    assert "RUNNING_STALE_S" in comments["updated_at"]
