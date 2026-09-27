@@ -34,18 +34,20 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | `alembic/versions/` | `0001` recipient_profiles(수신자 프로필) · `0002` profile_runs(실행 기록) · `0003` ai_catalog(상품·카테고리·적재 버전) |
 | `docker-compose.yml` | `ai-db`(pgvector/pg16 · `ai_chat` · 5432) · `ai-migrate`(alembic 한 번) · `ai-app`(:8000) |
 | `Dockerfile` · `.dockerignore` | 앱 이미지 — python 3.12-slim + uv(`uv.lock` 그대로) · 비루트(uid 10001) · 시험·문서는 넣지 않는다 |
-| `docs/코드_안내서.md` | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
-| `docs/FE_연동_시험_시나리오.md` | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
-| `docs/FE_연동_시험_결과_2026-09-25.md` | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
-| `docs/시퀀스_전체.md` | **구현된 프로파일링 전체 시퀀스** — 기동 · 성공 전체 · 접수 거절 · 분석 실패(침묵) · 콜백 4갈래 · 슬롯 (그림 6장) |
-| `docs/DB_ERD.md` | **AI가 소유한 표 구조(ERD)** — `ai_profile` 2표 · `ai_catalog` 3표 · 키·인덱스·제약 · FK인 것과 아닌 것 · 바깥 ID 대응 (그림 2장) |
-| `docs/DB_전환_설명.md` | 메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림) |
-| `docs/BE_전달_2026-09-27.md` | **BE 담당자 전달본** — 이 한 장으로 연동 구현 가능 (필드·상태·재전송·트랜잭션·확인 요청) |
-| `docs/BE_연동_필드표.md` | BE 전달본 색인 — v1(7.6 세 필드 · 7.7 · `profileStatus` 생애주기 · 시퀀스 5장) · v2(7.9 export) · v3(취향·리뷰) |
-| `docs/파이프라인_지도/` | 날짜별 갱신 기록 — 그림 스냅샷 · 단계별 함수 · 바뀐 것 · **다음 해야 할 일(인수인계)**. 규칙은 그 폴더 README |
-| `docs/환경_설정.md` | uv · Python 3.12 · 의존성 규칙 |
+| [docs/코드_안내서.md](docs/코드_안내서.md) | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
+| [docs/FE_연동_시험_시나리오.md](docs/FE_연동_시험_시나리오.md) | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
+| [docs/FE_연동_시험_결과_2026-09-25.md](docs/FE_연동_시험_결과_2026-09-25.md) | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
+| [docs/시퀀스_전체.md](docs/시퀀스_전체.md) | **구현된 프로파일링 전체 시퀀스** — 기동 · 성공 전체 · 접수 거절 · 분석 실패(침묵) · 콜백 4갈래 · 슬롯 (그림 6장) |
+| [docs/DB_ERD.md](docs/DB_ERD.md) | **AI가 소유한 표 구조(ERD)** — `ai_profile` 2표 · `ai_catalog` 3표 · 키·인덱스·제약 · FK인 것과 아닌 것 · 바깥 ID 대응 (그림 2장) |
+| [docs/DB_전환_설명.md](docs/DB_전환_설명.md) | 메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림) |
+| [docs/BE_전달_2026-09-27.md](docs/BE_전달_2026-09-27.md) | **BE 담당자 전달본** — 이 한 장으로 연동 구현 가능 (필드·상태·재전송·트랜잭션·확인 요청) |
+| [docs/BE_연동_필드표.md](docs/BE_연동_필드표.md) | BE 전달본 색인 — v1(7.6 세 필드 · 7.7 · `profileStatus` 생애주기 · 시퀀스 5장) · v2(7.9 export) · v3(취향·리뷰) |
+| [docs/파이프라인_지도/](docs/파이프라인_지도/README.md) | 날짜별 갱신 기록 — 그림 스냅샷 · 단계별 함수 · 바뀐 것 · **다음 해야 할 일(인수인계)**. 규칙은 그 폴더 README |
+| [docs/문서_목록.md](docs/문서_목록.md) | **문서 검토 트리 + 최신성** — README 에서 링크로 닿는 순서(스크립트가 만듦)와 문서마다 코드와 맞는지 |
+| [docs/issues/](docs/issues/README.md) | 발견한 문제 기록 — 발견 시각별 폴더(문서 + 그림). 이슈·트러블슈팅으로 그대로 옮긴다 |
+| [docs/환경_설정.md](docs/환경_설정.md) | uv · Python 3.12 · 의존성 규칙 |
 | `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 9장) · `seq/`(전체 시퀀스 6장) · `erd/`(DB 표 구조 2장). 각각 `build_*.py`가 만든다 |
-| `이름_대조표.md` | 같은 뜻 · 다른 이름 정리 (camelCase ↔ snake_case) |
+| [이름_대조표.md](이름_대조표.md) | 같은 뜻 · 다른 이름 정리 (camelCase ↔ snake_case) |
 
 
 ### 이름 규칙
@@ -202,7 +204,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 5. 다음 순서와 건드리는 곳
 
-인수인계용 전체 목록은 [docs/파이프라인_지도/2026-09-23.md §5](docs/파이프라인_지도/2026-09-23.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 여기는 요약이다.
+인수인계용 전체 목록은 [docs/파이프라인_지도/2026-09-25.md §5](docs/파이프라인_지도/2026-09-25.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 여기는 요약이다.
 
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
