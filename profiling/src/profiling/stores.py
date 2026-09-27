@@ -72,9 +72,13 @@ _RUN_BY_KEY = sa.text(f"""
 
 
 def _lock_key(recipient_user_id: int, source_version: int) -> int:
-    """(수신자, 버전) → advisory lock 키. 부호 있는 64비트 범위로 접는다."""
-    key = ((recipient_user_id & 0xFFFFFFFF) << 32) | (source_version & 0xFFFFFFFF)
-    return key - (1 << 64) if key >= (1 << 63) else key
+    """(수신자, 버전) → advisory lock 키. 두 값을 이어 sha256 한 앞 8바이트를 부호 있는 64비트로.
+
+    두 값을 32비트씩 나눠 담으면 수신자 ID 가 2^32 를 넘는 순간 서로 다른 수신자가 같은 키를 받는다
+    (recipient_user_id 는 BIGINT 다). 해시는 어느 쪽이 커져도 그런 가정이 없다.
+    """
+    digest = hashlib.sha256(f"{recipient_user_id}:{source_version}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
 
 
 def payload_hash(payload: dict[str, Any]) -> str:
@@ -151,34 +155,43 @@ class DbProfileRunStore:
     def run_lock(self, recipient_user_id: int, source_version: int) -> Iterator[bool]:
         """(수신자, 버전) 배타 잠금 — PostgreSQL advisory lock. 얻으면 True, 이미 누가 잡고 있으면 False.
 
-        세션 단위 잠금이라 **한 커넥션을 잠금이 풀릴 때까지 들고 있는다**. 그래서 판정부터 콜백까지가
-        한 잠금 안에 들어간다. 프로세스 밖에서도 통하므로 앱을 여러 개 띄워도 같은 키가 겹쳐 돌지 않는다.
-        기다리지 않는다(try) — 이미 누가 처리 중이면 이번 요청은 할 일이 없다.
+        **세션 단위** 잠금(`pg_try_advisory_lock`)이라 커넥션 하나를 잠금이 풀릴 때까지 들고 있는다. 그래서
+        판정부터 콜백까지가 한 잠금 안에 들어가고, 프로세스 밖에서도 통하므로 앱을 여러 개 띄워도 같은 키가 겹쳐
+        돌지 않는다. 기다리지 않는다(try) — 이미 누가 처리 중이면 이번 요청은 할 일이 없다.
 
-        DB 오류로 잠금을 시도조차 못 하면 **True 로 진행한다**: 잠금은 중복을 줄이는 장치이지
-        접수를 막는 장치가 아니다(최악이 분석 한 번 더).
+        세 가지 규칙이 있다 (2026-09-27 이슈 A·C 에서 나온 것):
+          - 잠금을 얻은 **직후 커밋**한다. SQLAlchemy 가 첫 질의에 트랜잭션을 자동으로 여는데, 닫지 않으면 작업 내내
+            `idle in transaction` 으로 남아 VACUUM 을 막고 세션 타임아웃에 끊길 수 있다(끊기면 잠금도 사라진다).
+            세션 잠금은 트랜잭션과 무관해 커밋해도 유지된다.
+          - 잠금을 **못 걸면 진행한다** — 커넥션이든 질의든. 잠금은 중복을 줄이는 장치이지 접수를 막는 장치가
+            아니다(최악이 분석 한 번 더).
+          - 해제에 실패한 커넥션은 **버린다**(invalidate). 풀에 돌려보내면 세션 잠금이 살아 있어 그 키가 영영 막힌다.
         """
         key = _lock_key(recipient_user_id, source_version)
+        conn = None
         try:
             conn = self._engine.connect()
+            got = bool(conn.execute(sa.text("select pg_try_advisory_lock(:k)"), {"k": key}).scalar_one())
+            conn.commit()                              # 자동으로 열린 트랜잭션을 여기서 끝낸다 — 잠금은 남는다
         except sa.exc.SQLAlchemyError:
-            log.exception("잠금용 커넥션 실패 recipient=%s source_version=%s — 잠금 없이 진행", recipient_user_id, source_version)
+            log.exception("잠금을 걸지 못함 recipient=%s source_version=%s — 잠금 없이 진행", recipient_user_id, source_version)
+            if conn is not None:
+                conn.close()
             yield True
             return
+
         try:
-            got = bool(conn.execute(sa.text("select pg_try_advisory_lock(:k)"), {"k": key}).scalar_one())
             if not got:
                 log.info("이미 처리 중 recipient=%s source_version=%s — 이번 접수는 건너뛴다", recipient_user_id, source_version)
-            try:
-                yield got
-            finally:
-                if got:
+            yield got
+        finally:
+            if got:
+                try:
                     conn.execute(sa.text("select pg_advisory_unlock(:k)"), {"k": key})
                     conn.commit()
-        except sa.exc.SQLAlchemyError:
-            log.exception("잠금 처리 실패 recipient=%s source_version=%s", recipient_user_id, source_version)
-            raise
-        finally:
+                except sa.exc.SQLAlchemyError:
+                    log.exception("잠금 해제 실패 recipient=%s source_version=%s — 이 커넥션을 버린다", recipient_user_id, source_version)
+                    conn.invalidate()
             conn.close()
 
     # ---- 운영 -------------------------------------------------------------------

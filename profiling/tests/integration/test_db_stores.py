@@ -269,3 +269,19 @@ def test_undelivered_count_counts_result_ready(engine, stores) -> None:
         assert runs.undelivered_count() == before      # 전달되면 빠진다
     finally:
         runs.delete_recipient(rid)
+
+
+def test_run_lock_does_not_leave_transaction_open(engine) -> None:
+    """이슈 2026-09-27_1633 A — 잠금을 든 커넥션이 작업 내내 `idle in transaction` 이면 안 된다.
+
+    v3(긴 작업)에서 VACUUM 을 막고, idle_in_transaction_session_timeout 에 세션이 끊기면 잠금도 사라져
+    이 잠금이 막으려던 중복 분석이 난다. 고치기 전에는 이 질의가 1 을 돌려줬다.
+    """
+    store = DbProfileRunStore(engine)
+    with store.run_lock(991_003, 1) as got:
+        assert got is True
+        with engine.connect() as c:
+            open_tx = c.execute(sa.text(
+                "select count(*) from pg_stat_activity "
+                "where state = 'idle in transaction' and query like '%pg_try_advisory_lock%'")).scalar_one()
+    assert open_tx == 0
