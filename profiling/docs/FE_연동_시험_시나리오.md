@@ -60,8 +60,8 @@ PROFILING_CATALOG_SOURCE=db PROFILING_BACKEND_BASE_URL=http://localhost:8081 \
 |---|---|
 | FE 대응 | 화면이 깨지지 않고 이전 결과 유지 |
 | 조작 | `update ai_catalog.catalog_versions set is_active=false` → 비선호 변경 |
-| 기대 | 7.6 → **503**, 상태 **그대로**(오류는 상태를 바꾸지 않는다) · 카탈로그 되살리면 다음 주기에 COMPLETED |
-| 확인 | AI `/health` → `catalog.active=false` · BE 이벤트에 `7.6 신규 → 503` |
+| 기대 | 7.6 → **503**, 상태 **그대로** · BE는 `Retry-After` 뒤 **같은 번호**로 재시도(`retryCount` 1) · 카탈로그를 되살려 두면 그 재시도가 202 → COMPLETED. 로컬은 AI `.env`에 `PROFILING_RETRY_AFTER_S=5` |
+| 확인 | AI `/health` → `catalog.active=false` · BE 이벤트에 `7.6 신규 → 503`(retryAfter 5) 다음 `7.6 재시도1 → 202` · `sourceVersion` 그대로 |
 
 ### S5 · 콜백 유실 → 같은 번호 재전송 (09-25 합의의 핵심)
 
@@ -69,8 +69,8 @@ PROFILING_CATALOG_SOURCE=db PROFILING_BACKEND_BASE_URL=http://localhost:8081 \
 |---|---|
 | FE 대응 | 잠깐 반영이 늦을 뿐, 사용자가 다시 손대지 않아도 결국 반영됨 |
 | 조작 | `PUT /console/mode {"mode":"500"}` → 비선호 변경 → 첫 7.7이 5xx로 실패 → 타임아웃 뒤 재전송 → `mode=ok` 로 복구 |
-| 기대 | BE `retryCount` 1 → (필요시 2) · **AI는 재분석하지 않고 저장된 결과를 재전송** · 최종 COMPLETED |
-| 확인 | AI 로그 `중복 판정 … → resend` · `profile_runs.attempt=1`, `callback_attempts≥2` |
+| 기대 | AI가 먼저 같은 슬롯에서 0.5초·2초 뒤 두 번 더 보내고(3회) 그래도 5xx면 보관 · BE `retryCount` 1 → (필요시 2) · **BE 재시도 때 AI는 재분석하지 않고 저장된 결과를 재전송** · 최종 COMPLETED |
+| 확인 | AI 로그 `7.7 미전달 … 다시 보낸다 (2/3)` · `중복 판정 … → resend` · `profile_runs.attempt=1`, `callback_attempts ≥ 4`(즉시 3회 + 재전송) |
 
 ### S6 · 재시도 소진 → FAILED
 
@@ -78,7 +78,7 @@ PROFILING_CATALOG_SOURCE=db PROFILING_BACKEND_BASE_URL=http://localhost:8081 \
 |---|---|
 | FE 대응 | 이전 결과가 있으면 그것, 없으면 대체 정렬. "분석 실패"는 사용자에게 보이지 않아도 된다 |
 | 조작 | `mode=500` 을 유지한 채 비선호 변경 |
-| 기대 | 재전송 2회를 다 쓰고 `profileStatus=FAILED` · **AI는 FAILED를 보내지 않는다**(BE 판정) |
+| 기대 | 같은 번호 재시도 2회를 다 쓰고 `profileStatus=FAILED` · **AI는 FAILED를 보내지 않는다**(BE 판정) |
 
 ### S7 · 순서 역전 → 409
 
