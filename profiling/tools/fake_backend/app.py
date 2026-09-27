@@ -83,6 +83,7 @@ _policy = lc.Policy(
     window_s=float(os.environ.get("FAKE_BACKEND_WINDOW_S", "30")),
     pending_timeout_s=float(os.environ.get("FAKE_BACKEND_PENDING_TIMEOUT_S", "10")),
     max_retry=int(os.environ.get("FAKE_BACKEND_MAX_RETRY", "2")),
+    backoff_s=float(os.environ.get("FAKE_BACKEND_BACKOFF_S", "2")),
 )
 TICK_S = float(os.environ.get("FAKE_BACKEND_TICK_S", "1"))
 _events: list[dict] = []          # 무슨 일이 언제 일어났는지 — 시나리오 확인용
@@ -264,9 +265,21 @@ def console_send_extract(body: Annotated[dict, Body()], auto_source_version: boo
 # ---------------------------------------------------------------------------
 
 
+def _retry_after_s(res: httpx.Response) -> float | None:
+    """503 의 `Retry-After`(초). 없거나 해석할 수 없으면 None → 기본 백오프 (BE 5-1)."""
+    raw = res.headers.get("Retry-After")
+    try:
+        return float(raw) if raw is not None else None
+    except ValueError:
+        return None
+
+
 def _send_7_6(r: lc.Recipient, version: int, kind: str) -> None:
-    """7.6 을 실제로 보내고 202 면 생애주기에 반영한다. 오류 응답은 상태를 바꾸지 않는다(§3.3)."""
-    changed_at_when_sent = r.last_changed_at          # 보내기 직전 값을 기억 (§3.4 ②)
+    """7.6 을 실제로 보내고 202 면 생애주기에 반영한다. 오류 응답은 상태를 바꾸지 않고 **다음 재시도 시각만** 잡는다(BE 5-1).
+
+    번호는 호출자가 start_new/start_retry 로 이미 정했다. 실패해도 번호는 그대로 — 같은 번호로 다시 보낸다.
+    """
+    changed_at_when_sent = r.last_changed_at          # 보내기 직전 값을 기억 (§3.4 ②) — start_new 가 소비했으면 None
     body = {"recipientUserId": r.recipient_user_id, "sourceVersion": version,
             "dislikedCategories": r.disliked_categories, "giftPreference": None, "reviews": []}
     try:
@@ -274,13 +287,16 @@ def _send_7_6(r: lc.Recipient, version: int, kind: str) -> None:
             res = cli.post(EXTRACT_AND_POOL_PATH, json=body, headers={"Authorization": f"Bearer {AI_SERVICE_TOKEN}"})
         status = res.status_code
     except httpx.RequestError as e:
+        lc.on_rejected(r, None, None, time.time(), _policy)                 # 연결 실패·타임아웃 → 백오프 뒤 같은 번호
         _event("7.6 실패", r, kind=kind, error=f"{type(e).__name__}", sentVersion=version)
         return
     if status == 202:
         lc.on_accepted(r, version, changed_at_when_sent, time.time())
         _event(f"7.6 {kind} → 202", r, sentVersion=version)
     else:
-        _event(f"7.6 {kind} → {status}", r, sentVersion=version)   # 503·500 등: 상태 그대로, 다음 주기에 다시
+        retry_after = _retry_after_s(res)
+        lc.on_rejected(r, status, retry_after, time.time(), _policy)      # 503 은 Retry-After 우선 · 400/401 은 재시도 없음
+        _event(f"7.6 {kind} → {status}", r, sentVersion=version, retryAfter=retry_after)
 
 
 async def _ticker() -> None:
@@ -291,9 +307,9 @@ async def _ticker() -> None:
         for r in list(_recipients.values()):
             action = lc.due_send(r, now, _policy)
             if action == lc.SEND_NEW:
-                await asyncio.to_thread(_send_7_6, r, lc.start_new(r), "신규")
+                await asyncio.to_thread(_send_7_6, r, lc.start_new(r, now), "신규")
             elif action == lc.SEND_RETRY:
-                await asyncio.to_thread(_send_7_6, r, lc.start_retry(r), f"재전송{r.retry_count}")
+                await asyncio.to_thread(_send_7_6, r, lc.start_retry(r, now), f"재시도{r.retry_count}")
             elif lc.expire(r, now, _policy):
                 _event("타임아웃 → FAILED", r)
 
@@ -351,6 +367,7 @@ def console_be_policy(body: Annotated[dict, Body()]) -> dict:
         window_s=float(body.get("window_s", _policy.window_s)),
         pending_timeout_s=float(body.get("pending_timeout_s", _policy.pending_timeout_s)),
         max_retry=int(body.get("max_retry", _policy.max_retry)),
+        backoff_s=float(body.get("backoff_s", _policy.backoff_s)),
     )
     return {"policy": _policy.__dict__}
 

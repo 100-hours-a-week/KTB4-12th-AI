@@ -7,7 +7,7 @@ import pytest
 
 from tools.fake_backend import lifecycle as lc
 
-P = lc.Policy(debounce_s=5, window_s=30, pending_timeout_s=10, max_retry=2)
+P = lc.Policy(debounce_s=5, window_s=30, pending_timeout_s=10, max_retry=2, backoff_s=2)
 CATS = [{"categoryId": 12, "categoryName": "메이크업"}]
 
 
@@ -46,8 +46,18 @@ def test_window_cap_sends_even_if_user_keeps_editing() -> None:
 
 
 def test_start_new_bumps_version_and_resets_retry() -> None:
-    r = _r(source_version=7, retry_count=2)
-    assert lc.start_new(r) == 8 and r.retry_count == 0
+    r = _r(source_version=7, retry_count=2, next_retry_at=50)
+    assert lc.start_new(r, now=100) == 8 and r.retry_count == 0
+    assert r.next_retry_at is None and r.last_attempt_at == 100
+
+
+def test_start_new_consumes_pending_change() -> None:
+    """새 번호로 보낼 준비를 하면 대기 중인 수정은 소비된다(요청 스냅샷) — 실패해도 새 번호가 또 나가지 않게."""
+    r = _r()
+    lc.on_change(r, CATS, now=100)
+    lc.start_new(r, now=105)
+    assert r.last_changed_at is None and r.window_started_at is None
+    assert lc.due_send(r, now=999, policy=P) is None                        # 보낼 것도, 재시도할 것도 없다
 
 
 # ---------------------------------------------------------------- 202 (§3.4 ②)
@@ -116,10 +126,10 @@ def test_retry_fires_twice_then_fails() -> None:
     r = _r(profile_status=lc.PENDING, source_version=4, pending_since=100)
     assert lc.due_send(r, now=109, policy=P) is None                        # 아직 타임아웃 전
     assert lc.due_send(r, now=110, policy=P) == lc.SEND_RETRY
-    assert lc.start_retry(r) == 4 and r.retry_count == 1                    # 같은 번호
+    assert lc.start_retry(r, now=110) == 4 and r.retry_count == 1           # 같은 번호
     r.pending_since = 110
     assert lc.due_send(r, now=120, policy=P) == lc.SEND_RETRY
-    assert lc.start_retry(r) == 4 and r.retry_count == 2
+    assert lc.start_retry(r, now=120) == 4 and r.retry_count == 2
     r.pending_since = 120
     assert lc.due_send(r, now=130, policy=P) is None                        # 2회를 다 썼다
     assert lc.expire(r, now=130, policy=P) is True and r.profile_status == lc.FAILED
@@ -142,3 +152,77 @@ def test_completed_never_expires() -> None:
 def test_only_pending_is_retried(status) -> None:
     r = _r(profile_status=status, pending_since=100)
     assert lc.due_send(r, now=999, policy=P) is None
+
+
+# ---------------------------------------------------------------- 접수 실패 → 같은 번호 재시도 (BE 5-1 · 5-2)
+
+
+def _sent_new(now: float = 100) -> lc.Recipient:
+    """수정 → 새 번호로 보낼 준비까지 끝난 수신자 (7.6 응답을 기다리는 상태)."""
+    r = _r()
+    lc.on_change(r, CATS, now=now - 10)
+    lc.start_new(r, now=now)
+    return r
+
+
+def test_rejected_500_retries_same_version_after_backoff() -> None:
+    r = _sent_new(now=100)
+    assert lc.on_rejected(r, status=500, retry_after_s=None, now=100, policy=P) is True
+    assert r.next_retry_at == 102 and r.profile_status == lc.NONE           # 상태는 그대로, 시각만
+    assert lc.due_send(r, now=101, policy=P) is None
+    assert lc.due_send(r, now=102, policy=P) == lc.SEND_RETRY
+    assert lc.start_retry(r, now=102) == 1 and r.retry_count == 1           # 번호 1 그대로
+    assert r.next_retry_at is None
+
+
+def test_rejected_503_prefers_retry_after_over_backoff() -> None:
+    r = _sent_new(now=100)
+    lc.on_rejected(r, status=503, retry_after_s=30, now=100, policy=P)
+    assert r.next_retry_at == 130                                           # Retry-After 30초
+    r2 = _sent_new(now=100)
+    lc.on_rejected(r2, status=503, retry_after_s=None, now=100, policy=P)
+    assert r2.next_retry_at == 102                                          # 헤더 없으면 기본 백오프
+
+
+def test_rejected_connection_failure_uses_backoff() -> None:
+    r = _sent_new(now=100)
+    lc.on_rejected(r, status=None, retry_after_s=None, now=100, policy=P)
+    assert r.next_retry_at == 102
+
+
+@pytest.mark.parametrize("status", [400, 401])
+def test_rejected_contract_or_token_error_never_retries(status) -> None:
+    r = _sent_new(now=100)
+    assert lc.on_rejected(r, status=status, retry_after_s=None, now=100, policy=P) is False
+    assert r.next_retry_at is None and r.profile_status == lc.NONE
+    assert lc.due_send(r, now=9999, policy=P) is None
+
+
+def test_rejections_exhaust_retries_then_fail() -> None:
+    """새 번호 1회 + 같은 번호 재시도 2회가 전부 실패하면 FAILED."""
+    r = _sent_new(now=100)
+    for attempt_at in (100, 102):
+        assert lc.on_rejected(r, status=500, retry_after_s=None, now=attempt_at, policy=P) is True
+        assert lc.due_send(r, now=attempt_at + 2, policy=P) == lc.SEND_RETRY
+        lc.start_retry(r, now=attempt_at + 2)
+    assert r.retry_count == 2
+    assert lc.on_rejected(r, status=500, retry_after_s=None, now=104, policy=P) is False
+    assert r.profile_status == lc.FAILED and r.next_retry_at is None and r.pending_since is None
+    assert lc.due_send(r, now=9999, policy=P) is None
+
+
+def test_new_change_during_retry_wait_wins_with_new_version() -> None:
+    """재시도를 기다리는 동안 사용자가 또 고치면 옛 번호 재시도는 버리고 새 번호가 나간다 (BE 5-2)."""
+    r = _sent_new(now=100)
+    lc.on_rejected(r, status=500, retry_after_s=None, now=100, policy=P)
+    lc.on_change(r, CATS, now=101)
+    assert lc.due_send(r, now=102, policy=P) is None                        # 재시도 시각이 왔지만 새 수정이 우선 (디바운스 대기)
+    assert lc.due_send(r, now=106, policy=P) == lc.SEND_NEW
+    assert lc.start_new(r, now=106) == 2 and r.retry_count == 0 and r.next_retry_at is None
+
+
+def test_accepted_clears_scheduled_retry() -> None:
+    r = _sent_new(now=100)
+    lc.on_rejected(r, status=500, retry_after_s=None, now=100, policy=P)
+    lc.on_accepted(r, sent_version=1, changed_at_when_sent=None, now=102)
+    assert r.next_retry_at is None and r.profile_status == lc.PENDING
