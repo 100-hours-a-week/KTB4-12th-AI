@@ -71,8 +71,8 @@ v1 본문은 이 **세 필드가 전부**다. (⚠ 계약 원문에는 `giftPref
 | 400 | `INVALID_REQUEST` | 하위 필드 누락 | `… dislikedCategories.0.categoryName — Field required` | 〃 |
 | 401 | `UNAUTHORIZED` | `Authorization` 없음 / `Bearer ` 아님 | `서비스 토큰이 없습니다.` | 토큰 설정 확인 |
 | 401 | `UNAUTHORIZED` | 토큰 값 다름 | `서비스 토큰이 올바르지 않습니다.` | 〃 |
-| 503 | `SERVICE_UNAVAILABLE` | AI에 활성 카탈로그(상품 목록 적재본)가 없음 | `활성 카탈로그가 없습니다.` | 즉시 재시도 없음 → `Retry-After` 뒤 1회, 아니면 다음 주기 (§3.6). 상태 불변. **헤더 `Retry-After: 300` 을 실제로 보낸다**(09-26 구현) |
-| 500 | `INTERNAL_SERVER_ERROR` | AI 내부 오류 | `서버 오류가 발생했습니다.` | 1회 재시도 → 다음 주기 (§3.6). 상태 불변 |
+| 503 | `SERVICE_UNAVAILABLE` | AI에 활성 카탈로그(상품 목록 적재본)가 없음 | `활성 카탈로그가 없습니다.` | `Retry-After`(300초) 뒤 **같은 번호** 재시도 (§3.6). 상태 불변. **헤더 `Retry-After: 300` 을 실제로 보낸다**(09-26 구현) |
+| 500 | `INTERNAL_SERVER_ERROR` | AI 내부 오류 | `서버 오류가 발생했습니다.` | 백오프 뒤 **같은 번호** 재시도 (§3.6). 상태 불변 |
 
 오류가 **아닌** 것: 계약에 없는 필드(예: `dislikedCategories[].weight`, 최상위 `extra`) → **202** 정상 접수, AI 로그에 `CONTRACT_7_6_UNKNOWN_FIELD unknown={...}` 경고만.
 
@@ -82,7 +82,7 @@ v1 본문은 이 **세 필드가 전부**다. (⚠ 계약 원문에는 `giftPref
 
 `POST {BE}/api/internal/v1/recipients/{recipientUserId}/profile` · `Content-Type: application/json` · `Authorization: Bearer <serviceToken>`
 
-7.6 처리 후 **성공한 경우에만** 1회 보낸다. 같은 (수신자, sourceVersion)에 대해 같은 본문을 다시 보낼 수 있다(재전송) — BE는 같은 결과를 다시 받아도 200이어야 한다.
+7.6 처리 후 **성공한 경우에만** 보낸다. 같은 (수신자, sourceVersion)에 대해 같은 본문을 다시 보낼 수 있다(재전송) — BE는 같은 결과를 다시 받아도 200이어야 한다. 비선호·재고로 전부 걸러져 **0개여도 성공**이다 — `recommendedProductIds: []`로 보내며, BE는 "저장된 추천 없음 → 인기순"으로 처리해 달라(09-27, [BE_전달 §7 8번](BE_전달_2026-09-27.md)).
 
 ### 요청 필드 (AI가 보냄)
 
@@ -463,3 +463,55 @@ sequenceDiagram
 | 2 | ~~재고·조회수~~ **받음 (09-25)** · 확인 하나 | 회신의 재고가 **전건 100**이라 전부 `available`로 저장했다. 실제 재고가 아니라 MVP 기본값이면, 실값이 생길 때 다시 보내 주면 `--metrics`로 덮는다. 조회수(102~49,989)는 그대로 정렬에 쓴다 |
 | 3 | 7.7 태그 포함 여부 · 7.9 조회수 필드명 · 비선호 제외 vs 감점 | 09-22 이후 미결 |
 
+
+---
+
+## 6. 부록 — 오류 코드 전체 (2026-09-27)
+
+BE 계획 5-1은 AI 응답을 "오류 유형"으로 나눠 재시도 여부를 정한다. 그 판정에 쓸 수 있도록 **AI가 내는 코드 전부**를 한곳에 모았다. 세 층이다 — ① 7.6 응답(BE가 받는 것), ② 7.7 응답을 AI가 어떻게 처리하는지(BE가 주는 것), ③ AI 실행 기록의 내부 코드(로그·DB에서만 보인다).
+
+### 6.1 7.6 — AI가 돌려주는 HTTP 응답
+
+봉투는 항상 `{"message": "...", "error": {"code": "..."}}`이고 `code`는 아래 값뿐이다.
+
+| HTTP | `error.code` | 언제 | `message` | BE 재시도 (계획 5-1) |
+|---|---|---|---|---|
+| 202 | — | 접수. `data.profileStatus`는 항상 `PENDING` | `프로파일 분석이 시작되었습니다.` | — |
+| 400 | `INVALID_REQUEST` | 본문이 JSON이 아님 · 필수 키 누락 · 타입·범위 오류. `message`에 **필드 경로와 사유** | `요청 본문이 JSON이 아닙니다.` / `요청 형식이 올바르지 않습니다: <경로> — <사유>` | 없음 — 계약 오류 로그 |
+| 401 | `UNAUTHORIZED` | `Authorization` 없음·`Bearer ` 아님 / 토큰 값 다름 | `서비스 토큰이 없습니다.` / `서비스 토큰이 올바르지 않습니다.` | 없음 — 토큰 설정 |
+| 404 | `NOT_FOUND` | 경로 오타 | `Not Found` | 없음 — 주소 확인 |
+| 405 | `INTERNAL_SERVER_ERROR` | 잘못된 메서드(GET 등). 코드 이름이 상황과 맞지 않는다 — 알려진 한계 | `Method Not Allowed` | 없음 — 메서드 확인 |
+| 503 | `SERVICE_UNAVAILABLE` | 활성 카탈로그 없음. **헤더 `Retry-After: 300`** | `활성 카탈로그가 없습니다.` | `Retry-After` 뒤 **같은 번호** |
+| 500 | `INTERNAL_SERVER_ERROR` | 잡히지 않은 예외 | `서버 오류가 발생했습니다.` | 백오프 뒤 **같은 번호** |
+
+- 토큰과 본문이 둘 다 틀리면 **401이 먼저**다(의존성이 본문보다 먼저 풀린다).
+- 계약에 없는 필드는 오류가 **아니다** — 202 접수, AI 로그에 `CONTRACT_7_6_UNKNOWN_FIELD` 경고만.
+- 202 뒤에 AI가 실패하면 **아무것도 보내지 않는다**(FAILED 콜백 없음). BE는 PENDING 타임아웃으로 안다(§3.4 ④).
+
+### 6.2 7.7 — BE 응답을 AI가 처리하는 규칙
+
+| BE 응답 | AI 실행 기록 `status` | `error.code` | AI 동작 |
+|---|---|---|---|
+| 200 | `DELIVERED` | — | 끝 |
+| 409 `STALE_SOURCE_VERSION` | `SUPERSEDED` | `CALLBACK_STALE` | 폐기. 정상 경로 |
+| 400 · 401 · 403 | `FAILED` | `CONTRACT_7_7_REJECTED` | 재시도 없음. `error.reason`에 `"400 INVALID_REQUEST"`처럼 BE 코드가 남는다 |
+| 5xx · 타임아웃(5초) · 연결 실패 | `RESULT_READY` | `CALLBACK_UNREACHABLE` | **즉시 3회**(0.5초·2초 뒤) → 그래도 실패면 보관. 같은 번호 재요청 때 재분석 없이 재전송 |
+
+빈 배열(`recommendedProductIds: []`)은 오류가 아니다 — §2.
+
+### 6.3 AI 실행 기록 `profile_runs.error.code` — 로그·DB에서만 보인다
+
+HTTP로 나가지 않는다. `select status, error from ai_profile.profile_runs where recipient_user_id = ? and source_version = ?`로 보고, 로그 키는 `recipient=<id> source_version=<n>`이다.
+
+| 코드 | 단계 | 뜻 | 겉으로 보이는 것 |
+|---|---|---|---|
+| `CONTRACT_7_6_UNKNOWN_FIELD` | 접수 | 7.6 본문에 계약 밖 필드 — 무시하고 진행 | 202. 로그 경고만, 기록에는 안 남는다 |
+| `NO_ACTIVE_CATALOG` | 처리 | 백그라운드에서 활성 카탈로그가 사라짐(접수 때는 있었다) | `FAILED`, 콜백 없음 |
+| `STORE_FAILED` | 처리 | 실행 기록·프로필 저장 실패(DB) | `FAILED`, 콜백 없음 |
+| `PIPELINE_ERROR` | 처리·복구 | 그 밖의 예외 · 시작 시 정리된 끊긴 RUNNING(`reason="프로세스가 끝나 실행 기록만 남음 — 시작 시 정리"`) | `FAILED`, 콜백 없음 |
+| `CALLBACK_STALE` | 콜백 | 7.7 409 | `SUPERSEDED` |
+| `CALLBACK_UNREACHABLE` | 콜백 | 7.7 5xx·타임아웃·연결 실패(즉시 3회 뒤에도) | `RESULT_READY` · `/health`의 `store.undelivered` +1 |
+| `CONTRACT_7_7_REJECTED` | 콜백 | 7.7 4xx | `FAILED` |
+| `CONTRACT_7_9_SCHEMA` | 카탈로그 CLI | 7.9 export 필드 불일치 — 저장 거부 | `fetch_export.py` 종료 코드 1 |
+
+`FAILED`인 행은 BE가 같은 번호로 다시 요청하면 **다시 분석**한다(`intake.decide()` → analyze). `RESULT_READY`인 행은 재분석 없이 재전송한다. 코드 값의 정본은 `src/profiling/types.py`의 `ErrorCode`(8종)다.
