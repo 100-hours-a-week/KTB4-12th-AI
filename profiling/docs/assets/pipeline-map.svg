@@ -92,9 +92,9 @@
 <text x="1282" y="414" class="sub">    200 DELIVERED · 409 SUPERSEDED · 4xx FAILED</text>
 <text x="1282" y="428" class="sub">    5xx·네트워크 RESULT_READY — 0.5초·2초 뒤 최대 3회, 그래도 실패면 보관</text>
 <text x="1282" y="442" class="mono">  _error_code(res)  로그용 · 예외는 밖으로 안 냄</text>
-<text x="1282" y="456" class="monob">store.save(status=result, callback_attempts+1)</text>
+<text x="1282" y="456" class="monob">store.save(마지막 결과, callback_attempts + 시도 수)</text>
 <text x="1282" y="470" class="mono"></text>
-<text x="1282" y="484" class="sub">재시도는 intake._send_and_record (CALLBACK_MAX_ATTEMPTS·CALLBACK_BACKOFF_S)</text>
+<text x="1282" y="484" class="sub">재시도: _send_and_record 가 0.5초·2초 뒤 최대 3회 (CALLBACK_*)</text>
 <path d="M355 220 H520" class="call"/>
 <text x="437.5" y="214" class="sub" text-anchor="middle">run_and_callback + rq: ProfileRequest</text>
 <path d="M765 220 H930" class="call"/>
@@ -189,5 +189,5 @@
 <text x="40" y="1034" class="h2">실패 경로</text>
 <text x="110" y="1034" class="sub">400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.</text>
 <text x="40" y="1056" class="h2">시험</text>
-<text x="110" y="1056" class="sub">단위(tests/unit, 94): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 34): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql</text>
+<text x="110" y="1056" class="sub">단위(tests/unit, 131): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 44): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql</text>
 </svg>

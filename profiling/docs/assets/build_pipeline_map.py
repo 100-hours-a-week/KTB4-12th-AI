@@ -143,9 +143,9 @@ lines(x + 12, TOP + 84, [
     ('    200 DELIVERED · 409 SUPERSEDED · 4xx FAILED', 'sub'),
     ('    5xx·네트워크 RESULT_READY — 0.5초·2초 뒤 최대 3회, 그래도 실패면 보관', 'sub'),
     ('  _error_code(res)  로그용 · 예외는 밖으로 안 냄', 'mono'),
-    ('store.save(status=result, callback_attempts+1)', 'monob'),
+    ('store.save(마지막 결과, callback_attempts + 시도 수)', 'monob'),
     ('', 'mono'),
-    ('재시도는 intake._send_and_record (CALLBACK_MAX_ATTEMPTS·CALLBACK_BACKOFF_S)', 'sub'),
+    ('재시도: _send_and_record 가 0.5초·2초 뒤 최대 3회 (CALLBACK_*)', 'sub'),
 ])
 
 # 단계 사이 화살표 (자료형) — 상자 위 띠에
@@ -236,7 +236,7 @@ t(110, NY + 22, 'ProfileExtractRequest(camel) → to_internal → ProfileRequest
 t(40, NY + 44, '실패 경로', 'h2')
 t(110, NY + 44, '400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.', 'sub')
 t(40, NY + 66, '시험', 'h2')
-t(110, NY + 66, '단위(tests/unit, 94): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 34): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
+t(110, NY + 66, '단위(tests/unit, 131): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 44): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
 parts.append('</svg>')
 (P / 'pipeline-map.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')
 print('svg ok')
