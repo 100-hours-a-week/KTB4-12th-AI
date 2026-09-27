@@ -15,8 +15,10 @@ CV = UUID(int=7)   # 시험용 카탈로그 버전 ID
 # ---------------------------------------------------------------- 가짜
 
 
-def _product(pid: int, cat_id: int, cat_name: str, availability: str = "available", views: int = 0) -> ProductRecord:
+def _product(pid: int, cat_id: int, cat_name: str, availability: str = "available", views: int = 0,
+             parent_id: int | None = None, parent_name: str | None = None) -> ProductRecord:
     return ProductRecord(productId=pid, name=f"p{pid}", brand="b", description=None, categoryId=cat_id, categoryName=cat_name,
+                         parentCategoryId=parent_id, parentCategoryName=parent_name,
                          price=1000, availability=availability, updatedAt=datetime(2026, 9, 21, tzinfo=UTC), viewCount=views)
 
 
@@ -126,6 +128,31 @@ def test_pool_matches_by_name_when_id_differs() -> None:
     rq = _rq(disliked=[(999, "완구")])                                         # ID 체계가 달라도 이름으로 걸러짐
     res = pipeline.build_pool(rq, PRODUCTS, 30, CV)
     assert all(p.categoryName != "완구" for p in PRODUCTS if p.productId in res.product_ids)
+
+
+def test_pool_excludes_every_child_of_disliked_root_category() -> None:
+    """비선호는 대분류로 온다(09-27 BE 결정) — 그 대분류 밑의 소분류 상품이 전부 빠지고 다른 대분류는 남는다."""
+    products = [
+        _product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=9),
+        _product(2, 12, "메이크업", parent_id=1, parent_name="뷰티", views=8),
+        _product(3, 21, "여성의류", parent_id=2, parent_name="패션", views=7),
+        _product(4, 22, "가방·지갑", parent_id=2, parent_name="패션", views=6),
+    ]
+    picked = pipeline.build_pool(_rq(disliked=[(1, "뷰티")]), products, 30, CV).product_ids
+    assert picked == [3, 4]
+
+
+def test_pool_root_dislike_matches_by_parent_name_when_id_differs() -> None:
+    """ID가 어긋나도 대분류 이름이 같으면 제외 — 소분류와 같은 보조 규칙."""
+    products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티"), _product(2, 21, "여성의류", parent_id=2, parent_name="패션")]
+    assert pipeline.build_pool(_rq(disliked=[(999, "뷰티")]), products, 30, CV).product_ids == [2]
+
+
+def test_pool_without_parent_info_falls_back_to_leaf_only() -> None:
+    """대분류 정보가 없는 상품(파일 카탈로그)은 소분류 판정만 받는다 — 대분류 비선호로는 빠지지 않는다(알려진 한계)."""
+    products = [_product(1, 11, "스킨케어"), _product(2, 21, "여성의류")]
+    assert pipeline.build_pool(_rq(disliked=[(1, "뷰티")]), products, 30, CV).product_ids == [1, 2]
+    assert pipeline.build_pool(_rq(disliked=[(11, "스킨케어")]), products, 30, CV).product_ids == [2]
 
 
 def test_pool_size_cap() -> None:

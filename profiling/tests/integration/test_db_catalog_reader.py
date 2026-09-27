@@ -166,3 +166,19 @@ def test_version_and_products_belong_together(engine, active) -> None:
                             {"v": version_id}).scalar_one()
         n = c.execute(sa.text(f"select count(*) from {SCHEMA}.products where package_id = :p"), {"p": package}).scalar_one()
     assert len(products) == n
+
+
+def test_parent_category_is_filled_from_db(engine, active) -> None:
+    """상품마다 대분류(parentCategoryId·Name)가 categories 부모 조인으로 채워진다 — 비선호(대분류) 제외의 근거."""
+    _, products = DbCatalogReader(engine).active()
+    assert all(p.parentCategoryId is not None and p.parentCategoryName for p in products)
+    assert {p.parentCategoryId for p in products} <= set(range(1, 11))       # Backend 대분류 id 1~10 (09-25 회신)
+    p = products[0]
+    with engine.connect() as c:
+        row = c.execute(sa.text(
+            f"select cp.backend_category_id as pid, cp.name as pname from {SCHEMA}.products p "
+            f"join {SCHEMA}.categories c on c.source_category_id = p.source_category_id "
+            f"join {SCHEMA}.categories cp on cp.source_category_id = c.parent_source_category_id "
+            "where coalesce(p.backend_product_id, split_part(p.source_product_id, ':', 2)::bigint) = :pid"),
+            {"pid": p.productId}).mappings().one()
+    assert (p.parentCategoryId, p.parentCategoryName) == (row["pid"], row["pname"])

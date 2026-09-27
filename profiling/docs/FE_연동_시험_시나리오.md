@@ -34,7 +34,7 @@ PROFILING_CATALOG_SOURCE=db PROFILING_BACKEND_BASE_URL=http://localhost:8081 \
 | | |
 |---|---|
 | FE 대응 | 수신자 비선호 저장 → 잠시 후 상품 목록(`sort=AI_RECOMMENDED`)에 30개가 앞으로, 비선호 카테고리는 안 보임 |
-| 조작 | `POST /console/be/change {recipientUserId, dislikedCategories:[{categoryId:12,categoryName:"메이크업"}]}` |
+| 조작 | `POST /console/be/change {recipientUserId, dislikedCategories:[{categoryId:1,categoryName:"뷰티"}]}` — 실제 BE처럼 **대분류**로. 추천 30개에 뷰티 소분류(스킨케어·메이크업·향수·…)가 하나도 없어야 한다 |
 | 기대 | 디바운스 뒤 7.6 → 202 → PENDING → 7.7 → **COMPLETED**, 추천 30개에 소분류 12 없음 |
 | 확인 | `/console/be/state` → `profileStatus=COMPLETED`, `analyzedSourceVersion == sourceVersion` · AI `profile_runs.status=DELIVERED` |
 

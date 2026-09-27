@@ -183,11 +183,15 @@ _ACTIVE_PRODUCTS = sa.text(f"""
     select v.id as version_id, v.package_id,
            p.source_product_id, p.backend_product_id, p.name, p.brand, p.description,
            p.source_category_id, c.backend_category_id, c.name as category_name,
+           cp.backend_category_id as parent_backend_category_id, cp.name as parent_category_name,
            p.unit_price, p.availability, p.view_count, p.updated_at
     from {SCHEMA}.catalog_versions v
     join {SCHEMA}.products p on p.package_id = v.package_id
     join {SCHEMA}.categories c on c.source_category_id = p.source_category_id
+    left join {SCHEMA}.categories cp on cp.source_category_id = c.parent_source_category_id
     where v.is_active""")
+## 부모(대분류)를 같이 읽는 이유: 비선호가 대분류 id·이름으로 오고(09-27 BE 결정) 풀에서 그 하위 소분류 전체를 제외해야 한다.
+## 부모의 Backend 번호가 아직 없으면 None 으로 둔다(임시 번호를 만들지 않는다 — 대분류는 회신 없이 쓸 일이 없다).
 
 _SOURCE_PRODUCT_ID = re.compile(r"^[A-Z_]+:(\d+)$")        # KAKAO_GIFT:10002797
 _SOURCE_CATEGORY_ID = re.compile(r"^CAT-(\d+)-(\d+)$")     # CAT-01-02
@@ -281,7 +285,9 @@ class DbCatalogReader:
                 provisional_c += 1
             products.append(ProductRecord(
                 productId=pid, name=r["name"], brand=r["brand"], description=r["description"] or None,
-                categoryId=cid, categoryName=r["category_name"], price=r["unit_price"],
+                categoryId=cid, categoryName=r["category_name"],
+                parentCategoryId=r["parent_backend_category_id"], parentCategoryName=r["parent_category_name"],
+                price=r["unit_price"],
                 availability=r["availability"], updatedAt=r["updated_at"], viewCount=r["view_count"] or 0,
             ))
 

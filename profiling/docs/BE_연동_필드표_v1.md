@@ -35,14 +35,14 @@ AI 프로파일링 서비스가 **지금 실제로 보내고 받는 필드**와 
 | `recipientUserId` | integer | ✔ | ✕ | > 0 | 수신자 users.id | |
 | `sourceVersion` | integer | ✔ | ✕ | ≥ 0 | **BE가 7.6을 보내기 직전에 +1 하고 저장한 번호** (§3.5) | 7.7에 그대로 돌아옴 → BE는 이 값이 마지막으로 보낸 번호와 같은지로 **최신 여부**를 안다 |
 | `dislikedCategories` | array | ✔ | ✕ | 없으면 `[]` (키 생략 불가) | 비선호 카테고리 목록 | BE 화면 규칙상 최대 5. AI는 상한을 두지 않음 |
-| `dislikedCategories[].categoryId` | integer | ✔ | ✕ | > 0 | categories.id | AI 상품 목록의 `categoryId`와 **같은 체계**여야 제외가 됨 |
+| `dislikedCategories[].categoryId` | integer | ✔ | ✕ | > 0 | categories.id — **대분류(root) id 1~10** | BE는 root 카테고리만 비선호로 저장한다(`PreferenceSaveService`, 최대 5 · 09-27 결정: 사용자 친화성). AI는 그 대분류의 **하위 소분류 전체**를 풀에서 제외한다 |
 | `dislikedCategories[].categoryName` | string | ✔ | ✕ | | categories.name | ID가 안 맞아도 이름으로 한 번 더 거른다 |
 
 v1 본문은 이 **세 필드가 전부**다. (⚠ 계약 원문에는 `giftPreference`·`reviews` 키가 더 있으나 v3 입력이라 v1에서는 보내지 않는다. AI는 없으면 `null`·`[]`로 처리하고, 보내도 받는다.)
 
 ```json
 {"recipientUserId": 9871, "sourceVersion": 3,
- "dislikedCategories": [{"categoryId": 12, "categoryName": "캠핑용품"}]}
+ "dislikedCategories": [{"categoryId": 1, "categoryName": "뷰티"}]}
 ```
 
 ### 응답 — 정상 `202 Accepted`
@@ -92,7 +92,7 @@ v1 본문은 이 **세 필드가 전부**다. (⚠ 계약 원문에는 `giftPref
 | `recipientUserId` | integer | Path와 같은 값 | 다르면 BE가 400 `RECIPIENT_ID_MISMATCH` |
 | `sourceVersion` | integer | 7.6에서 받은 값 그대로 | BE의 순서 역전 판정 키 |
 | `profileStatus` | string | 항상 `"COMPLETED"` | |
-| `recommendedProductIds` | integer[] | **최대 30개**, 배열 순서 = 추천 순위 | 값은 **BE `products.id`** (AI 상품 목록의 `productId`). 비선호 카테고리 제외 후 조회수(`views`)순 |
+| `recommendedProductIds` | integer[] | **최대 30개**, 배열 순서 = 추천 순위 | 값은 **BE `products.id`** (AI 상품 목록의 `productId`). 비선호 대분류의 하위 소분류 전체를 제외한 뒤 조회수(`views`)순 |
 | ~~`preferredTags`~~ · ~~`dislikedTags`~~ | — | **보내지 않음** | ⚠ 위키(v3.2.6)는 필수. 작업본 v3.2.7(DR-035: 태그는 AI 보관)은 없음. **BE가 위키대로 필수 검증하면 400** → 없어도 받도록 하거나, 정하면 AI가 `[]`로 동봉 |
 
 ```json

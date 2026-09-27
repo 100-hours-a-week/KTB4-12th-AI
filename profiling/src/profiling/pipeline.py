@@ -96,6 +96,11 @@ def needs_model(rq: ProfileRequest) -> bool:
 def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int, catalog_version_id: UUID) -> SearchResult:
     """비선호 카테고리를 뺀 상품을 **조회수 내림차순**으로 pool_size개.
 
+    비선호는 **대분류**로 온다(09-27 BE 결정 — 사용자 친화성. BE `PreferenceSaveService`는 root 카테고리만 저장, 최대 5).
+    그래서 상품의 대분류(`parentCategoryId`·`parentCategoryName`)가 비선호에 있으면 **그 하위 소분류 전체**를 제외한다.
+    소분류 id·이름이 오는 경우도 그대로 제외한다(파일 카탈로그·옛 시험과의 호환). 대분류 정보가 없는 상품(파일 카탈로그)은
+    소분류 판정만 받는다.
+
     재고(availability, 3값): **unavailable(재고 없음)만 뺀다.** unknown(재고 정보가 없는 상품)은 풀에 남긴다 — 09-23 Backend 합의.
     실제 재고를 아는 쪽은 Backend이므로 최종 판단을 Backend가 한다. 우리는 unknown을 available로 바꿔 쓰지 않고(검색기와 같은 규칙)
     "재고 없음으로 확인된 것만 제외"할 뿐이다. 패키지로 적재한 카탈로그는 전건 unknown이라, 이 규칙이 아니면 풀이 0건이 된다.
@@ -107,11 +112,18 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
     """
     disliked_ids = {c.category_id for c in rq.disliked_categories}
     disliked_names = {c.category_name for c in rq.disliked_categories}
+
+    def disliked(p: ProductRecord) -> bool:
+        # ID가 정본, 이름은 보조 — Backend가 준 ID와 카탈로그 ID 체계가 어긋나는 사고(ID는 다른데 이름은 같음)까지 막는다.
+        # 대분류(parent)가 걸리면 하위 소분류 전체가 빠진다.
+        return (p.categoryId in disliked_ids or p.categoryName in disliked_names
+                or (p.parentCategoryId is not None and p.parentCategoryId in disliked_ids)
+                or (p.parentCategoryName is not None and p.parentCategoryName in disliked_names))
+
     candidates = [
         p for p in products
         if p.availability != "unavailable"          # unknown은 남긴다 — 재고 판단은 Backend 몫
-        # ID가 정본, 이름은 보조 — Backend가 준 ID와 카탈로그 ID 체계가 어긋나는 사고(ID는 다른데 이름은 같음)까지 막는다
-        and p.categoryId not in disliked_ids and p.categoryName not in disliked_names
+        and not disliked(p)
     ]
     candidates.sort(key=lambda p: (-p.viewCount, p.productId))
     picked = [p.productId for p in candidates[:pool_size]]
