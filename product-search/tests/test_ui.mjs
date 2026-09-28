@@ -354,6 +354,7 @@ test('failed feedback keeps its draft and retries with the same submission id', 
   const ui=harness();ui.apply(page());
   ui.exec("openNote(state.contexts.get('1'),'filter_violation')");
   ui.node('#note-text').value='조건 확인 부탁합니다';
+  ui.node('#reporter-name').value='에멧';
   ui.responses.push({httpError:true,status:503,body:{message:'보관 실패',error:{code:'FEEDBACK_STORAGE_UNAVAILABLE'}}});
   const submit=ui.node('#note-form').handlers.get('submit');
   await submit({preventDefault(){}});
@@ -364,4 +365,5 @@ test('failed feedback keeps its draft and retries with the same submission id', 
   assert.match(ui.requests[0].body.submissionId,/^[a-f0-9]{32}$/);
   assert.equal(ui.requests[0].body.submissionId,ui.requests[1].body.submissionId);
   assert.equal(ui.exec('state.ratings.size'),1);
+  assert.equal(ui.requests[1].body.reporterName,'에멧');
 });

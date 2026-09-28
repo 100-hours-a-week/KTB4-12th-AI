@@ -34,6 +34,8 @@ def restore_event(db, event):
                      json.dumps(search['response'], ensure_ascii=False)))
         con.execute('INSERT OR IGNORE INTO feedback VALUES(?,?,?,?,?,?)',
                     (feedback['id'], body.search_id, feedback['createdAt'], body.product_id, body.verdict, body.note))
+        con.execute('INSERT OR IGNORE INTO feedback_meta(feedback_id,reporter_name) VALUES(?,?)',
+                    (feedback['id'], str(feedback.get('reporterName', ''))[:80]))
 
 
 def restore(db, archive):
@@ -41,6 +43,8 @@ def restore(db, archive):
         with lock:
             for event in archive.events():
                 restore_event(db, event)
+            for review in getattr(archive, 'review_events', lambda: [])():
+                restore_review(db, review)
 
 
 def save(db, body, archive=None):
@@ -48,9 +52,9 @@ def save(db, body, archive=None):
     body = body.model_copy(update={'submission_id': submission})
     with lock:
         with db() as con:
-            previous = con.execute('SELECT search_id,product_id,verdict,note FROM feedback WHERE id=?', (submission,)).fetchone()
+            previous = con.execute("SELECT f.search_id,f.product_id,f.verdict,f.note,COALESCE(m.reporter_name,'') FROM feedback f LEFT JOIN feedback_meta m ON m.feedback_id=f.id WHERE f.id=?", (submission,)).fetchone()
             if previous:
-                if previous != (body.search_id, body.product_id, body.verdict, body.note):
+                if previous != (body.search_id, body.product_id, body.verdict, body.note, body.reporter_name):
                     raise FeedbackError(409, 'FEEDBACK_ID_CONFLICT', '같은 제보 번호로 다른 의견을 저장할 수 없습니다.')
                 return {'id': submission, 'saved': True}
             row = con.execute('SELECT created_at,request,response FROM searches WHERE id=?', (body.search_id,)).fetchone()
@@ -65,7 +69,8 @@ def save(db, body, archive=None):
             'format': FORMAT,
             'search': {'id': body.search_id, 'createdAt': row[0], 'request': json.loads(row[1]), 'response': result},
             'feedback': {'id': submission, 'createdAt': datetime.now(timezone.utc).isoformat(),
-                         'request': body.model_dump(by_alias=True)},
+                         'reporterName': body.reporter_name,
+                         'request': body.model_dump(by_alias=True, exclude={'reporter_name'})},
         }
         if archive is not None:
             try:
@@ -76,3 +81,18 @@ def save(db, body, archive=None):
                                     '의견을 보관하지 못했습니다. 입력을 유지한 채 다시 시도해 주세요.') from None
         restore_event(db, event)
         return {'id': submission, 'saved': True}
+
+
+def restore_review(db, event):
+    from datetime import datetime
+    import re
+    if (event.get('format') != 'product-search-review/1'
+            or not re.fullmatch(r'[a-f0-9]{32}', event.get('feedbackId', ''))
+            or type(event.get('reviewed')) is not bool):
+        raise ValueError('Invalid QA review event')
+    datetime.fromisoformat(event['updatedAt'])
+    with db() as con:
+        if not con.execute('SELECT 1 FROM feedback WHERE id=?', (event['feedbackId'],)).fetchone():
+            raise ValueError('Review references missing feedback')
+        con.execute("INSERT INTO feedback_meta(feedback_id,reviewed,updated_at) VALUES(?,?,?) ON CONFLICT(feedback_id) DO UPDATE SET reviewed=excluded.reviewed,updated_at=excluded.updated_at WHERE feedback_meta.updated_at IS NULL OR excluded.updated_at >= feedback_meta.updated_at",
+                    (event['feedbackId'], int(event['reviewed']), event['updatedAt']))

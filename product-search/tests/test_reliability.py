@@ -157,3 +157,47 @@ async def test_actual_encoder_exit_and_timeout_change_readiness(tmp_path, servic
         assert await health.check()
     finally:
         await embedding.close()
+
+
+def test_author_restore_and_legacy_event(database, tmp_path, monkeypatch):
+    archive = Archive()
+    body = FeedbackRequest(searchId='search-1', productId=1, verdict='relevant',
+                           submissionId='c'*32, reporterName='에멧')
+    save(database, body, archive)
+    with pytest.raises(FeedbackError) as error:
+        save(database, body.model_copy(update={'reporter_name': 'another'}), archive)
+    assert error.value.status == 409
+    monkeypatch.setattr(server, 'DB', tmp_path / 'author.sqlite3')
+    server.init_db(); restore(database, archive)
+    assert save(database, body, archive)['saved']
+    del archive.rows['c'*32]['feedback']['reporterName']
+    monkeypatch.setattr(server, 'DB', tmp_path / 'legacy.sqlite3')
+    server.init_db(); restore(database, archive)
+    assert save(database, body.model_copy(update={'reporter_name': ''}), archive)['saved']
+
+
+async def test_busy_encoder_marks_readiness_false_after_deadline(monkeypatch):
+    import threading
+    import time
+    started, release = threading.Event(), threading.Event()
+    encoder = Encoder()
+    original = encoder.encode
+    def blocked(query):
+        started.set()
+        release.wait(timeout=5)
+        return original(query)
+    monkeypatch.setattr(encoder, 'encode', blocked)
+    embedding = SharedEmbedding(encoder)
+    await embedding.start()
+    request = asyncio.create_task(embedding.get('busy', use_cache=False))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        assert embedding.ready
+        embedding.operation_started = time.monotonic() - 21
+        assert not embedding.ready
+        release.set()
+        await request
+        assert embedding.ready
+    finally:
+        release.set()
+        await embedding.close()

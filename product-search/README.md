@@ -74,3 +74,5 @@ uv run python tools/sync_catalog.py \
 ```
 
 로컬 실행 포트는 4325다. API 사용은 [연동 안내](INTEGRATION.md)를 참고한다.
+
+QA 의견에는 선택 입력한 이름(`reporterName`)을 남길 수 있다. 인증된 신원은 아니며, 기존 익명 의견의 작성자는 알 수 없다. 원래 제보 테이블은 유지하고 이름·검토 상태는 `feedback_meta`에 저장한다. HF 데모의 별도 관리자 화면과 인증은 데모 저장소에서 관리한다.

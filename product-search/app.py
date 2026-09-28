@@ -51,6 +51,7 @@ def init_db():
             raise RuntimeError('Unsupported legacy QA database: stop the server and move runtime/qa.sqlite3 aside before starting with a new QA database')
         con.execute('CREATE TABLE IF NOT EXISTS searches(id TEXT PRIMARY KEY, created_at TEXT, request TEXT, response TEXT)')
         con.execute('CREATE TABLE IF NOT EXISTS feedback(id TEXT PRIMARY KEY, search_id TEXT REFERENCES searches(id) ON DELETE CASCADE, created_at TEXT, product_id INTEGER, verdict TEXT, note TEXT)')
+        con.execute("CREATE TABLE IF NOT EXISTS feedback_meta(feedback_id TEXT PRIMARY KEY REFERENCES feedback(id) ON DELETE CASCADE, reporter_name TEXT NOT NULL DEFAULT '', reviewed INTEGER NOT NULL DEFAULT 0, updated_at TEXT)")
 
 
 def record(result):

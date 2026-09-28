@@ -150,6 +150,7 @@ class SharedEmbedding:
         self._closing = None
         self._operation = None
         self.failed = False
+        self.operation_started = None
 
     async def start(self):
         if self._closed:
@@ -170,6 +171,7 @@ class SharedEmbedding:
         while True:
             _, _, query, future = await self.queue.get()
             try:
+                self.operation_started = time.monotonic()
                 self._operation = asyncio.get_running_loop().run_in_executor(self.pool, self.encoder.encode, query)
                 self._operation.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
                 vector = await asyncio.shield(self._operation)
@@ -184,6 +186,7 @@ class SharedEmbedding:
                 if not future.done():
                     future.set_exception(exc)
             finally:
+                self.operation_started = None
                 self.pending.pop(query, None)
                 self.queue.task_done()
 
@@ -191,7 +194,8 @@ class SharedEmbedding:
     def ready(self):
         process = getattr(self.encoder, 'process', None)
         alive = process is not None and process.poll() is None if isinstance(self.encoder, Encoder) else True
-        return not self._closed and not self.failed and self.task is not None and not self.task.done() and alive
+        overdue = self.operation_started is not None and time.monotonic() - self.operation_started >= 20
+        return not overdue and not self._closed and not self.failed and self.task is not None and not self.task.done() and alive
 
     async def get(self, query, source="qa", *, use_cache=True):
         if self._closed:

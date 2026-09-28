@@ -64,6 +64,7 @@ class SnapshotMismatch(ValueError):
 
 
 class FeedbackRequest(Model):
+    reporter_name: str = Field(default="", max_length=80)
     submission_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     search_id: str = Field(min_length=1, max_length=80)
     product_id: ProductId | None = None
