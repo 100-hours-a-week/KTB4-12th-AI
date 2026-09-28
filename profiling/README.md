@@ -6,7 +6,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 |---|---|
 | 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
 | 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
-| 테스트 | 단위 142개(외부 의존 없음) + 통합 45개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 185 passed, 2 skipped |
+| 테스트 | 단위 146개(외부 의존 없음) + 통합 49개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 193 passed, 2 skipped |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
 
 ---
@@ -99,7 +99,7 @@ uv sync                                     # .venv + 의존성 (uv.lock 기준)
 cp .env.example .env                        # 필요 시 값 수정
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
 uv run alembic upgrade head                 # 테이블 생성 (0001~0004)
-uv run pytest -q                            # 177 passed, 2 skipped (DB 꺼져 있으면 통합 45개 skip)
+uv run pytest -q                            # 193 passed, 2 skipped (DB 꺼져 있으면 통합 49개 skip)
 uv run ruff check src tests tools alembic   # lint
 ```
 
@@ -177,7 +177,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 4. 테스트
 
-원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 142개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 45개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
+원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 146개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 45개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
 
 | 파일 | 대상 | 방법 | 개수 |
 |---|---|---|---|
@@ -191,14 +191,15 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | `test_intake_dedupe.py` | 접수 단계 중복 판정 | `decide()` 표(12) + dispatch 분기(7) — 잠금 못 얻으면 아무것도 안 함 · RUNNING이면 분석 없음 · 결과 있으면 재전송만 · 본문 다르면 재분석 | 19 |
 | `test_callback_retry.py` | 7.7 즉시 재시도 | 스크립트 응답 + `sleep` 기록 — 5xx·5xx·200 → DELIVERED(대기 0.5·2초) · 5xx×3 → RESULT_READY · 409/4xx 즉시 종료 · 최대 1회 · 재전송 경로 | 6 |
 | `test_import_be_ids.py` | Backend 회신 매칭 | 키로 확정 · 진짜 중복은 결정적 1:1 · 남는 번호는 재사용 안 함 · 이름 없으면 보고 | 10 |
-| `test_stores_lock_key.py` | `run_lock` 주변(DB 없이) | 잠금 키가 수신자 ID 를 자르지 않음 · 커넥션·질의 어느 쪽이 실패해도 진행 | 4 |
+| `test_stores_lock_key.py` | `run_lock` 주변(DB 없이) | 잠금 키가 수신자 ID 를 자르지 않음 · 커넥션·질의 어느 쪽이 실패해도 진행 · AUTOCOMMIT 으로 걸고 커밋하지 않음 · autocommit 전환 실패도 진행 | 6 |
 | `test_fake_backend_lifecycle.py` | 페이크 Backend 상태 기계 | 디바운스·상한·202 조건부 PENDING·409 판정·같은 번호 재시도 2회 후 FAILED·접수 실패(500/503 `Retry-After`/연결 실패) 백오프·400/401 재시도 없음·새 수정이 옛 재시도를 이김 — 시간만 바꿔가며 | 25 |
 | `test_recipient_profile.py` | `from_outcome`·`should_replace`·`cap_tags` | 행 변환·버전 규칙·상한 (v3 함수 2개는 skip) | 6 |
 | `test_supervisor.py` | Supervisor | 슬롯 1이면 동시에 하나만 실행 | 1 |
 | `test_settings_slots_env.py` | 슬롯 수 환경변수 이름 | `PROFILING_SLOTS`·옛 `PROFILING_PROFILING_SLOTS` 둘 다 읽힘 · 기본 1 · 다른 필드 무영향 (이슈 2026-09-28_1424) | 4 |
+| `test_settings_catalog_poll_ttl.py` | 카탈로그 폴링 TTL 환경변수 | `PROFILING_CATALOG_POLL_TTL_S` 읽힘 · 기본 1.0 · 0 허용 | 2 |
 | `test_loadtest_summary.py` | `tools/loadtest/run.py` 집계 | 백분위 · 요약(202·`/health`·완료·대기·재전송 흔적) · AI 로그 도착 파싱·묶음 — 네트워크·DB 없음 | 4 |
 | `integration/test_db_catalog.py` | 마이그레이션 0003 + 적재 SQL | 표·CHECK·활성 버전 1개 · 재적재 멱등 · Backend ID/재고 보존 · `--id-map` 회신 반영 | 7 |
-| `integration/test_db_catalog_reader.py` | `DbCatalogReader` | 활성 버전 읽기·필드 매핑 · 같은 버전이면 재질의 없음 · Backend 번호 우선/임시 번호 · 번호 충돌 거부 · 활성 없음 · **버전과 상품이 한 스냅샷에서 나오는지** · 대분류(parent) 채움 | 8 |
+| `integration/test_db_catalog_reader.py` | `DbCatalogReader` | 활성 버전 읽기·필드 매핑 · 같은 버전이면 재질의 없음 · Backend 번호 우선/임시 번호 · 번호 충돌 거부 · 활성 없음 · **버전과 상품이 한 스냅샷에서 나오는지** · 대분류(parent) 채움 · 폴링 TTL(안이면 질의 없음 · 0이면 호출마다 · 주입 시계로 만료 · 실패는 캐시 안 함) | 12 |
 | `integration/test_db_recipient_profiles.py` | 마이그레이션 결과 | 열 순서·PK 시퀀스 없음·유니크·CHECK·upsert 버전 규칙 | 5 |
 | `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED · 0004 열 주석 | 14 |
 | `integration/test_e2e_app.py` | **끝에서 끝** | `TestClient(app)` — lifespan(진짜 DB) → 7.6 202 → Supervisor 슬롯 → 가짜 BackendPort가 7.7 받음 → `profile_runs` DELIVERED·`recipient_profiles` upsert. 400은 백그라운드로 안 감. 모르는 필드 경고. `/health`. **배포 모양(`CATALOG_SOURCE=db`)으로 기동** · **7.7 500 → 0.5초 뒤 재시도 → 200 (진짜 포트)** | 7 |

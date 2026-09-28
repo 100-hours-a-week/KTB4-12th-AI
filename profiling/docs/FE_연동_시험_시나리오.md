@@ -62,6 +62,7 @@ PROFILING_CATALOG_SOURCE=db PROFILING_BACKEND_BASE_URL=http://localhost:8081 \
 | 조작 | `update ai_catalog.catalog_versions set is_active=false` → 비선호 변경 |
 | 기대 | 7.6 → **503**, 상태 **그대로** · BE는 `Retry-After` 뒤 **같은 번호**로 재시도(`retryCount` 1) · 카탈로그를 되살려 두면 그 재시도가 202 → COMPLETED. 로컬은 AI `.env`에 `PROFILING_RETRY_AFTER_S=5` |
 | 확인 | AI `/health` → `catalog.active=false` · BE 이벤트에 `7.6 신규 → 503`(retryAfter 5) 다음 `7.6 재시도1 → 202` · `sourceVersion` 그대로 |
+| 주의 | AI는 활성 id를 1초에 한 번만 다시 묻는다(`PROFILING_CATALOG_POLL_TTL_S`, 기본 1). `is_active=false` 뒤 최대 1초는 아직 202가 나올 수 있고 503은 그 뒤부터. 되살린 뒤 회복도 같은 1초 안 |
 
 ### S5 · 콜백 유실 → 같은 번호 재전송 (09-25 합의의 핵심)
 

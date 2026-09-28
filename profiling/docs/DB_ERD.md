@@ -40,11 +40,11 @@ AI 프로파일링이 **소유한 표**가 무엇이고, **왜 생겼고**, **�
 **요청 한 건이 DB를 만지는 순서** (자세한 그림은 [DB_전환_설명 §3](DB_전환_설명.md))
 
 ```
-7.6 접수(HTTP)   catalog.active()        활성 카탈로그 버전 id 1질의 — 없으면 503
-슬롯 안          store.run_lock()         (수신자, 버전) advisory lock — 표가 아니라 세션 잠금
+7.6 접수(HTTP)   catalog.active()        활성 카탈로그 버전 id 1질의(마지막 폴링 뒤 1초 안이면 질의 없이 캐시) — 없으면 503
+슬롯 안          store.run_lock()         (수신자, 버전) advisory lock — 표가 아니라 세션 잠금, AUTOCOMMIT 커넥션(BEGIN/COMMIT 없음)
                  store.get_run()          profile_runs 한 행 읽기 → decide(): analyze / resend / skip
                  store.save(RUNNING)      profile_runs upsert (attempt +1)
-                 catalog.active()         버전 id 폴링, 바뀌었으면 상품 전체 다시 읽기
+                 catalog.active()         버전 id 폴링(접수 폴링 뒤 1초 안이면 생략), 바뀌었으면 상품 전체 다시 읽기
                  store.save(RESULT_READY) profile_runs에 콜백 본문·해시 커밋 — 콜백보다 먼저
                  recipient_store.upsert() recipient_profiles 1행 (낮은 버전이면 DB가 무시)
 7.7 콜백(HTTP)   store.save(최종 상태)    DELIVERED / SUPERSEDED / FAILED / RESULT_READY + callback_attempts
@@ -261,7 +261,7 @@ Backend는 콜백을 못 받으면 같은 `sourceVersion`으로 최대 2회 다�
 | `FAILED` | analyze | 다시 시도 |
 | `RESULT_READY` · `DELIVERED` · `SUPERSEDED` | resend | 저장된 본문을 그대로 재전송 |
 
-잠금(`stores.run_lock`)은 표가 아니라 PostgreSQL **세션 advisory lock**이다. (수신자, 버전)을 해시한 64비트 키로 `pg_try_advisory_lock`을 걸고, 판정부터 콜백까지를 한 잠금 안에서 한다. 표에 남는 것은 없고, 잠금이 걸린 커넥션 하나가 끝까지 유지된다.
+잠금(`stores.run_lock`)은 표가 아니라 PostgreSQL **세션 advisory lock**이다. (수신자, 버전)을 해시한 64비트 키로 `pg_try_advisory_lock`을 걸고, 판정부터 콜백까지를 한 잠금 안에서 한다. 표에 남는 것은 없고, 잠금이 걸린 커넥션 하나가 끝까지 유지된다. 그 커넥션은 AUTOCOMMIT이라 트랜잭션을 열지 않는다 — `idle in transaction`도, BEGIN/COMMIT 왕복도 없다(09-28).
 
 **직접 보기**
 
@@ -291,7 +291,7 @@ Backend 회신 xlsx 2종 (09-25)
    → load_catalog.py --id-map         backend_product_id · backend_category_id 채움
    → load_catalog.py --metrics        availability · view_count 채움
 앱 기동·요청마다
-   → DbCatalogReader.active()         활성 버전 id 폴링 → 바뀌었으면 _load()가 상품 전체를 한 문장으로 읽어 메모리에 캐시
+   → DbCatalogReader.active()         활성 버전 id 폴링(1초 TTL, 그 안은 캐시) → 바뀌었으면 _load()가 상품 전체를 한 문장으로 읽어 메모리에 캐시
    → pipeline.build_pool()            비선호(대분류·소분류) 제외 · unavailable 제외 · 조회수순 30개
 ```
 
@@ -308,7 +308,7 @@ Backend 회신 xlsx 2종 (09-25)
 | `loaded_at` | timestamptz | NOT NULL | |
 
 - **활성 교체는 트랜잭션 하나다.** `load_catalog.load()`가 새 버전 행·카테고리·상품을 넣고, 같은 트랜잭션에서 `is_active`를 옛 행 false → 새 행 true로 바꾼다. 중간 상태가 보이지 않는다.
-- **앱은 재시작 없이 따라온다.** `DbCatalogReader.active()`가 호출마다 `select id, package_id … where is_active`(작은 질의 1개)로 활성 id를 묻고, 지난번과 다르면 그때만 상품 전체를 다시 읽는다. 같으면 메모리 캐시를 그대로 준다.
+- **앱은 재시작 없이 따라온다.** `DbCatalogReader.active()`가 마지막 폴링 뒤 `CATALOG_POLL_TTL_S`(기본 1초)가 지났으면 `select id, package_id … where is_active`(작은 질의 1개)로 활성 id를 묻고, 지난번과 다르면 그때만 상품 전체를 다시 읽는다. TTL 안이면 묻지도 않고 메모리 캐시를 준다 — 새 적재나 활성 해제가 보이기까지 최대 1초(09-28).
 
 ### 3.2 `categories` — 2단 (대분류 10 · 소분류 57)
 
@@ -359,7 +359,7 @@ Backend 회신 xlsx 2종 (09-25)
 | 카탈로그 적재 | `tools/catalog/load_catalog.py load()` | 버전 INSERT → 카테고리 UPSERT(대분류 먼저, FK 때문) → 상품 UPSERT → `is_active` 교체. 트랜잭션 하나 | 셋 다 |
 | Backend 번호 반영 | `load_catalog.py --id-map` (`apply_id_map`) | `UPDATE … SET backend_*_id = :bid WHERE source_*_id = :sid` | `categories` · `products` |
 | 재고·조회수 반영 | `load_catalog.py --metrics` (`apply_metrics`) | `UPDATE products SET availability, view_count …` | `products` |
-| 앱 기동 · `/health` · 7.6 접수 · 분석 1단계 | `catalog.DbCatalogReader.active()` → `_active_version()` | `SELECT id, package_id FROM catalog_versions WHERE is_active` | `catalog_versions` |
+| 앱 기동 · `/health` · 7.6 접수 · 분석 1단계 | `catalog.DbCatalogReader.active()` → `_active_version()` | `SELECT id, package_id FROM catalog_versions WHERE is_active` (마지막 폴링 뒤 1초 안이면 생략) | `catalog_versions` |
 | 활성 버전이 바뀌었을 때만 | `DbCatalogReader._load()` | 버전 + 상품 + 소분류 + 대분류를 **한 문장**으로 조인(`_ACTIVE_PRODUCTS`) | 셋 다 |
 | 상품 30개 고르기 | `pipeline.build_pool()` | — (메모리 캐시) | — |
 | 회신 대조 | `tools/catalog/fetch_export.py --compare-db` | `SELECT`(옛 팀원 표 `ai_search.products`, §9) | — |
@@ -384,17 +384,17 @@ select availability, count(*), count(backend_product_id) as with_backend_id, cou
 | 코드 | `profile_runs` | `recipient_profiles` | `catalog_versions` | `categories` | `products` | `alembic_version` |
 |---|---|---|---|---|---|---|
 | `main.lifespan` (기동) | UPDATE 300초 넘은 RUNNING → FAILED | | 활성 id SELECT + 전체 로드 | 로드 | 로드 | SELECT — 없으면 기동 실패 |
-| `main.health` (`/health`) | COUNT RESULT_READY | | 활성 id SELECT | | | SELECT |
-| `intake.extract_and_pool` (7.6 접수) | | | 활성 id SELECT — 없으면 503 | | | |
-| `intake.dispatch` (슬롯 안) | advisory lock · SELECT 한 행 → decide | | | | | |
-| `pipeline.profile` (분석) | UPSERT RUNNING → RESULT_READY / FAILED | UPSERT — 낮은 버전 무시 | 활성 id SELECT — 바뀌었으면 재로드 | (재로드) | (재로드) | |
+| `main.health` (`/health`) | COUNT RESULT_READY | | 활성 id SELECT(1초 TTL) | | | SELECT |
+| `intake.extract_and_pool` (7.6 접수) | | | 활성 id SELECT(1초 TTL) — 없으면 503 | | | |
+| `intake.dispatch` (슬롯 안) | advisory lock(AUTOCOMMIT) · SELECT 한 행 → decide | | | | | |
+| `pipeline.profile` (분석) | UPSERT RUNNING → RESULT_READY / FAILED | UPSERT — 낮은 버전 무시 | 활성 id SELECT(1초 TTL) — 바뀌었으면 재로드 | (재로드) | (재로드) | |
 | `intake._send_and_record` (7.7 뒤) | UPSERT 최종 상태 · `callback_attempts` | | | | | |
 | `tools/catalog/load_catalog.py` | | | INSERT · `is_active` 교체 | UPSERT · UPDATE(`--id-map`) | UPSERT · UPDATE(`--id-map` · `--metrics`) | |
 | `tools/be_integration/drive.py` (시험) | SELECT · DELETE | DELETE | | | | |
 | `alembic upgrade head` (`ai-migrate`) | DDL | DDL | DDL | DDL | DDL | INSERT / UPDATE |
 | pytest 통합 시험 | 읽기·쓰기·삭제 | 읽기·쓰기·삭제 | `is_active` 잠깐 토글(503 시험) | 읽기 | 읽기 | 읽기 |
 
-굵은 규칙 셋 — **앱은 `ai_catalog`를 읽기만 한다**(쓰는 것은 `load_catalog.py`뿐), **`ai_profile`은 앱만 쓴다**(도구는 시험 정리뿐), **DDL은 alembic만 한다**. 전부 SQLAlchemy Engine 하나(`main._connect_db`)를 거치고, 카탈로그는 `DbCatalogReader`가 메모리에 캐시해 요청마다 표를 읽지 않는다.
+굵은 규칙 셋 — **앱은 `ai_catalog`를 읽기만 한다**(쓰는 것은 `load_catalog.py`뿐), **`ai_profile`은 앱만 쓴다**(도구는 시험 정리뿐), **DDL은 alembic만 한다**. 전부 SQLAlchemy Engine 하나(`main._connect_db`)를 거치고, 카탈로그는 `DbCatalogReader`가 메모리에 캐시해 요청마다 표를 읽지 않는다(활성 id 폴링도 1초에 한 번).
 
 ![코드와 표](assets/erd/03-코드-상호작용.png)
 
