@@ -56,7 +56,8 @@ uv run python -m tools.loadtest.run --n 100 --concurrency 100 --base 900001 --cl
 | `runs.e2e_ms` | 보낸 시각(하네스) → `updated_at`(DB, t0 에 잰 `now()` 로 정렬) | 접수→종료. be 모드는 로그 도착 시각 기준 |
 | `runs.time_to_all_terminal_s` · `throughput_per_s` | DB | 전부 끝나기까지 · 처리량 |
 | `db.connections_max` · `idle_in_tx_max` | `pg_stat_activity`(하네스 제외) | 커넥션 압박 · 열린 트랜잭션 |
-| `db.waiting_max` | 접수됐으나 미종료·미실행(근사) | 접수 대기 건수 — 40 을 넘으면 스레드풀 토큰이 바닥난다 |
+| `db.waiting_max` | 접수됐으나 미종료·미실행(근사) | 접수 대기 건수 근사 — Supervisor 수정 전에는 40 을 넘으면 스레드풀 토큰이 바닥났다 |
+| `health.queued_max` · `rejected_delta` | `/health supervisor.queued`·`rejected` | 실측 큐 깊이(09-28 이후)와 503 으로 거절된 수 |
 | `runs.multi_row_recipients` · `callback_attempts_total` · `received_delta` | DB · 가짜 `/received` | 재전송 흔적 · 콜백 시도 · 실제 도착 |
 
 ## BE 실물 구동 (S-C)

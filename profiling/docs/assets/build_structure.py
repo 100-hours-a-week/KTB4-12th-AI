@@ -41,7 +41,7 @@ def lines(x, y, rows, dy=15):
 
 
 # ---------------------------------------------------------------- 머리
-t(40, 46, 'profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-27)', 'title')
+t(40, 46, 'profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-28)', 'title')
 t(40, 70, 'Ports & Adapters(헥사고날). 업무 코드는 바깥(HTTP·파일·DB)을 모른다. 바깥이 업무가 정한 "포트(모양)"에 맞춰 들어온다 — 화살표는 항상 안쪽을 향한다.', 'small')
 
 LANES = [(170, 350), (546, 350), (922, 350), (1298, 350)]   # (x, w) — 포트 4개가 세로로 한 줄씩
@@ -50,7 +50,7 @@ LANES = [(170, 350), (546, 350), (922, 350), (1298, 350)]   # (x, w) — 포트 
 box(40, 92, W - 80, 62, 'band')
 t(56, 114, 'main.py', 'monob')
 t(140, 114, '[조립 · Composition Root]  여기서만 구체 클래스를 안다 — lifespan에서 4개를 만들어 app.state에 두고, 종료 때 정리한다 (아래 회색 점선).', 'msg')
-t(56, 136, '_connect_db(DATABASE_URL) → Db/FileCatalogReader(CATALOG_SOURCE) · DbProfileRunStore(engine) · DbRecipientProfileStore(engine) · HttpBackendPort(BACKEND_BASE_URL) · Supervisor(PROFILING_SLOTS)', 'mono')
+t(56, 136, '_connect_db(DATABASE_URL) → Db/FileCatalogReader(CATALOG_SOURCE) · DbProfileRunStore(engine) · DbRecipientProfileStore(engine) · HttpBackendPort(BACKEND_BASE_URL) · Supervisor(SLOTS, QUEUE_MAX)', 'mono')
 t(W - 56, 114, 'settings.py — 환경변수 PROFILING_* 한 곳', 'sub', 'end')
 t(W - 56, 136, '__init__.py — 공개 표면(profile · 자료형 · Settings)', 'sub', 'end')
 
@@ -80,9 +80,9 @@ lines(856, TOP + 44, [('[바깥 계약] 7.6·7.7·7.9 DTO', 'msg'),
 
 box(1230, TOP, 430, 96, 'stage')
 t(1246, TOP + 24, 'supervisor.py', 'monob')
-lines(1246, TOP + 44, [('[Supervisor] 프로파일링 슬롯(동시 1)', 'msg'),
-                       ('submit() → 응답 뒤 백그라운드에서 실행', 'mono'),
-                       ('기한·취소·재시작 복구는 다음', 'sub')])
+lines(1246, TOP + 44, [('[Supervisor] 워커 스레드 N + 상한 큐(가득이면 503)', 'msg'),
+                       ('submit() → 큐 → 워커가 실행 · stop()이 큐를 버림', 'mono'),
+                       ('기한·취소는 다음', 'sub')])
 
 path(f'M 340 {TOP+40} L 384 {TOP+40}')
 path(f'M 810 {TOP+70} L 836 {TOP+70}', 'grey')

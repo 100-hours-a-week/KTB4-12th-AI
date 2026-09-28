@@ -43,7 +43,7 @@ def lines(x, y, rows, dy=14):
         t(x, y + i * dy, s, c)
 
 
-t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-27 코드 기준 · 동시성·복구까지)', 'title')
+t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-28 코드 기준 · 큐·워커·왕복 줄이기까지)', 'title')
 t(40, 70, '위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.', 'small')
 
 # ───────────────────── 0. 조립 (main.py lifespan) ─────────────────────
@@ -51,9 +51,9 @@ Y0 = 90
 box(40, Y0, W - 80, 104, 'band', 6)
 t(52, Y0 + 20, '조립 — main.py  lifespan()  (프로세스 시작 1회, app.state에 둠)', 'h')
 lines(52, Y0 + 40, [
-    ('get_settings() (settings.py, PROFILING_*)  →  Db/FileCatalogReader(CATALOG_SOURCE)  →  Supervisor(PROFILING_SLOTS=1)  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)', 'mono'),
+    ('get_settings() (settings.py, PROFILING_*)  →  Db/FileCatalogReader(CATALOG_SOURCE)  →  Supervisor(PROFILING_SLOTS=1, QUEUE_MAX=200).start()  →  HttpBackendPort(BACKEND_BASE_URL, SERVICE_TOKEN, CALLBACK_TIMEOUT_S)', 'mono'),
     ('_connect_db(DATABASE_URL — select 1 · alembic_version 확인, 실패면 RuntimeError로 앱 안 뜸) → DbProfileRunStore(engine) · DbRecipientProfileStore(engine)   |   저장소는 PostgreSQL 하나뿐', 'mono'),
-    ('카탈로그 로드 실패 → _NoCatalog 대역 (7.6은 503, 앱은 뜸)    ·    종료: backend.close() · engine.dispose()    ·    GET /health → catalog · store(_store_health) · supervisor.stats()', 'mono'),
+    ('카탈로그 로드 실패 → _NoCatalog 대역 (7.6은 503, 앱은 뜸)    ·    종료: supervisor.stop(5s) → backend.close() · engine.dispose()    ·    GET /health(async, io_limiter) → catalog · store · supervisor.stats()', 'mono'),
     ('오류 봉투: on_validation_error(422→400 INVALID_REQUEST) · on_http_error(401/403/503) · on_unhandled(500) — 모두 _error_response() {message, error:{code, traceId}}', 'mono'),
 ])
 
@@ -63,7 +63,7 @@ CW, GAP = 385, 25
 XS = [40 + i * (CW + GAP) for i in range(4)]
 stages = [
     ('1  접수', 'intake.py', 'extract_and_pool()  — HTTP 안에서, 202까지'),
-    ('2  실행 슬롯', 'supervisor.py', 'Supervisor.submit() → _run()  — 응답 뒤 백그라운드'),
+    ('2  큐 · 워커 스레드', 'supervisor.py', 'Supervisor.submit() → queue → _worker()  — 워커 스레드(슬롯)'),
     ('3  처리', 'pipeline.py', 'run_and_callback() → profile(rq, catalog, store, …)'),
     ('4  콜백·기록', 'intake.py + backend.py', '_send_and_record()  — 최초 전송과 재전송이 같은 경로'),
 ]
@@ -81,29 +81,31 @@ lines(x + 12, TOP + 84, [
     ('② require_service_token()  Bearer ≠ SERVICE_TOKEN → 401', 'mono'),
     ('③ catalog.active()  없으면 → 503 SERVICE_UNAVAILABLE', 'mono'),
     ('④ rq = pipeline.to_internal(body)   camel → snake', 'mono'),
-    ('⑤ supervisor.submit(bg, dispatch, …)  판정은 슬롯 안에서', 'monob'),
+    ('⑤ supervisor.submit(dispatch, …) → 큐   판정은 슬롯 안에서', 'monob'),
+    ('     가득·종료 중이면 False → 503 + Retry-After: 30 (안 기다림)', 'sub'),
     ('· dispatch: run_lock(rid, sv) → decide() → 아래 셋 중 하나', 'sub'),
     ('· analyze 분석 · resend 콜백만 · skip 아무것도 안 함', 'sub'),
     ('  잠금 못 얻으면(다른 실행 처리 중) 아무것도 안 한다', 'sub'),
     ('⑥ 202 SuccessResponse[ProfileAccepted] · PENDING', 'monob'),
     ('', 'mono'),
-    ('의존성(Depends): get_catalog · get_store · get_recipient_store', 'sub'),
-    ('· get_backend · get_supervisor  ← app.state', 'sub'),
+    ('의존성(Depends, 전부 async): get_catalog · get_store · get_recipient_store', 'sub'),
+    ('· get_backend · get_supervisor · get_io_limiter · settings_dep  ← app.state', 'sub'),
     ('_error() → HTTPException → main.on_http_error 봉투', 'sub'),
     ('Backend는 실패·타임아웃이면 같은 번호로 최대 2회 재시도(09-27 BE 계획)', 'sub'),
 ])
 # 2 슬롯
 x = XS[1]
 lines(x + 12, TOP + 84, [
-    ('submit(bg, fn, *args)', 'monob'),
-    ('  _submitted += 1 · bg.add_task(_run, fn, *args)', 'mono'),
-    ('  → FastAPI BackgroundTasks: 응답 전송 뒤 같은 프로세스에서', 'sub'),
-    ('_run(fn, *args)', 'monob'),
-    ('  with Semaphore(profiling_slots=1):   ← 슬롯. 차 있으면 대기', 'mono'),
-    ('      _running += 1 · fn(*args) · finally _running -= 1', 'mono'),
-    ('stats() → {slots, running, submitted}   (/health)', 'mono'),
+    ('submit(fn, *args) → bool', 'monob'),
+    ('  put_nowait — 가득·closing 이면 False → 라우터가 503', 'mono'),
+    ('  대기는 큐에서 — anyio 스레드풀 토큰을 안 쓴다 (09-28)', 'sub'),
+    ('_worker()  × profiling_slots  (daemon 스레드)', 'monob'),
+    ('  get() → _running += 1 · fn(*args) · 예외 격리(failed)', 'mono'),
+    ('stop(5s): closing → 큐 버림(건수 로그) → 실행 중 join', 'mono'),
+    ('stats() → {slots, running, queued, queue_max,', 'mono'),
+    ('  submitted, completed, rejected, failed}   (/health)', 'mono'),
     ('', 'mono'),
-    ('fn = run_and_callback(분석) 또는 resend_callback(재전송만)', 'sub'),
+    ('fn = dispatch → run_and_callback(분석) 또는 resend_callback(재전송만)', 'sub'),
     ('기한(deadline)·취소는 아직 없음 (3단계 §12.1 240초는 다음)', 'sub'),
 ])
 # 3 처리
@@ -236,7 +238,7 @@ t(110, NY + 22, 'ProfileExtractRequest(camel) → to_internal → ProfileRequest
 t(40, NY + 44, '실패 경로', 'h2')
 t(110, NY + 44, '400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.', 'sub')
 t(40, NY + 66, '시험', 'h2')
-t(110, NY + 66, '단위(tests/unit, 131): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 44): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
+t(110, NY + 66, '단위(tests/unit, 154): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 51): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
 parts.append('</svg>')
 (P / 'pipeline-map.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')
 print('svg ok')

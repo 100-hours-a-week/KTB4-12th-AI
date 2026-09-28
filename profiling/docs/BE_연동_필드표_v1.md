@@ -71,7 +71,7 @@ v1 본문은 이 **세 필드가 전부**다. (⚠ 계약 원문에는 `giftPref
 | 400 | `INVALID_REQUEST` | 하위 필드 누락 | `… dislikedCategories.0.categoryName — Field required` | 〃 |
 | 401 | `UNAUTHORIZED` | `Authorization` 없음 / `Bearer ` 아님 | `서비스 토큰이 없습니다.` | 토큰 설정 확인 |
 | 401 | `UNAUTHORIZED` | 토큰 값 다름 | `서비스 토큰이 올바르지 않습니다.` | 〃 |
-| 503 | `SERVICE_UNAVAILABLE` | AI에 활성 카탈로그(상품 목록 적재본)가 없음 | `활성 카탈로그가 없습니다.` | `Retry-After`(300초) 뒤 **같은 번호** 재시도 (§3.6). 상태 불변. **헤더 `Retry-After: 300` 을 실제로 보낸다**(09-26 구현) |
+| 503 | `SERVICE_UNAVAILABLE` | AI에 활성 카탈로그(상품 목록 적재본)가 없음 · **또는 접수 대기열 가득(09-28)** | `활성 카탈로그가 없습니다.` · `접수 대기열이 가득 찼습니다.` | `Retry-After`(카탈로그 없음 300초 · 대기열 가득 30초) 뒤 **같은 번호** 재시도 (§3.6). 상태 불변. **헤더 `Retry-After: 300` 을 실제로 보낸다**(09-26 구현) |
 | 500 | `INTERNAL_SERVER_ERROR` | AI 내부 오류 | `서버 오류가 발생했습니다.` | 백오프 뒤 **같은 번호** 재시도 (§3.6). 상태 불변 |
 
 오류가 **아닌** 것: 계약에 없는 필드(예: `dislikedCategories[].weight`, 최상위 `extra`) → **202** 정상 접수, AI 로그에 `CONTRACT_7_6_UNKNOWN_FIELD unknown={...}` 경고만.
@@ -482,6 +482,7 @@ BE 계획 5-1은 AI 응답을 "오류 유형"으로 나눠 재시도 여부를 �
 | 404 | `NOT_FOUND` | 경로 오타 | `Not Found` | 없음 — 주소 확인 |
 | 405 | `INTERNAL_SERVER_ERROR` | 잘못된 메서드(GET 등). 코드 이름이 상황과 맞지 않는다 — 알려진 한계 | `Method Not Allowed` | 없음 — 메서드 확인 |
 | 503 | `SERVICE_UNAVAILABLE` | 활성 카탈로그 없음. **헤더 `Retry-After: 300`** | `활성 카탈로그가 없습니다.` | `Retry-After` 뒤 **같은 번호** |
+| 503 | `SERVICE_UNAVAILABLE` | 접수 대기열 가득(`QUEUE_MAX` 200) 또는 종료 중(09-28). **헤더 `Retry-After: 30`** — 기다리지 않고 바로 거절 | `접수 대기열이 가득 찼습니다.` | `Retry-After` 뒤 **같은 번호** |
 | 500 | `INTERNAL_SERVER_ERROR` | 잡히지 않은 예외 | `서버 오류가 발생했습니다.` | 백오프 뒤 **같은 번호** |
 
 - 토큰과 본문이 둘 다 틀리면 **401이 먼저**다(의존성이 본문보다 먼저 풀린다).
