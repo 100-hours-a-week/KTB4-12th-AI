@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -63,7 +63,13 @@ class Settings(BaseSettings):
     MAX_REVIEWS: int = Field(default=10, ge=0, description="reviews 상한 (7.6: 최신순 최대 10)")
 
     # ---- 실행 (3단계 구현 상세 §12.1 개발 시험 시작값)
-    PROFILING_SLOTS: int = Field(default=1, ge=1, description="프로파일링 동시 실행 수 (Supervisor 슬롯)")
+    PROFILING_SLOTS: int = Field(
+        default=1, ge=1,
+        # 필드 이름에 접두사가 이미 들어 있어 env_prefix 를 태우면 PROFILING_PROFILING_SLOTS 가 된다(이슈 2026-09-28_1424).
+        # 별칭은 접두사를 타지 않으므로 문서 이름 PROFILING_SLOTS 를 읽고, 옛 이름도 계속 받는다.
+        validation_alias=AliasChoices("PROFILING_SLOTS", "PROFILING_PROFILING_SLOTS"),
+        description="프로파일링 동시 실행 수 (Supervisor 슬롯). 환경변수 PROFILING_SLOTS",
+    )
     RUNNING_STALE_S: int = Field(
         default=300, ge=1,
         description="RUNNING 기록을 '죽은 실행'으로 보는 기준(초). 접수 단계 중복 판정이 쓴다 — 이보다 오래된 RUNNING은 "
