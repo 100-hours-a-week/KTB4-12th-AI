@@ -97,6 +97,7 @@ def _connect_db(settings: Settings) -> sa.Engine:
     engine = sa.create_engine(settings.DATABASE_URL, pool_pre_ping=True, future=True)
     try:
         with engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT")     # 읽기 한 문장 — BEGIN/ROLLBACK 없이
             version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
     except sa.exc.OperationalError as e:
         engine.dispose()
@@ -190,6 +191,7 @@ def _store_health(request: Request) -> dict:
     engine = request.app.state.engine
     try:
         with engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT")     # 읽기 한 문장 — BEGIN/ROLLBACK 없이
             version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
         # 결과는 만들었는데 Backend 에 전달하지 못한 행. 늘어나면 콜백 경로에 문제가 있다는 뜻이라 운영이 바로 봐야 한다.
         return {"backend": "db", "connected": True, "migration": version,

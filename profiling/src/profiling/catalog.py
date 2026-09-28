@@ -270,6 +270,7 @@ class DbCatalogReader:
         """(활성 버전 id, 그 패키지 이름). 작은 질의 하나 — active() 가 TTL 이 지났을 때 부른다."""
         try:
             with self._engine.connect() as conn:
+                conn.execution_options(isolation_level="AUTOCOMMIT")   # 읽기 한 문장 — BEGIN/ROLLBACK 왕복 없이
                 row = conn.execute(_ACTIVE_VERSION).first()
         except sa.exc.SQLAlchemyError as e:
             raise NoActiveCatalog(f"카탈로그를 읽을 수 없습니다: {type(e).__name__}: {e}") from e
@@ -280,6 +281,7 @@ class DbCatalogReader:
     def _load(self) -> None:
         """활성 버전 + 그 상품을 한 문장으로 읽어 캐시를 바꾼다. 버전은 **그 결과에서** 꺼낸다."""
         with self._engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT")
             rows = conn.execute(_ACTIVE_PRODUCTS).mappings().all()
         if not rows:
             raise NoActiveCatalog("활성 버전의 패키지에 상품이 없습니다 — tools/catalog/load_catalog.py 로 적재하세요")

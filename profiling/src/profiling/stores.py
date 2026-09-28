@@ -6,7 +6,12 @@
 표 구조·UPSERT 규칙·상태 전이는 docs/DB_전환_설명.md, 근거는 3단계 구현 상세 §10.2·§16.4 및 담당파트 설계서 §1.7.
 다른 구현을 끼울 자리는 ports.py(Protocol)이고, 조립은 main.py 한 곳에서만 한다.
 
-스레드 안전: Engine 커넥션 풀이 담당한다 — 메서드마다 `with engine.begin()` 트랜잭션 하나. run_lock 만 예외 — AUTOCOMMIT 커넥션 하나를 잠금이 풀릴 때까지 든다.
+커넥션 규칙 (09-28 DB 왕복 줄이기):
+  - run_lock 이 잡은 커넥션(AUTOCOMMIT)은 잠금이 풀릴 때까지 들고 있고, **같은 스레드**의 저장소 호출(save·get_run·upsert…)은
+    thread-local 로 그 커넥션을 재사용한다 — 문장마다 풀에서 꺼내던 핑·BEGIN·COMMIT 이 없어져 문장 하나 = 왕복 하나.
+  - 잠금 밖에서는 풀에서 꺼낸다: 쓰기는 `engine.begin()` 트랜잭션 하나, 읽기는 AUTOCOMMIT(BEGIN/ROLLBACK 없음).
+  - 잠금 커넥션에서 도는 문장은 각각 자기 트랜잭션이다(문장 단위 원자성). 결과 저장과 프로필 upsert 가 한 트랜잭션은 아니다 —
+    upsert 실패 시 pipeline 이 실행 기록을 FAILED 로 되돌리는 보상이 그 역할을 한다(DB_전환_설명 §6).
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -32,6 +38,37 @@ from profiling.types import (
 )
 
 log = logging.getLogger(__name__)
+
+_lock_local = threading.local()      # run_lock 이 잡은 커넥션 — 같은 스레드의 저장소 호출이 재사용한다
+
+
+def _lock_conn() -> sa.Connection | None:
+    """이 스레드가 run_lock 안이면 그 커넥션, 아니면 None."""
+    return getattr(_lock_local, "conn", None)
+
+
+@contextmanager
+def _autocommit(engine: Engine) -> Iterator[sa.Connection]:
+    """읽기 한 문장용 커넥션 — 트랜잭션을 열지 않아 BEGIN/ROLLBACK 왕복이 없다."""
+    conn = engine.connect()
+    try:
+        conn.execution_options(isolation_level="AUTOCOMMIT")
+        yield conn
+    finally:
+        conn.close()
+
+
+def _one(engine: Engine, stmt: Any, params: dict[str, Any], fetch: Any, *, write: bool) -> Any:
+    """문장 하나를 실행하고 fetch(result) 를 돌려준다. 잠금 커넥션을 쥔 스레드면 거기서(왕복 1), 아니면 풀에서 꺼내
+    쓰기는 트랜잭션 하나(engine.begin), 읽기는 AUTOCOMMIT 으로."""
+    conn = _lock_conn()
+    if conn is not None:
+        return fetch(conn.execute(stmt, params))
+    if write:
+        with engine.begin() as c:
+            return fetch(c.execute(stmt, params))
+    with _autocommit(engine) as c:
+        return fetch(c.execute(stmt, params))
 
 
 # ===========================================================================
@@ -136,19 +173,16 @@ class DbProfileRunStore:
             "callback_attempts": outcome.callback_attempts,
             "error": json.dumps(error, ensure_ascii=False) if error is not None else None,
         }
-        with self._engine.begin() as conn:
-            run_id, attempt = conn.execute(_RUN_UPSERT, params).one()
+        run_id, attempt = _one(self._engine, _RUN_UPSERT, params, lambda r: r.one(), write=True)
         log.debug("profile_runs recipient=%s source_version=%s → %s (id=%s attempt=%s callback_attempts=%s)",
                   outcome.recipient_user_id, outcome.source_version, outcome.status, run_id, attempt, outcome.callback_attempts)
 
     def get(self, recipient_user_id: int) -> ProfileOutcome | None:
-        with self._engine.begin() as conn:
-            row = conn.execute(_RUN_LATEST, {"rid": recipient_user_id}).mappings().first()
+        row = _one(self._engine, _RUN_LATEST, {"rid": recipient_user_id}, lambda r: r.mappings().first(), write=False)
         return _to_outcome(row)
 
     def get_run(self, recipient_user_id: int, source_version: int) -> ProfileOutcome | None:
-        with self._engine.begin() as conn:
-            row = conn.execute(_RUN_BY_KEY, {"rid": recipient_user_id, "sv": source_version}).mappings().first()
+        row = _one(self._engine, _RUN_BY_KEY, {"rid": recipient_user_id, "sv": source_version}, lambda r: r.mappings().first(), write=False)
         return _to_outcome(row)
 
     @contextmanager
@@ -167,6 +201,8 @@ class DbProfileRunStore:
             아니다(최악이 분석 한 번 더). `execution_options` 의 오류는 SQLAlchemyError 가 아니라 psycopg 원본이라
             `Exception` 으로 받는다.
           - 해제에 실패한 커넥션은 **버린다**(invalidate). 풀에 돌려보내면 세션 잠금이 살아 있어 그 키가 영영 막힌다.
+          - 잠금을 쥔 동안 **같은 스레드의 저장소 호출은 이 커넥션을 재사용**한다(thread-local `_lock_local`). 문장마다 풀에서
+            꺼내던 핑·BEGIN·COMMIT 이 사라져 문장 하나 = 왕복 하나. 나가면서 반드시 비운다(finally).
         """
         key = _lock_key(recipient_user_id, source_version)
         conn = None
@@ -182,10 +218,13 @@ class DbProfileRunStore:
             return
 
         try:
-            if not got:
+            if got:
+                _lock_local.conn = conn                # 같은 스레드의 저장소 호출이 이 커넥션을 쓴다
+            else:
                 log.info("이미 처리 중 recipient=%s source_version=%s — 이번 접수는 건너뛴다", recipient_user_id, source_version)
             yield got
         finally:
+            _lock_local.conn = None
             if got:
                 try:
                     conn.execute(sa.text("select pg_advisory_unlock(:k)"), {"k": key})
@@ -224,8 +263,8 @@ class DbProfileRunStore:
         0 이 정상이다. 늘어나면 7.7 경로(네트워크·Backend 5xx)에 문제가 있다는 뜻이고, 그 행들은 Backend 가
         같은 번호로 다시 보낼 때 재전송된다.
         """
-        with self._engine.begin() as conn:
-            return conn.execute(sa.text(f"select count(*) from {RUNS_TABLE} where status = 'RESULT_READY'")).scalar_one()
+        return _one(self._engine, sa.text(f"select count(*) from {RUNS_TABLE} where status = 'RESULT_READY'"), {},
+                    lambda r: r.scalar_one(), write=False)
 
     # ---- 편의 (시험·운영) ---------------------------------------------------------
 
@@ -271,8 +310,7 @@ class DbRecipientProfileStore:
             "disliked": json.dumps(profile.disliked_tags, ensure_ascii=False),
             "categories": json.dumps([c.model_dump() for c in profile.disliked_categories], ensure_ascii=False),
         }
-        with self._engine.begin() as conn:
-            written = conn.execute(_PROFILE_UPSERT, params).rowcount
+        written = _one(self._engine, _PROFILE_UPSERT, params, lambda r: r.rowcount, write=True)
         if written == 0:   # WHERE에 걸림 = 기존 행이 더 새 버전 (순서 역전)
             log.warning("recipient_profiles recipient=%s source_version=%s 는 기존 행보다 낮아 무시", profile.recipient_user_id, profile.source_version)
         else:
@@ -280,8 +318,7 @@ class DbRecipientProfileStore:
                       profile.recipient_user_id, profile.source_version, len(profile.disliked_categories))
 
     def get(self, recipient_user_id: int) -> RecipientProfile | None:
-        with self._engine.begin() as conn:
-            row = conn.execute(_PROFILE_GET, {"rid": recipient_user_id}).mappings().first()
+        row = _one(self._engine, _PROFILE_GET, {"rid": recipient_user_id}, lambda r: r.mappings().first(), write=False)
         if row is None:
             return None
         return RecipientProfile(

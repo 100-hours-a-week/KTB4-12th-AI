@@ -7,7 +7,13 @@ C: 잠금을 걸지 못해도(커넥션·질의 어느 쪽이든) 진행하는�
 import psycopg
 import sqlalchemy as sa
 
-from profiling.stores import DbProfileRunStore, _lock_key
+from profiling.stores import (
+    DbProfileRunStore,
+    DbRecipientProfileStore,
+    _lock_conn,
+    _lock_key,
+)
+from profiling.types import ProfileOutcome, RecipientProfile, RunStatus
 
 # ---------------------------------------------------------------- B. 잠금 키
 
@@ -76,12 +82,22 @@ def test_run_lock_proceeds_when_connect_fails() -> None:
 # ---------------------------------------------------------------- D. AUTOCOMMIT (09-28 왕복 줄이기)
 
 
-class _Scalar:
-    def __init__(self, v):
-        self._v = v
+class _Result:
+    """execute() 결과 흉내 — 잠금(scalar_one) · upsert(one/rowcount) · 조회(mappings().first) 모양 전부."""
+
+    rowcount = 1
 
     def scalar_one(self):
-        return self._v
+        return True
+
+    def one(self):
+        return ("run-id", 1)
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return None
 
 
 class _RecordingConn:
@@ -99,7 +115,7 @@ class _RecordingConn:
 
     def execute(self, stmt, params=None):
         self.calls.append(str(stmt))
-        return _Scalar(True)
+        return _Result()
 
     def commit(self):
         self.calls.append("commit")
@@ -112,10 +128,14 @@ class _RecordingConn:
 
 
 class _RecordingEngine:
+    """connect() 횟수를 센다. begin() 이 없으므로 저장소가 풀에서 트랜잭션을 열려 하면 AttributeError 로 드러난다."""
+
     def __init__(self):
         self.conn = _RecordingConn()
+        self.connects = 0
 
     def connect(self):
+        self.connects += 1
         return self.conn
 
 
@@ -143,3 +163,43 @@ def test_run_lock_proceeds_when_autocommit_cannot_be_set() -> None:
     with DbProfileRunStore(engine).run_lock(1, 1) as got:      # type: ignore[arg-type]
         assert got is True
     assert engine.conn.closed is True
+
+
+# ---------------------------------------------------------------- E. 잠금 커넥션 재사용 (09-28 왕복 줄이기 2차)
+
+
+def test_store_calls_inside_run_lock_reuse_the_lock_connection() -> None:
+    """잠금을 쥔 동안 같은 스레드의 save·get_run·upsert 는 잠금 커넥션에서 문장 하나씩 — 풀에서 더 꺼내지 않는다."""
+    engine = _RecordingEngine()
+    runs, profiles = DbProfileRunStore(engine), DbRecipientProfileStore(engine)   # type: ignore[arg-type]
+    with runs.run_lock(1, 1) as got:
+        assert got is True and _lock_conn() is engine.conn
+        assert runs.get_run(1, 1) is None
+        runs.save(ProfileOutcome(recipient_user_id=1, source_version=1, status=RunStatus.RUNNING, input_hash="h"))
+        profiles.upsert(RecipientProfile(recipient_user_id=1, source_version=1))
+    assert engine.connects == 1                                              # 잠금 커넥션 하나뿐
+    sql = [c for c in engine.conn.calls if c not in ("execution_options", "commit")]
+    assert "profile_runs" in sql[1] and "insert into" in sql[2] and "recipient_profiles" in sql[3]   # LOCK · get_run · save · upsert · UNLOCK
+    assert sql[0].startswith("select pg_try_advisory_lock") and sql[-1].startswith("select pg_advisory_unlock")
+    assert _lock_conn() is None                                              # 나가면서 비운다
+
+
+def test_store_calls_outside_run_lock_use_the_pool() -> None:
+    engine = _RecordingEngine()
+    runs = DbProfileRunStore(engine)                                          # type: ignore[arg-type]
+    with runs.run_lock(1, 1):
+        pass
+    assert engine.connects == 1
+    assert runs.get_run(1, 1) is None                                        # 잠금 밖: AUTOCOMMIT 읽기 커넥션을 새로 꺼낸다
+    assert engine.connects == 2
+
+
+def test_lock_local_is_cleared_when_the_body_raises() -> None:
+    engine = _RecordingEngine()
+    runs = DbProfileRunStore(engine)                                          # type: ignore[arg-type]
+    try:
+        with runs.run_lock(1, 1):
+            raise RuntimeError("작업 실패")
+    except RuntimeError:
+        pass
+    assert _lock_conn() is None and engine.conn.closed is True

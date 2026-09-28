@@ -298,3 +298,31 @@ def test_profile_runs_column_comments_match_0004(engine) -> None:
     assert "ai_catalog.catalog_versions.id" in comments["catalog_version_id"]
     assert "ai_search" not in comments["catalog_version_id"]
     assert "RUNNING_STALE_S" in comments["updated_at"]
+
+
+def test_run_lock_connection_is_reused_for_store_calls(engine) -> None:
+    """잠금을 쥔 동안 저장소 호출은 풀에서 더 꺼내지 않고(체크아웃 0) 잠금 커넥션에서 돈다. 나가면 다시 풀에서 꺼낸다.
+    AUTOCOMMIT 이라 문장마다 곧바로 커밋된다 — 잠금 밖에서 읽어도 보인다."""
+    rid, sv = 991_004, 1
+    runs, profiles = DbProfileRunStore(engine), DbRecipientProfileStore(engine)
+    checkouts: list[int] = []
+
+    def on_checkout(dbapi_conn, record, proxy) -> None:
+        checkouts.append(1)
+
+    sa.event.listen(engine, "checkout", on_checkout)
+    try:
+        with runs.run_lock(rid, sv) as got:
+            assert got is True
+            n_lock = len(checkouts)                                          # 잠금 커넥션 하나
+            assert runs.get_run(rid, sv) is None
+            runs.save(ProfileOutcome(recipient_user_id=rid, source_version=sv, status=RunStatus.RUNNING, input_hash="h"))
+            profiles.upsert(RecipientProfile(recipient_user_id=rid, source_version=sv))
+            assert len(checkouts) == n_lock                                  # 풀에서 더 꺼내지 않았다
+        assert runs.get_run(rid, sv).status is RunStatus.RUNNING            # 커밋돼 있다
+        assert profiles.get(rid) is not None
+        assert len(checkouts) == n_lock + 2                                  # 잠금 밖 읽기 둘은 풀에서
+    finally:
+        sa.event.remove(engine, "checkout", on_checkout)
+        runs.delete_recipient(rid)
+        profiles.delete(rid)
