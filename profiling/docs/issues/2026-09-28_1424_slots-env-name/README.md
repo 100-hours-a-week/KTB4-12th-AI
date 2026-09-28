@@ -5,7 +5,7 @@
 | 발견 시점 | 2026-09-28 14:24 — 부하 시험 하네스 설계 중 환경 조사 |
 | 발견 방법 | 슬롯 4로 띄우려고 `PROFILING_SLOTS=4`를 주고 `Settings()`와 `/health`의 `supervisor.slots`를 확인 → 1 |
 | 대상 코드 | `src/profiling/settings.py:66` (`PROFILING_SLOTS` 필드) · 09-22 초기 구현부터(현 경로는 `d2c3f41` 평탄화 이후) |
-| 상태 | **열림** |
+| 상태 | **해결 · 커밋 `da0ccd7`** (2026-09-28) — `validation_alias` 로 문서 이름·옛 이름 둘 다 읽음. 시험 4개 추가(140 passed) |
 | 심각도 | 🟡 — 지금은 기본값 1이라 동작 차이가 없지만, 배포 env에 `PROFILING_SLOTS=N`을 넣어도 조용히 1로 돈다 |
 
 ## 문제 이름

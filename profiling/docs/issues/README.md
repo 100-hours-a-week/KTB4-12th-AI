@@ -6,7 +6,7 @@
 
 | 폴더 | 무엇 | 심각도 | 상태 |
 |---|---|---|---|
-| [2026-09-28_1424_slots-env-name](2026-09-28_1424_slots-env-name/) | 슬롯 수 환경변수 이름 — 문서는 `PROFILING_SLOTS`, 코드는 `PROFILING_PROFILING_SLOTS`만 읽음 | 🟡 | 열림 |
+| [2026-09-28_1424_slots-env-name](2026-09-28_1424_slots-env-name/) | 슬롯 수 환경변수 이름 — 문서는 `PROFILING_SLOTS`, 코드는 `PROFILING_PROFILING_SLOTS`만 읽음 | 🟡 | 해결 · `da0ccd7` |
 | [2026-09-27_1633_advisory-lock](2026-09-27_1633_advisory-lock/) | `run_lock` 3건 — 트랜잭션을 열어둔 채 작업 · 잠금 키 32비트 절단 · 문서-동작 불일치 | 🔴🟡🟡 | 해결 · `d50b1b8` |
 
 ## 규칙
