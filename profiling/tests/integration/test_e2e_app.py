@@ -225,6 +225,7 @@ def test_503_carries_retry_after_and_recovery_runs(engine, monkeypatch) -> None:
     같은 기동에서 "끊긴 실행 정리"(시작 시 1회)도 돌았는지 함께 본다.
     """
     monkeypatch.setenv("PROFILING_CATALOG_SOURCE", "db")
+    monkeypatch.setenv("PROFILING_CATALOG_POLL_TTL_S", "0")     # 비활성화를 곧바로 보게 — 개발 .env 의 TTL 이 새어 들어와도
     get_settings.cache_clear()
     with engine.begin() as c:
         row = c.execute(sa.text("select id from ai_catalog.catalog_versions where is_active")).first()

@@ -57,11 +57,11 @@ async def lifespan(app: FastAPI):
     # 카탈로그 — 설정 한 줄로 DB(배포)와 파일(로컬) 중 하나. 로드 실패해도 앱은 띄운다: 7.6이 503을 내고, /health가 active=false를 보이게.
     try:
         ## 상품DB연결
-        app.state.catalog = (DbCatalogReader(app.state.engine) if settings.CATALOG_SOURCE == "db"
+        app.state.catalog = (DbCatalogReader(app.state.engine, poll_ttl_s=settings.CATALOG_POLL_TTL_S) if settings.CATALOG_SOURCE == "db"
                              else FileCatalogReader(Path(settings.CATALOG_FILE)))
         version_id, products = app.state.catalog.active()
         log.info("카탈로그 로드 source=%s version=%s products=%d (%s)", settings.CATALOG_SOURCE, version_id, len(products),
-                 "ai_catalog" if settings.CATALOG_SOURCE == "db" else settings.CATALOG_FILE)
+                 f"ai_catalog poll_ttl_s={settings.CATALOG_POLL_TTL_S}" if settings.CATALOG_SOURCE == "db" else settings.CATALOG_FILE)
     except NoActiveCatalog as e:
         log.error("활성 카탈로그 없음: %s — 7.6은 503을 반환합니다", e)
         app.state.catalog = _NoCatalog(str(e))

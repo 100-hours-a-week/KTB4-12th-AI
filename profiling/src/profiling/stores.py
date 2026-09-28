@@ -6,7 +6,7 @@
 표 구조·UPSERT 규칙·상태 전이는 docs/DB_전환_설명.md, 근거는 3단계 구현 상세 §10.2·§16.4 및 담당파트 설계서 §1.7.
 다른 구현을 끼울 자리는 ports.py(Protocol)이고, 조립은 main.py 한 곳에서만 한다.
 
-스레드 안전: Engine 커넥션 풀이 담당한다 — 메서드마다 `with engine.begin()` 트랜잭션 하나.
+스레드 안전: Engine 커넥션 풀이 담당한다 — 메서드마다 `with engine.begin()` 트랜잭션 하나. run_lock 만 예외 — AUTOCOMMIT 커넥션 하나를 잠금이 풀릴 때까지 든다.
 """
 
 from __future__ import annotations
@@ -160,20 +160,21 @@ class DbProfileRunStore:
         돌지 않는다. 기다리지 않는다(try) — 이미 누가 처리 중이면 이번 요청은 할 일이 없다.
 
         세 가지 규칙이 있다 (2026-09-27 이슈 A·C 에서 나온 것):
-          - 잠금을 얻은 **직후 커밋**한다. SQLAlchemy 가 첫 질의에 트랜잭션을 자동으로 여는데, 닫지 않으면 작업 내내
-            `idle in transaction` 으로 남아 VACUUM 을 막고 세션 타임아웃에 끊길 수 있다(끊기면 잠금도 사라진다).
-            세션 잠금은 트랜잭션과 무관해 커밋해도 유지된다.
+          - 잠금 커넥션은 **AUTOCOMMIT** 으로 쓴다(`execution_options`, 첫 질의 전에). 트랜잭션을 아예 열지 않으므로 작업 내내
+            `idle in transaction` 이 생기지 않고(VACUUM·세션 타임아웃 문제 없음) BEGIN/COMMIT 왕복도 없다 — 잠금·해제가
+            각각 문장 하나다. 세션 잠금은 트랜잭션과 무관하다. (09-27 에는 "잠금 직후 커밋"이었다 — 09-28 왕복 줄이기.)
           - 잠금을 **못 걸면 진행한다** — 커넥션이든 질의든. 잠금은 중복을 줄이는 장치이지 접수를 막는 장치가
-            아니다(최악이 분석 한 번 더).
+            아니다(최악이 분석 한 번 더). `execution_options` 의 오류는 SQLAlchemyError 가 아니라 psycopg 원본이라
+            `Exception` 으로 받는다.
           - 해제에 실패한 커넥션은 **버린다**(invalidate). 풀에 돌려보내면 세션 잠금이 살아 있어 그 키가 영영 막힌다.
         """
         key = _lock_key(recipient_user_id, source_version)
         conn = None
         try:
-            conn = self._engine.connect()
+            conn = self._engine.connect()                                     # pre-ping 은 여기서 끝난다(스스로 autocommit 을 켰다 끈다)
+            conn.execution_options(isolation_level="AUTOCOMMIT")              # 첫 execute 전에. 트랜잭션을 열지 않으니 BEGIN/COMMIT 왕복이 없다
             got = bool(conn.execute(sa.text("select pg_try_advisory_lock(:k)"), {"k": key}).scalar_one())
-            conn.commit()                              # 자동으로 열린 트랜잭션을 여기서 끝낸다 — 잠금은 남는다
-        except sa.exc.SQLAlchemyError:
+        except Exception:      # SQLAlchemyError 뿐 아니라 execution_options 가 감싸지 않고 올리는 psycopg 원본 오류까지 — 못 걸면 진행
             log.exception("잠금을 걸지 못함 recipient=%s source_version=%s — 잠금 없이 진행", recipient_user_id, source_version)
             if conn is not None:
                 conn.close()
@@ -188,11 +189,10 @@ class DbProfileRunStore:
             if got:
                 try:
                     conn.execute(sa.text("select pg_advisory_unlock(:k)"), {"k": key})
-                    conn.commit()
                 except sa.exc.SQLAlchemyError:
                     log.exception("잠금 해제 실패 recipient=%s source_version=%s — 이 커넥션을 버린다", recipient_user_id, source_version)
                     conn.invalidate()
-            conn.close()
+            conn.close()                                                      # 풀로 돌아가며 격리 수준은 기본값으로 복원된다(왕복 없음)
 
     # ---- 운영 -------------------------------------------------------------------
 

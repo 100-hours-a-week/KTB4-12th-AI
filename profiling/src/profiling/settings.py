@@ -57,6 +57,13 @@ class Settings(BaseSettings):
                     "상대경로는 실행 위치(profiling/) 기준. CATALOG_SOURCE=file 일 때만 쓴다",
     )
 
+    CATALOG_POLL_TTL_S: float = Field(
+        default=1.0, ge=0,
+        description="DbCatalogReader 가 활성 버전 id 를 다시 묻기까지의 최소 간격(초). 그 안에서는 DB 없이 들고 있던 카탈로그를 준다 — "
+                    "7.6 한 건이 접수·슬롯에서 두 번 폴링해 DB 왕복 8번을 쓰던 것을 없앤다. 새 적재·활성 해제(503)가 보이기까지 "
+                    "최대 이 시간만큼 늦는다. 0 = 호출마다 묻는다(옛 동작). CATALOG_SOURCE=db 일 때만 쓴다",
+    )
+
     # ---- 계약 상한 (문서 1 §7.6·§7.7 · C-05)
     POOL_SIZE: int = Field(default=30, ge=1, le=30, description="7.7 recommendedProductIds 개수 상한")
     MAX_DISLIKED: int = Field(default=5, ge=0, description="dislikedCategories 상한 (C-05)")

@@ -182,3 +182,71 @@ def test_parent_category_is_filled_from_db(engine, active) -> None:
             "where coalesce(p.backend_product_id, split_part(p.source_product_id, ':', 2)::bigint) = :pid"),
             {"pid": p.productId}).mappings().one()
     assert (p.parentCategoryId, p.parentCategoryName) == (row["pid"], row["pname"])
+
+
+# ---------------------------------------------------------------- 폴링 TTL (09-28 왕복 줄이기)
+
+
+def _count_polls(cat: DbCatalogReader) -> list[int]:
+    """cat._active_version 을 감싸 호출 수를 센다 (test_version_comes_from… 과 같은 인스턴스 속성 치환)."""
+    calls, real = [0], cat._active_version
+
+    def wrapped():
+        calls[0] += 1
+        return real()
+
+    cat._active_version = wrapped
+    return calls
+
+
+def test_poll_ttl_skips_query_within_ttl(engine) -> None:
+    """첫 호출은 반드시 묻고, TTL 안의 둘째 호출은 DB 없이 같은 한 벌을 준다."""
+    cat = DbCatalogReader(engine, poll_ttl_s=60)
+    calls = _count_polls(cat)
+    first = cat.active()
+    assert calls[0] == 1
+    assert cat.active() is first and calls[0] == 1
+
+
+def test_poll_ttl_zero_polls_every_call(engine) -> None:
+    """TTL 0 = 옛 동작 — 호출마다 묻는다."""
+    cat = DbCatalogReader(engine, poll_ttl_s=0)
+    calls = _count_polls(cat)
+    cat.active()
+    cat.active()
+    assert calls[0] == 2
+
+
+def test_poll_ttl_expires_with_injected_clock(engine) -> None:
+    now = [0.0]
+    cat = DbCatalogReader(engine, poll_ttl_s=1.0, clock=lambda: now[0])
+    calls = _count_polls(cat)
+    first = cat.active()
+    now[0] = 0.999
+    cat.active()
+    assert calls[0] == 1
+    now[0] = 1.0
+    assert cat.active() is first and calls[0] == 2                 # 다시 물었지만 버전이 같아 한 벌은 그대로
+
+
+def test_poll_failure_is_not_cached_and_recovery_is_immediate(engine, active) -> None:
+    """활성 해제는 TTL 안에서는 안 보이고(캐시), 지나면 NoActiveCatalog. 실패는 캐시하지 않아 되살리면 곧바로 회복."""
+    version_id, _, _ = active
+    now = [0.0]
+    cat = DbCatalogReader(engine, poll_ttl_s=1.0, clock=lambda: now[0])
+    calls = _count_polls(cat)
+    cat.active()
+    with engine.begin() as c:
+        c.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = false where id = :v"), {"v": version_id})
+    try:
+        assert cat.active()[0] == version_id and calls[0] == 1        # TTL 안 — 아직 캐시
+        now[0] = 1.0
+        with pytest.raises(NoActiveCatalog, match="활성 버전이 없습니다"):
+            cat.active()
+        with pytest.raises(NoActiveCatalog):
+            cat.active()
+        assert calls[0] == 3                                          # 실패 뒤 같은 시각에도 다시 물었다 — 실패는 캐시하지 않는다
+    finally:
+        with engine.begin() as c:
+            c.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = true where id = :v"), {"v": version_id})
+    assert cat.active()[0] == version_id and calls[0] == 4            # 시계 그대로인데 회복

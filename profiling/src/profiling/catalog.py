@@ -32,6 +32,8 @@ import json
 import logging
 import re
 import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -216,17 +218,23 @@ def _provisional_category_id(source_category_id: str) -> int:
 class DbCatalogReader:
     """ports.CatalogReader 구현 (PostgreSQL `ai_catalog`).
 
-    `active()`는 호출마다 **활성 버전 id만** 한 번 묻고(작은 질의 한 개), 그 값이 지난번과 같으면 들고 있던 목록을 그대로 준다.
-    달라졌을 때만 상품 전체를 다시 읽는다 — 카탈로그를 새로 적재해도 앱을 재시작할 필요가 없고, 요청마다 4천 건을 읽지도 않는다.
-    백그라운드 스레드와 요청 스레드가 같이 부르므로 다시 읽는 구간은 락으로 묶는다.
+    `active()`는 마지막 폴링 뒤 `poll_ttl_s`(설정 CATALOG_POLL_TTL_S, 기본 1초)가 지났을 때만 **활성 버전 id**를 한 번 묻고
+    (작은 질의 한 개), 그 안에서는 DB 를 건드리지 않고 들고 있던 한 벌을 그대로 준다. id 가 지난번과 다를 때만 상품 전체를
+    다시 읽는다 — 새로 적재해도 재시작이 필요 없고, 요청마다 4천 건은커녕 폴링조차 하지 않는다(7.6 한 건이 접수·슬롯에서
+    두 번 폴링해 DB 왕복 8번을 쓰던 것을 없앤다). 새 적재·활성 해제(503)가 보이기까지 최대 TTL 만큼 늦는다.
+    폴링 실패는 캐시하지 않는다(되살리면 곧바로 회복). 다시 읽는 구간은 락으로 묶는다.
     """
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, poll_ttl_s: float = 1.0, clock: Callable[[], float] = time.monotonic) -> None:
         self._engine = engine
+        self._poll_ttl_s = poll_ttl_s
+        self._clock = clock                                   # 시험이 시계를 주입한다 (intake._send_and_record 의 sleep 과 같은 방식)
         self._lock = threading.Lock()
         self._version: UUID | None = None
         self._products: list[ProductRecord] = []
         self._by_id: dict[int, ProductRecord] = {}
+        self._snapshot: tuple[UUID, list[ProductRecord]] | None = None   # active() 가 돌려주는 한 벌 — _load 끝에 통째로 바꾼다
+        self._polled_at: float | None = None                              # 마지막 **성공한** 폴링 시각(monotonic). None = 아직 안 물었다
         self.provisional_ids = False
         self.loaded_at: datetime | None = None
 
@@ -238,14 +246,19 @@ class DbCatalogReader:
         값싼 폴링(_active_version)은 "바뀌었나"만 본다. 돌려주는 버전은 폴링 값이 아니라 **적재에 쓴 질의가
         돌려준 값**이다 — 폴링과 적재 사이에 카탈로그가 교체돼도 버전과 상품이 어긋나지 않는다.
         """
-        polled, _ = self._active_version()
+        snapshot = self._snapshot
+        if snapshot is not None and self._polled_at is not None and self._clock() - self._polled_at < self._poll_ttl_s:
+            return snapshot                               # TTL 안 — DB 왕복 없음
+        polled, _ = self._active_version()                # NoActiveCatalog 는 그대로 올라간다 — _polled_at 갱신 없음(실패는 캐시하지 않는다)
         if polled != self._version:
             with self._lock:
                 if polled != self._version:           # 락을 기다리는 동안 다른 스레드가 이미 읽었을 수 있다
                     self._load()
-        if self._version is None:                     # _load 가 성공하면 반드시 채워진다(방어)
+        self._polled_at = self._clock()                   # 성공한 폴링만 기록 (락 없이 — 최악이 폴링 한 번 더)
+        snapshot = self._snapshot
+        if snapshot is None:                              # _load 가 성공하면 반드시 채워진다(방어)
             raise NoActiveCatalog("활성 카탈로그를 읽지 못했습니다")
-        return self._version, self._products
+        return snapshot
 
     def by_id(self, product_id: int) -> ProductRecord | None:
         self.active()                                  # 버전이 바뀌었으면 먼저 따라잡는다
@@ -254,7 +267,7 @@ class DbCatalogReader:
     # ---- 내부 ---------------------------------------------------------------
 
     def _active_version(self) -> tuple[UUID, str]:
-        """(활성 버전 id, 그 패키지 이름). 작은 질의 하나 — active() 가 호출마다 부른다."""
+        """(활성 버전 id, 그 패키지 이름). 작은 질의 하나 — active() 가 TTL 이 지났을 때 부른다."""
         try:
             with self._engine.connect() as conn:
                 row = conn.execute(_ACTIVE_VERSION).first()
@@ -297,6 +310,7 @@ class DbCatalogReader:
             raise NoActiveCatalog(f"상품 번호가 겹칩니다({len(products) - len(by_id)}건) — Backend ID 회신을 끝까지 적용하세요")
 
         self._products, self._by_id, self._version = products, by_id, version
+        self._snapshot = (version, products)                  # 튜플 하나를 통째로 바꿔 "버전은 옛것, 상품은 새것"인 순간이 없다
         self.provisional_ids = bool(provisional_p or provisional_c)
         self.loaded_at = datetime.now(UTC)
         log.info("DbCatalogReader 로드 version=%s package=%s 상품 %d건 (재고 available %d · unknown %d)",
