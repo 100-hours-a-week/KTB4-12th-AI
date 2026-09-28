@@ -45,14 +45,20 @@ class SearchClient:
         *,
         source: Literal['chat', 'profile'] = 'profile',
         timeout: float = 30.0,
+        token: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if source not in ('chat', 'profile'):
             raise ValueError('source must be chat or profile')
+        headers = {'X-Search-Source': source}
+        if token is not None:
+            if not token or token.strip() != token or any(c in token for c in '\r\n'):
+                raise ValueError('token must be non-empty without surrounding whitespace or newlines')
+            headers['Authorization'] = 'Bearer ' + token
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip('/'),
             timeout=httpx.Timeout(timeout, connect=3.0),
-            headers={'X-Search-Source': source},
+            headers=headers,
             transport=transport,
             trust_env=False,
         )

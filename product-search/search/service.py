@@ -234,24 +234,27 @@ class SearchService:
         if snapshot is not None and snapshot != self.snapshot_id:
             raise SnapshotMismatch("카탈로그 버전이 변경되었습니다. 검색을 다시 실행해 주세요.")
 
-    async def search(self, request: SearchRequest, snapshot=None, source='qa'):
+    async def search(self, request: SearchRequest, snapshot=None, source='qa', *, use_cache=True):
         if not isinstance(request, SearchRequest):
             request = SearchRequest.model_validate(request)
         self._check_snapshot(snapshot)
         self._validate(request)
         start = time.perf_counter()
         key = request.model_dump_json()
-        if key in self.cache:
+        if use_cache and key in self.cache:
             self.cache.move_to_end(key)
             result = copy.deepcopy(self.cache[key])
             result['timing'] = {'totalMs':round((time.perf_counter()-start)*1000,2),'embeddingMs':0,'retrievalMs':0,'cached':True,'embeddingCached':True}
             return result
         mask = self._eligible(request)
         embed_ms, cached, vector = 0., False, None
-        if request.query and request.mode != 'lexical' and mask.any():
+        if request.query and request.mode != 'lexical' and (mask.any() or not use_cache):
             if self.embedding is None: raise RuntimeError("임베딩 실행기가 준비되지 않았습니다.")
             t = time.perf_counter()
-            vector, cached = await self.embedding.get(normalize(request.query), source)
+            if use_cache:
+                vector, cached = await self.embedding.get(normalize(request.query), source)
+            else:
+                vector, cached = await self.embedding.get(normalize(request.query), source, use_cache=False)
             embed_ms = (time.perf_counter()-t)*1000
         result = await asyncio.get_running_loop().run_in_executor(self.pool, self._rank, request, mask, vector)
         result.update({'snapshotId':self.snapshot_id,'algorithm':ALGORITHM,'request':request.model_dump(by_alias=True),

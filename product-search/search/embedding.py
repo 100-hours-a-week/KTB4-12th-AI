@@ -149,6 +149,7 @@ class SharedEmbedding:
         self._closed = False
         self._closing = None
         self._operation = None
+        self.failed = False
 
     async def start(self):
         if self._closed:
@@ -172,22 +173,30 @@ class SharedEmbedding:
                 self._operation = asyncio.get_running_loop().run_in_executor(self.pool, self.encoder.encode, query)
                 self._operation.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
                 vector = await asyncio.shield(self._operation)
+                self.failed = False
                 self.cache[query] = vector
                 if len(self.cache) > 2048:
                     self.cache.popitem(last=False)
                 if not future.done():
                     future.set_result(vector)
             except Exception as exc:
+                self.failed = True
                 if not future.done():
                     future.set_exception(exc)
             finally:
                 self.pending.pop(query, None)
                 self.queue.task_done()
 
-    async def get(self, query, source="qa"):
+    @property
+    def ready(self):
+        process = getattr(self.encoder, 'process', None)
+        alive = process is not None and process.poll() is None if isinstance(self.encoder, Encoder) else True
+        return not self._closed and not self.failed and self.task is not None and not self.task.done() and alive
+
+    async def get(self, query, source="qa", *, use_cache=True):
         if self._closed:
             raise RuntimeError("임베딩 실행기가 종료되었습니다.")
-        if query in self.cache:
+        if use_cache and query in self.cache:
             self.cache.move_to_end(query)
             return self.cache[query], True
         future = self.pending.get(query)

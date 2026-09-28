@@ -143,6 +143,10 @@ class MetadataResponse(ResponseModel):
     exportGeneratedAt: Timestamp | None
 
 
+class LiveResponse(ResponseModel):
+    status: Literal['alive']
+
+
 class ReadyResponse(ResponseModel):
     status: Literal['ready']
     products: Count
@@ -159,6 +163,7 @@ class FeedbackResponse(ResponseModel):
 ErrorCode = Literal[
     'INVALID_REQUEST', 'UNKNOWN_CATEGORY', 'UNKNOWN_BRAND', 'SNAPSHOT_MISMATCH',
     'SEARCH_BUSY', 'SEARCH_TIMEOUT', 'ENCODER_FAILURE', 'NOT_FOUND', 'SEARCH_NOT_READY',
+    'FEEDBACK_STORAGE_UNAVAILABLE', 'FEEDBACK_ID_CONFLICT',
 ]
 
 

@@ -24,8 +24,11 @@ from search.identity import BIGINT_MAX
 from search.models import ProductRequest, FeedbackRequest, ServiceSearchRequest, SnapshotMismatch
 from search.responses import (
     APIErrorResponse, FeedbackResponse, HistoricalQASearchResponse,
-    MetadataResponse, ProductsResponse, QASearchResponse, ReadyResponse, SearchResponse,
+    MetadataResponse, ProductsResponse, QASearchResponse, ReadyResponse, SearchResponse, LiveResponse,
 )
+
+from search.health import SearchHealth
+from search.feedback import save as save_feedback, restore as restore_feedback, FeedbackError
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / "runtime"
@@ -75,16 +78,23 @@ def build_assets():
 @asynccontextmanager
 async def lifespan(app):
     init_db()
+    await asyncio.to_thread(restore_feedback, db, getattr(app.state, 'feedback_archive', None))
     app.state.asset_version = build_assets()
     app.state.active_searches = 0
     app.state.active_profile_searches = 0
     async with open_search(ROOT) as service:
         app.state.search = service
+        health = SearchHealth(service)
+        app.state.health = health
+        if not await health.check():
+            raise RuntimeError('Initial search readiness probe failed')
+        health.task = asyncio.create_task(health.watch())
         app.state.ready = True
         try:
             yield
         finally:
             app.state.ready = False
+            await health.close()
 
 
 app = FastAPI(title="상품 검색 API", version="0.1.0", lifespan=lifespan)
@@ -140,11 +150,22 @@ async def guide(request: Request):
     return HTMLResponse(html, headers={'Cache-Control': 'no-cache'})
 
 
-@app.get('/healthz', response_model=ReadyResponse, responses=error_responses(503))
-@app.get('/readyz', response_model=ReadyResponse, responses=error_responses(503))
-async def health(request: Request):
+@app.get('/healthz', response_model=LiveResponse)
+async def live():
+    return {'status': 'alive'}
+
+
+
+@app.get('/readyz', response_model=ReadyResponse, responses=error_responses(422, 503))
+async def health(request: Request, probe: bool = False):
     if not getattr(request.app.state, 'ready', False):
         raise APIException(503, 'SEARCH_NOT_READY', '검색 서버가 준비되지 않았습니다.')
+    monitor = getattr(request.app.state, 'health', None)
+    if monitor is not None:
+        if probe:
+            await monitor.check()
+        if not monitor.ready:
+            raise APIException(503, 'SEARCH_NOT_READY', '검색 실행기가 준비되지 않았습니다.')
     service=request.app.state.search
     return {'status':'ready','products':len(service.products),'snapshotId':service.snapshot_id,
             'catalogLoadError':getattr(service,'load_error',None),
@@ -179,6 +200,9 @@ async def execute_search(body: SearchRequest, request: Request, *, source: str, 
     except TimeoutError as exc:
         raise APIException(503, 'SEARCH_TIMEOUT', '검색 대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.', headers={'Retry-After':'1'}) from exc
     except RuntimeError as exc:
+        monitor = getattr(state, 'health', None)
+        if monitor is not None:
+            monitor.failed = True
         logger.exception('Search execution failed')
         raise APIException(503, 'ENCODER_FAILURE', '검색 실행 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.') from exc
     finally:
@@ -221,19 +245,12 @@ def recorded_search(id: str):
     return json.loads(row[0])
 
 
-@app.post('/api/feedback', response_model=FeedbackResponse, responses=error_responses(422, 404))
-def feedback(body: FeedbackRequest):
-    with db() as con:
-        row=con.execute('SELECT response FROM searches WHERE id=?',(body.search_id,)).fetchone()
-        if not row: raise APIException(404, 'NOT_FOUND', '평가할 검색 기록이 없습니다. 다시 검색해 주세요.')
-        result=json.loads(row[0])
-        if body.verdict!='missing' and body.product_id not in {p['productId'] for p in result['hits']}:
-            raise APIException(422, 'INVALID_REQUEST', '이 검색 결과에 포함된 상품만 평가할 수 있습니다.')
-        if body.verdict=='missing' and not body.note and not body.product_id:
-            raise APIException(422, 'INVALID_REQUEST', '누락된 상품명이나 의견을 입력해 주세요.')
-        id=uuid.uuid4().hex
-        con.execute('INSERT INTO feedback VALUES(?,?,?,?,?,?)',(id,body.search_id,datetime.now(timezone.utc).isoformat(),body.product_id,body.verdict,body.note))
-    return {'id':id,'saved':True}
+@app.post('/api/feedback', response_model=FeedbackResponse, responses=error_responses(422, 404, 409, 503))
+def feedback(body: FeedbackRequest, request: Request):
+    try:
+        return save_feedback(db, body, getattr(request.app.state, 'feedback_archive', None))
+    except FeedbackError as exc:
+        raise APIException(exc.status, exc.code, str(exc)) from exc
 
 
 @app.get('/images/{filename}', response_class=FileResponse, responses=error_responses(404, 422))

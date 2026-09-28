@@ -240,8 +240,12 @@ async function detail(id) {
 }
 function safeUrl(url){try{const u=new URL(url);return ['https:','http:'].includes(u.protocol)?esc(u.href):'#';}catch{return '#';}}
 function closeDetail(){$('#detail-dialog').close();document.body.style.overflow='';state.detail=null;}
+const submissions = new Map();
 async function rate(context,verdict,note='') {
-  try {await api('/api/feedback',{searchId:context.searchId,productId:context.product?.productId??null,verdict,note});state.ratings.set(context.searchId+':'+context.product?.productId,verdict);const cardEl=$$('.product-card').find(c=>c.dataset.id===String(context.product?.productId));if(cardEl)$$('.feedback-actions button',cardEl).forEach(b=>b.classList.toggle('rated',b.dataset.action===verdict));toast('QA 의견을 저장했습니다.');return true;}catch(e){toast(e.message);return false;}
+  const key=stringifyJSON([context.searchId,context.product?.productId??null,verdict,note]);
+  if(!submissions.has(key))submissions.set(key,crypto.randomUUID().replaceAll('-',''));
+  const submissionId=submissions.get(key);
+  try {await api('/api/feedback',{submissionId,searchId:context.searchId,productId:context.product?.productId??null,verdict,note});state.ratings.set(context.searchId+':'+context.product?.productId,verdict);const cardEl=$$('.product-card').find(c=>c.dataset.id===String(context.product?.productId));if(cardEl)$$('.feedback-actions button',cardEl).forEach(b=>b.classList.toggle('rated',b.dataset.action===verdict));toast('QA 의견을 저장했습니다.');return true;}catch(e){toast(e.message);return false;}
 }
 function openNote(context,verdict){state.note={context,verdict};$('#note-title').textContent=verdict==='missing'?'누락된 상품 제보':'검색 조건 위반 제보';$('#note-description').textContent=verdict==='missing'?'나와야 하는 상품명이나 기대한 결과를 남겨 주세요.':context.product.name;$('#note-text').value='';$('#note-dialog').showModal();$('#note-text').focus();}
 async function copy(text){try{await navigator.clipboard.writeText(text);toast('복사했습니다.');}catch{const input=document.createElement('textarea');input.value=text;document.body.append(input);input.select();document.execCommand('copy');input.remove();toast('복사했습니다.');}}
