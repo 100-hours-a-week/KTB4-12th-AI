@@ -41,7 +41,7 @@ AI 프로파일링이 **소유한 표**가 무엇이고, **왜 생겼고**, **�
 
 ```
 7.6 접수(HTTP)   catalog.active()        활성 카탈로그 버전 id 1질의(마지막 폴링 뒤 1초 안이면 질의 없이 캐시) — 없으면 503
-슬롯 안          store.run_lock()         (수신자, 버전) advisory lock — 표가 아니라 세션 잠금, AUTOCOMMIT 커넥션(BEGIN/COMMIT 없음)
+슬롯 안          store.run_lock()         (수신자, 버전) advisory lock — 표가 아니라 세션 잠금, AUTOCOMMIT 커넥션(BEGIN/COMMIT 없음). 아래 문장들은 전부 이 커넥션에서 각각 왕복 하나
                  store.get_run()          profile_runs 한 행 읽기 → decide(): analyze / resend / skip
                  store.save(RUNNING)      profile_runs upsert (attempt +1)
                  catalog.active()         버전 id 폴링(접수 폴링 뒤 1초 안이면 생략), 바뀌었으면 상품 전체 다시 읽기
@@ -246,7 +246,7 @@ stateDiagram-v2
 | 앱 기동 | `main.lifespan` → `recover_stale_runs(RUNNING_STALE_S)` | `RUNNING` → `FAILED` | `updated_at`이 300초보다 오래된 RUNNING만. 다른 인스턴스가 지금 돌리는 행은 건드리지 않는다 |
 | `/health` | `main._store_health()` → `undelivered_count()` | 읽기만 | `status = 'RESULT_READY'` 행 수. 0이 정상, 늘어나면 7.7 경로(Backend 5xx·네트워크)에 문제 |
 
-`save()`는 언제나 같은 upsert 한 문장이다(`stores._RUN_UPSERT`). 열마다 규칙이 있다 — `attempt`는 RUNNING으로 들어올 때만 +1, `catalog_version_id`·`callback_payload`·`callback_hash`는 새 값이 NULL이면 기존 값을 지킨다(`coalesce`), `callback_attempts`는 큰 쪽을 남긴다(`greatest`), `updated_at`은 항상 `now()`.
+`save()`는 언제나 같은 upsert 한 문장이다(`stores._RUN_UPSERT`). 잠금을 쥔 스레드에서는 잠금 커넥션(AUTOCOMMIT)에서 그 한 문장이 곧 왕복 하나이고, 잠금 밖에서는 풀에서 꺼내 트랜잭션 하나로 돈다(읽기는 AUTOCOMMIT). 결과 저장과 프로필 upsert는 문장 단위 원자성뿐이며, upsert 실패 시 실행 기록을 FAILED로 되돌리는 보상이 그 역할을 한다(09-28). 열마다 규칙이 있다 — `attempt`는 RUNNING으로 들어올 때만 +1, `catalog_version_id`·`callback_payload`·`callback_hash`는 새 값이 NULL이면 기존 값을 지킨다(`coalesce`), `callback_attempts`는 큰 쪽을 남긴다(`greatest`), `updated_at`은 항상 `now()`.
 
 #### 2.2.2 중복 접수 판정 — 이 표를 읽어서 정한다
 
