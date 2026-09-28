@@ -7,3 +7,6 @@ __pycache__/
 
 # 7.9 export 저장본 (fetch_export.py 결과) — 커밋하지 않음
 data/
+
+# 부하 시험 결과 JSON·로그 (tools/loadtest/run.py --out) — 커밋하지 않음
+tools/loadtest/results/
