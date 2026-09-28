@@ -3,6 +3,7 @@ DB가 안 떠 있으면 skip. 실행: docker compose up -d && uv run alembic upg
 
 adapter가 트랜잭션을 스스로 열므로(engine.begin) 테스트를 트랜잭션으로 감쌀 수 없다 → 시험용 수신자 ID(99xxxx)를 쓰고 끝에 지운다."""
 
+import time
 from uuid import UUID
 
 import pytest
@@ -184,7 +185,11 @@ def test_app_end_to_end_with_db(engine, monkeypatch, alembic_head) -> None:
             body = {"recipientUserId": rid, "sourceVersion": 7, "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품"}],
                     "giftPreference": None, "reviews": []}
             res = client.post(intake.EXTRACT_AND_POOL_PATH, json=body)
-            assert res.status_code == 202 and len(fake.sent) == 1
+            assert res.status_code == 202
+            t0 = time.monotonic()                                            # 09-28: 워커 스레드가 끝내기를 기다린다
+            while time.monotonic() - t0 < 10 and not (len(fake.sent) == 1 and (r := app.state.store.get(rid)) and r.status is RunStatus.DELIVERED):
+                time.sleep(0.02)
+            assert len(fake.sent) == 1
 
             run = app.state.store.get(rid)                       # 콜백 200 → DELIVERED 가 DB에
             assert run.status is RunStatus.DELIVERED and run.callback_attempts == 1 and run.source_version == 7

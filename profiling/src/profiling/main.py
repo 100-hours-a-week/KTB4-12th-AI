@@ -10,7 +10,8 @@ app.state에 두는 것 (lifespan에서 1회 생성):
   store            ProfileRunStore      DbProfileRunStore (ai_profile.profile_runs) — 시작 시 끊긴 RUNNING 정리
   recipient_store  RecipientProfileStore  DbRecipientProfileStore (ai_profile.recipient_profiles)
   backend          BackendPort          HttpBackendPort
-  supervisor       Supervisor
+  supervisor       Supervisor            워커 스레드 + 상한 큐 — start() 하고, 종료 때 stop()
+  io_limiter       anyio.CapacityLimiter  접수 폴링·/health 의 짧은 DB 문장용(기본 스레드풀과 분리)
   engine           sqlalchemy Engine    시작 시 연결 확인, 종료 시 dispose
 """
 
@@ -20,6 +21,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 import sqlalchemy as sa
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -76,13 +78,17 @@ async def lifespan(app: FastAPI):
         log.warning("끊긴 실행 %d건을 FAILED 로 정리했습니다 (%d초 넘게 RUNNING) — Backend 가 다시 보내면 새로 분석합니다",
                     stale, settings.RUNNING_STALE_S)
 
-    app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS)   # 3단계 §12.1 시작값 1
+    app.state.io_limiter = anyio.CapacityLimiter(settings.IO_THREADS)   # 접수 폴링·/health — 기본 스레드풀(토큰 40)과 분리, 실행 대기가 있어도 굶지 않는다
+    app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS, queue_max=settings.QUEUE_MAX)   # 3단계 §12.1 시작값 슬롯 1
+    app.state.supervisor.start()
     app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S)
     log.info("profiling 시작 backend=%s pool_size=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE)
 
     yield
 
-    # 종료 — HttpBackendPort가 httpx.Client를 들고 있으면 닫는다. 없어도 조용히 넘어간다. DB 커넥션 풀도 정리.
+    # 종료 — 신규 접수를 막고 큐를 버린 뒤 실행 중인 것만 SHUTDOWN_DRAIN_S 까지 기다린다(compose 유예 10초 안). 그 다음 콜백 클라이언트·DB 풀 정리.
+    dropped = app.state.supervisor.stop(settings.SHUTDOWN_DRAIN_S)
+    log.info("profiling 종료 dropped=%d", dropped)
     close = getattr(app.state.backend, "close", None)
     if callable(close):
         close()
@@ -131,14 +137,17 @@ app = FastAPI(title="profiling", version="0.1.0", lifespan=lifespan)
 app.include_router(intake.router)
 
 
-def _error_response(status: int, code: str, message: str, trace_id: str | None = None) -> JSONResponse:
+def _error_response(status: int, code: str, message: str, trace_id: str | None = None, *, retry_after: int | None = None) -> JSONResponse:
     """문서 1 §3 오류 봉투 {message, error: {code, traceId}}. 모든 오류 응답은 이 함수만 거친다.
 
     503 에는 `Retry-After` 를 붙인다 — 활성 카탈로그는 사람이 적재해야 돌아오므로 Backend 가 곧바로 다시 보내면
     의미 없는 요청만 쌓인다(그동안 sourceVersion 만 올라간다). 필드표 v1 §3.6 이 이 헤더를 전제로 쓰여 있다.
+    retry_after 가 오면 그 값(예: 대기열 가득은 QUEUE_FULL_RETRY_AFTER_S), 없으면 RETRY_AFTER_S(카탈로그 없음).
     """
     body = ErrorResponse(message=message, error=ErrorBody(code=code, traceId=trace_id))
-    headers = {"Retry-After": str(get_settings().RETRY_AFTER_S)} if status == 503 else None
+    headers = None
+    if status == 503:
+        headers = {"Retry-After": str(retry_after if retry_after is not None else get_settings().RETRY_AFTER_S)}
     return JSONResponse(status_code=status, content=body.model_dump(), headers=headers)
 
 
@@ -160,7 +169,7 @@ async def on_validation_error(request: Request, exc: RequestValidationError) -> 
 async def on_http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """라우터가 던진 HTTPException(401·503 등)을 같은 봉투로. detail이 {code, message}면 그대로, 문자열이면 상태 코드로 code를 정한다."""
     if isinstance(exc.detail, dict) and "code" in exc.detail:
-        return _error_response(exc.status_code, exc.detail["code"], exc.detail.get("message", ""))
+        return _error_response(exc.status_code, exc.detail["code"], exc.detail.get("message", ""), retry_after=exc.detail.get("retryAfter"))
     default_code = {401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND", 503: "SERVICE_UNAVAILABLE"}.get(exc.status_code, "INTERNAL_SERVER_ERROR")
     return _error_response(exc.status_code, default_code, str(exc.detail))
 
@@ -173,28 +182,36 @@ async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
 
 
 @app.get("/health", tags=["ops"])
-def health(request: Request) -> dict:
-    """살아 있는지 + 활성 카탈로그가 있는지. 카탈로그가 없어도 200 — 프로세스는 살아 있으므로(7.6은 503)."""
+async def health(request: Request) -> dict:
+    """살아 있는지 + 활성 카탈로그가 있는지. 카탈로그가 없어도 200 — 프로세스는 살아 있으므로(7.6은 503).
+
+    async 라 기본 스레드풀 토큰을 쓰지 않는다. DB 문장 셋은 io_limiter(별도 스레드)에서 — 실행 대기가 쌓여도 /health 는 답한다(09-28).
+    """
+    state = request.app.state
+    return await anyio.to_thread.run_sync(_health_sync, state, limiter=state.io_limiter)
+
+
+def _health_sync(state) -> dict:
     try:
-        version_id, products = request.app.state.catalog.active()
+        version_id, products = state.catalog.active()
         catalog = {"active": True, "version": str(version_id), "products": len(products)}
-        if getattr(request.app.state.catalog, "provisional_ids", False):
+        if getattr(state.catalog, "provisional_ids", False):
             # Backend 번호가 아직 없어 임시 번호로 도는 상태 — 배포는 되지만 7.7로 내보낸 번호는 Backend에 없다
             catalog["provisional_ids"] = True
     except NoActiveCatalog as e:
         catalog = {"active": False, "reason": str(e)}
-    return {"status": "ok", "catalog": catalog, "store": _store_health(request), "supervisor": request.app.state.supervisor.stats()}
+    return {"status": "ok", "catalog": catalog, "store": _store_health(state), "supervisor": state.supervisor.stats()}
 
 
-def _store_health(request: Request) -> dict:
+def _store_health(state) -> dict:
     """저장소 상태 — 지금 연결되는지와 마이그레이션 버전. 확인 자체가 실패해도 /health는 200(프로세스는 살아 있으므로)."""
-    engine = request.app.state.engine
+    engine = state.engine
     try:
         with engine.connect() as conn:
             conn.execution_options(isolation_level="AUTOCOMMIT")     # 읽기 한 문장 — BEGIN/ROLLBACK 없이
             version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
         # 결과는 만들었는데 Backend 에 전달하지 못한 행. 늘어나면 콜백 경로에 문제가 있다는 뜻이라 운영이 바로 봐야 한다.
         return {"backend": "db", "connected": True, "migration": version,
-                "undelivered": request.app.state.store.undelivered_count()}
+                "undelivered": state.store.undelivered_count()}
     except sa.exc.SQLAlchemyError as e:      # 연결 끊김·테이블 없음 등 DB 쪽 오류만 — 그 외는 500으로 드러나야 한다
         return {"backend": "db", "connected": False, "reason": type(e).__name__}

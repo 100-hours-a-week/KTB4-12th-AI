@@ -90,6 +90,26 @@ class Settings(BaseSettings):
         description="503(활성 카탈로그 없음) 응답에 실어 보내는 Retry-After 초. Backend 가 언제 다시 보낼지 정하는 근거 "
                     "(BE_연동_필드표 v1 §3.6). 없으면 Backend 가 매 주기 곧바로 다시 보낸다",
     )
+    QUEUE_MAX: int = Field(
+        default=200, ge=1,
+        description="접수 대기열 상한(건). 슬롯이 다 찼을 때 큐에 둘 수 있는 수 — BE 배치(100) 두 번이 시작값. 넘치면 7.6 을 "
+                    "503 + Retry-After(QUEUE_FULL_RETRY_AFTER_S) 로 거절하고 Backend 가 같은 번호로 다시 보낸다(BE 계획 5-1). "
+                    "대기는 큐에서 하므로 스레드풀 토큰을 쓰지 않는다(09-28)",
+    )
+    QUEUE_FULL_RETRY_AFTER_S: int = Field(
+        default=30, ge=1,
+        description="대기열 가득 503 에 싣는 Retry-After 초. 카탈로그 없음 503 의 RETRY_AFTER_S(300)와 다르다 — 곧 빠지는 상황이라 짧게",
+    )
+    IO_THREADS: int = Field(
+        default=4, ge=1,
+        description="접수의 카탈로그 폴링과 /health 의 DB 문장을 돌리는 별도 스레드 수(anyio CapacityLimiter). "
+                    "기본 스레드풀(40)과 분리해 실행 대기가 쌓여도 접수·/health 가 굶지 않는다",
+    )
+    SHUTDOWN_DRAIN_S: float = Field(
+        default=5.0, ge=0,
+        description="종료 시 실행 중인 분석을 기다리는 최대 초. 큐에 남은 것은 버린다(Backend 가 PENDING 타임아웃 뒤 같은 번호로 "
+                    "재전송). compose 종료 유예 10초보다 짧게",
+    )
     LOG_LEVEL: str = Field(default="INFO", description="logging 레벨 이름")
 
 

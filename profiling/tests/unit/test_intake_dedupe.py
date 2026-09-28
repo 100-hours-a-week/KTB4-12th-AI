@@ -9,8 +9,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import anyio
 import pytest
-from fastapi import BackgroundTasks
+from fastapi import HTTPException
 
 from profiling import intake, pipeline
 from profiling.intake import ANALYZE, RESEND, SKIP, decide
@@ -115,13 +116,17 @@ class FakeBackend:
 
 
 class FakeSupervisor:
-    """무엇을 제출했는지만 기록한다. run()으로 그 작업을 실제로 돌린다."""
+    """무엇을 제출했는지만 기록한다. run()으로 그 작업을 실제로 돌린다. accept=False 면 큐 가득을 흉내 낸다."""
 
-    def __init__(self):
+    def __init__(self, accept: bool = True):
         self.submitted = []
+        self.accept = accept
 
-    def submit(self, bg, fn, *args, **kwargs):
+    def submit(self, fn, *args, **kwargs):
+        if not self.accept:
+            return False
         self.submitted.append((fn, args, kwargs))
+        return True
 
     def run(self):
         for fn, args, kwargs in self.submitted:
@@ -139,8 +144,8 @@ def _post(existing, monkeypatch, *, lock_free=True, store=None) -> tuple[list[st
     monkeypatch.setattr(intake, "resend_callback", lambda outcome, *a, **k: done.append(("resend", outcome)))
 
     res = asyncio.run(intake.extract_and_pool(
-        body=_body(), bg=BackgroundTasks(), catalog=FakeCatalog(), store=store, recipient_store=object(),
-        backend=backend, supervisor=sup, settings=Settings(),
+        body=_body(), catalog=FakeCatalog(), store=store, recipient_store=object(),
+        backend=backend, supervisor=sup, settings=Settings(), io_limiter=anyio.CapacityLimiter(1),
     ))
     assert res.data.profileStatus == "PENDING" and res.data.sourceVersion == SV   # 어느 경로든 응답은 같다
     assert [fn for fn, _, _ in sup.submitted] == [intake.dispatch]                # 접수는 판정하지 않는다
@@ -207,3 +212,19 @@ def test_resend_records_callback_failure() -> None:
     assert store.saved[0].status is RunStatus.RESULT_READY
     assert store.saved[0].failure_code is ErrorCode.CALLBACK_UNREACHABLE
     assert store.saved[0].callback_attempts == existing.callback_attempts + 1
+
+
+# ---------------------------------------------------------------- 큐 가득 (09-28)
+
+
+def test_queue_full_is_rejected_with_503_and_short_retry_after() -> None:
+    """Supervisor 가 받지 못하면(큐 가득·종료 중) 기다리지 않고 503 — Retry-After 는 QUEUE_FULL_RETRY_AFTER_S(30), 카탈로그 없음의 300이 아니다."""
+    sup = FakeSupervisor(accept=False)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(intake.extract_and_pool(
+            body=_body(), catalog=FakeCatalog(), store=FakeStore(None), recipient_store=object(),
+            backend=FakeBackend(), supervisor=sup, settings=Settings(), io_limiter=anyio.CapacityLimiter(1),
+        ))
+    assert ei.value.status_code == 503
+    assert ei.value.detail["code"] == "SERVICE_UNAVAILABLE" and ei.value.detail["retryAfter"] == Settings().QUEUE_FULL_RETRY_AFTER_S
+    assert sup.submitted == []                                     # 아무것도 실행되지 않는다

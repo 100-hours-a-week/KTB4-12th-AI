@@ -73,6 +73,8 @@ class Probe:
     running: int | None
     submitted: int | None
     undelivered: int | None
+    queued: int | None = None       # 09-28: Supervisor 큐 깊이(/health supervisor.queued)
+    rejected: int | None = None
 
 
 @dataclass
@@ -172,7 +174,7 @@ async def probe_health(client: httpx.AsyncClient, ai: str, interval: float, time
             b = r.json() if r.status_code == 200 else {}
             sup, store = b.get("supervisor", {}), b.get("store", {})
             out.append(Probe(t - t0, (time.perf_counter() - t) * 1000, r.status_code, None,
-                             sup.get("running"), sup.get("submitted"), store.get("undelivered")))
+                             sup.get("running"), sup.get("submitted"), store.get("undelivered"), sup.get("queued"), sup.get("rejected")))
         except httpx.HTTPError as e:
             out.append(Probe(t - t0, (time.perf_counter() - t) * 1000, None, type(e).__name__, None, None, None))
         await asyncio.sleep(interval)
@@ -280,7 +282,8 @@ def summarize(posts: list[Post], probes: list[Probe], db_samples: list[DbSample]
                    "over_threshold": sum(q.ms > threshold_ms for q in probes), "ms": dist([q.ms for q in probes]),
                    "worst": sorted(({"t": round(q.t, 2), "ms": round(q.ms, 1), "status": q.status} for q in probes),
                                    key=lambda w: -w["ms"])[:5],
-                   "undelivered_max": max((q.undelivered or 0) for q in probes) if probes else None},
+                   "undelivered_max": max((q.undelivered or 0) for q in probes) if probes else None,
+                   "queued_max": max((q.queued or 0) for q in probes) if probes else None},
         "db": {"connections_max": max((s.connections for s in db_samples), default=None),
                "idle_in_tx_max": max((s.idle_in_tx for s in db_samples), default=None),
                "waiting_max": max(waiting, default=None)},
@@ -294,6 +297,7 @@ def summarize(posts: list[Post], probes: list[Probe], db_samples: list[DbSample]
                  "multi_row_recipients": sum(1 for c in Counter(r["recipient_user_id"] for r in rows).values() if c > 1)},
         "supervisor_submitted_delta": (sup_after - sup_before) if sup_before is not None and sup_after is not None else None,
         "received_delta": received_after - received_before,
+        "rejected_delta": ((health_after or {}).get("supervisor", {}).get("rejected", 0) or 0) - ((health_before or {}).get("supervisor", {}).get("rejected", 0) or 0),
         "arrivals": arrival_stats(arrivals) if arrivals else None,
     }
 
@@ -314,7 +318,7 @@ def markdown(s: dict[str, Any]) -> str:
     p, h, db, r = s["post"], s["health"], s["db"], s["runs"]
     lines = ["| 항목 | 값 |", "|---|---|",
              f"| 7.6 응답 | {p['status_counts']} · ms {_dist_row(p['ms'])} · 10초 초과 {p['over_10s']} · 버스트 {_fmt(p['burst_s'])}s |",
-             f"| /health | 프로브 {h['probes']} · 실패 {h['failed']} · 임계 초과 {h['over_threshold']} · ms {_dist_row(h['ms'])} · undelivered 최대 {_fmt(h['undelivered_max'])} |",
+             f"| /health | 프로브 {h['probes']} · 실패 {h['failed']} · 임계 초과 {h['over_threshold']} · ms {_dist_row(h['ms'])} · undelivered 최대 {_fmt(h['undelivered_max'])} · queued 최대 {_fmt(h.get('queued_max'))} · 거절 Δ {s.get('rejected_delta')} |",
              f"| 완료 | 행 {r['rows']} {r['by_status']} · 종료 수신자 {r['recipients_terminal']} ({'완료' if r['complete'] else '미완료'}) · 전부 종료까지 {_fmt(r['time_to_all_terminal_s'])}s · 처리량 {_fmt(r['throughput_per_s'])}/s |",
              f"| 슬롯 시간 ms | {_dist_row(r['slot_ms'])} |",
              f"| 접수→종료 ms | {_dist_row(r['e2e_ms'])} |",

@@ -1,6 +1,6 @@
 """7.6 접수 라우터 — POST /api/internal/v1/ai/profile/extract-and-pool.
 
-Transport 역할만 한다: 인증 → 스키마 검증 → 활성 카탈로그 확인 → 202 → 백그라운드로 pipeline.
+Transport 역할만 한다: 인증 → 스키마 검증 → 활성 카탈로그 확인 → Supervisor 큐 → 202. 실행은 Supervisor 의 워커 스레드가 한다.
 업무 로직(무엇을 뽑고 어떻게 고르는지)은 pipeline.py에 있고, 바깥(파일·DB·HTTP)은 catalog.py · stores.py · backend.py에 있다.
 이 파일은 그 둘을 "요청 한 건" 단위로 잇는다.
 
@@ -8,7 +8,7 @@ Transport 역할만 한다: 인증 → 스키마 검증 → 활성 카탈로그 
   202 SuccessResponse[ProfileAccepted]  profileStatus는 항상 PENDING, recipientUserId·sourceVersion은 요청 값 그대로
   400 INVALID_REQUEST     스키마 위반 — FastAPI 기본 422를 main.py의 exception_handler가 400 봉투로 바꾼다 (여기서는 안 함)
   401 UNAUTHORIZED        Authorization 헤더 없음 · Bearer 아님 · 토큰 불일치
-  503 SERVICE_UNAVAILABLE 활성 카탈로그 없음
+  503 SERVICE_UNAVAILABLE 활성 카탈로그 없음(Retry-After 300) · 접수 대기열 가득(Retry-After QUEUE_FULL_RETRY_AFTER_S, 09-28)
   실패한 분석은 7.6에도 7.7에도 FAILED를 보내지 않는다 (AI는 침묵, Backend가 판정)
 """
 
@@ -18,9 +18,10 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+import anyio
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from profiling import pipeline
 from profiling.ports import (
@@ -51,37 +52,52 @@ EXTRACT_AND_POOL_PATH = "/api/internal/v1/ai/profile/extract-and-pool"
 # ---------------------------------------------------------------------------
 # 의존성 — main.py가 lifespan에서 app.state에 넣어 둔 adapter를 꺼낸다.
 # 라우터는 "어떤 구현인지" 모른다. 테스트는 app.state에 가짜를 넣거나 dependency_overrides로 바꾼다.
+# 전부 async — 동기 의존성은 anyio 기본 스레드풀(토큰 40)을 거치는데, 그 토큰을 실행 대기가 잡으면 접수가 굶는다(09-28 부하 시험).
 # ---------------------------------------------------------------------------
 
 
-def get_catalog(request: Request) -> CatalogReader:
+async def get_catalog(request: Request) -> CatalogReader:
     return request.app.state.catalog
 
 
-def get_store(request: Request) -> ProfileRunStore:
+async def get_store(request: Request) -> ProfileRunStore:
     return request.app.state.store
 
 
-def get_recipient_store(request: Request) -> RecipientProfileStore:
+async def get_recipient_store(request: Request) -> RecipientProfileStore:
     return request.app.state.recipient_store
 
 
-def get_backend(request: Request) -> BackendPort:
+async def get_backend(request: Request) -> BackendPort:
     return request.app.state.backend
 
 
-def get_supervisor(request: Request) -> Supervisor:
+async def get_supervisor(request: Request) -> Supervisor:
     return request.app.state.supervisor
 
 
-def _error(status: int, code: str, message: str) -> HTTPException:
-    """HTTPException.detail에 {code, message}를 실어 보내면 main.py의 핸들러가 ErrorResponse 봉투로 만든다."""
-    return HTTPException(status_code=status, detail={"code": code, "message": message})
+async def get_io_limiter(request: Request) -> anyio.CapacityLimiter:
+    """접수의 카탈로그 폴링 같은 짧은 DB 문장용 스레드 한도 — 기본 스레드풀과 분리(main.lifespan 이 만든다)."""
+    return request.app.state.io_limiter
 
 
-def require_service_token(
+async def settings_dep() -> Settings:
+    """Depends(get_settings) 는 동기라 스레드풀을 탄다 — async 로 감싼다."""
+    return get_settings()
+
+
+def _error(status: int, code: str, message: str, *, retry_after: int | None = None) -> HTTPException:
+    """HTTPException.detail에 {code, message[, retryAfter]}를 실어 보내면 main.py의 핸들러가 ErrorResponse 봉투로 만든다.
+    retry_after 를 주면 503 의 Retry-After 헤더가 그 값이 된다(없으면 settings.RETRY_AFTER_S)."""
+    detail: dict[str, Any] = {"code": code, "message": message}
+    if retry_after is not None:
+        detail["retryAfter"] = retry_after
+    return HTTPException(status_code=status, detail=detail)
+
+
+async def require_service_token(
     authorization: Annotated[str | None, Header()] = None,
-    settings: Annotated[Settings, Depends(get_settings)] = None,  # type: ignore[assignment]  — FastAPI가 주입
+    settings: Annotated[Settings, Depends(settings_dep)] = None,  # type: ignore[assignment]  — FastAPI가 주입
 ) -> None:
     """`Authorization: Bearer <service_token>` 확인 (문서 1 §7.6 Header). 틀리면 401 UNAUTHORIZED.
 
@@ -97,7 +113,7 @@ def require_service_token(
 
 
 # ---------------------------------------------------------------------------
-# 백그라운드 작업 — 응답(202)을 보낸 뒤 같은 프로세스에서 실행된다.
+# 백그라운드 작업 — Supervisor 워커 스레드가 큐에서 꺼내 실행한다(응답과 무관).
 # ---------------------------------------------------------------------------
 
 
@@ -234,7 +250,7 @@ def dispatch(
     pool_size: int, recipient_store: RecipientProfileStore, stale_after_s: int,
     callback_max_attempts: int = 3, callback_backoff_s: float = 0.5,
 ) -> None:
-    """**잠금 → 판정 → 실행**을 한 덩어리로. Supervisor 슬롯 안(응답 뒤)에서 돈다.
+    """**잠금 → 판정 → 실행**을 한 덩어리로. Supervisor 워커 스레드(슬롯) 하나에서 끝까지 돈다.
 
     판정을 접수(HTTP) 쪽에 두면 "읽고 나서 쓰기까지" 사이가 벌어져, 같은 (수신자, 버전)이 동시에 오면
     둘 다 "기록 없음"을 보고 둘 다 분석한다. Backend 는 같은 번호로 최대 2회 재전송하므로 실제로 겹칠 수 있다.
@@ -266,28 +282,28 @@ def dispatch(
 )
 async def extract_and_pool(
     body: ProfileExtractRequest,
-    bg: BackgroundTasks,
     catalog: Annotated[CatalogReader, Depends(get_catalog)],
     store: Annotated[ProfileRunStore, Depends(get_store)],
     recipient_store: Annotated[RecipientProfileStore, Depends(get_recipient_store)],
     backend: Annotated[BackendPort, Depends(get_backend)],
     supervisor: Annotated[Supervisor, Depends(get_supervisor)],
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    io_limiter: Annotated[anyio.CapacityLimiter, Depends(get_io_limiter)],
 ) -> SuccessResponse[ProfileAccepted]:
-    """접수만 하고 202를 돌려준다. 분석은 BackgroundTasks에서.
+    """접수만 하고 202를 돌려준다. 분석은 Supervisor 워커 스레드에서.
 
     순서:
       1) body 검증 — FastAPI가 이 함수에 들어오기 전에 ProfileExtractRequest로 검증한다 (위반 → 422 → main.py가 400으로)
       2) 토큰 — dependencies=[require_service_token]
       3) 활성 카탈로그 — 없으면 지금 503. 백그라운드에서 발견하면 Backend는 영영 모르기 때문에 접수 단계에서 걸러야 한다
-      4) Supervisor에 제출 — 응답 뒤 슬롯 안에서 백그라운드 실행
+      4) Supervisor 큐에 제출 — 가득이거나 종료 중이면 503 + Retry-After(QUEUE_FULL_RETRY_AFTER_S). 기다리지 않는다
       5) 202 — 요청 값 그대로 + PENDING
     같은 (수신자, 버전)의 중복 접수: Backend는 10분 PENDING 타임아웃 시 **같은 sourceVersion으로 최대 2회** 재전송한다(09-25 합의).
-    그 판정(decide)은 응답 뒤 슬롯 안에서 한다 — dispatch() 참고. 어느 쪽이든 응답은 202 PENDING이다
+    그 판정(decide)은 워커 스레드의 슬롯 안에서 한다 — dispatch() 참고. 어느 쪽이든 응답은 202 PENDING이다
     (Backend 입장에서는 "접수됐다"가 전부이고, 결과는 7.7로 간다).
     """
     try:
-        catalog.active()
+        await anyio.to_thread.run_sync(catalog.active, limiter=io_limiter)   # TTL 밖이면 DB 1문장 — 기본 스레드풀·이벤트 루프 둘 다 안 잡는다
     except NoActiveCatalog as e:
         raise _error(503, "SERVICE_UNAVAILABLE", "활성 카탈로그가 없습니다.") from e
 
@@ -301,8 +317,12 @@ async def extract_and_pool(
              body.recipientUserId, body.sourceVersion, len(body.dislikedCategories), len(body.reviews), body.giftPreference is not None)
 
     # 중복 판정은 **슬롯 안에서** 한다(dispatch) — 판정과 실행 사이가 벌어지면 같은 요청이 동시에 와서 분석이 두 벌 돈다
-    supervisor.submit(bg, dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S,
-                      settings.CALLBACK_MAX_ATTEMPTS, settings.CALLBACK_BACKOFF_S)
+    accepted = supervisor.submit(dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S,
+                                 settings.CALLBACK_MAX_ATTEMPTS, settings.CALLBACK_BACKOFF_S)
+    if not accepted:   # 큐 가득·종료 중 — 기다리지 않고 거절. Backend 는 Retry-After 뒤 같은 번호로 다시 보낸다(BE 계획 5-1)
+        log.warning("7.6 거절 recipient=%s source_version=%s — 접수 대기열 가득(%d) 또는 종료 중 → 503 Retry-After %ds",
+                    body.recipientUserId, body.sourceVersion, settings.QUEUE_MAX, settings.QUEUE_FULL_RETRY_AFTER_S)
+        raise _error(503, "SERVICE_UNAVAILABLE", "접수 대기열이 가득 찼습니다.", retry_after=settings.QUEUE_FULL_RETRY_AFTER_S)
 
     return SuccessResponse(
         message="프로파일 분석이 시작되었습니다.",

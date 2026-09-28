@@ -5,6 +5,7 @@
 시험용 수신자 ID(99xxxx)를 쓰고 끝에 지운다 (test_db_stores.py와 같은 규칙)."""
 
 import json
+import time
 
 import httpx
 import pytest
@@ -19,6 +20,21 @@ from profiling.types import CallbackResult, RunStatus
 
 RID = 990_010
 RID_UNKNOWN = 990_011
+
+
+def _until(cond, timeout: float = 10.0, step: float = 0.02) -> bool:
+    """09-28: 분석은 Supervisor 워커 스레드에서 돈다 — 202 뒤 끝나기를 기다린다(전에는 TestClient 가 BackgroundTasks 를 동기로 돌렸다)."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if cond():
+            return True
+        time.sleep(step)
+    return False
+
+
+def _delivered(store, rid: int) -> bool:
+    s = store.get(rid)
+    return s is not None and s.status is RunStatus.DELIVERED
 
 
 @pytest.fixture(scope="module")
@@ -64,8 +80,7 @@ def test_v1_request_end_to_end(engine, cleanup) -> None:
         assert res.status_code == 202
         assert res.json()["data"] == {"recipientUserId": RID, "sourceVersion": 3, "profileStatus": "PENDING"}
 
-        # TestClient는 응답 뒤 BackgroundTasks를 동기로 실행한다 → 여기서 이미 끝나 있음
-        assert len(fake.sent) == 1
+        assert _until(lambda: len(fake.sent) == 1) and _until(lambda: _delivered(app.state.store, RID))   # 워커가 끝내기를 기다린다
         outcome = fake.sent[0]
         assert outcome.status is RunStatus.RESULT_READY
         assert len(outcome.search.product_ids) == 30
@@ -97,6 +112,7 @@ def test_unknown_fields_are_accepted_and_logged(engine, cleanup, caplog) -> None
             res = client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body)
         assert res.status_code == 202
         assert any("CONTRACT_7_6_UNKNOWN_FIELD" in r.message and "extraTop" in r.message and "weight" in r.message for r in caplog.records)
+        assert _until(lambda: (s := app.state.store.get(RID_UNKNOWN)) is not None and s.status is not RunStatus.RUNNING)   # 정리 전에 끝나게
 
 
 def test_health_reports_catalog_and_store(engine) -> None:
@@ -142,6 +158,7 @@ def test_app_boots_on_db_catalog(engine, cleanup, monkeypatch) -> None:
                               json={"recipientUserId": RID, "sourceVersion": 9, "dislikedCategories": [],
                                     "giftPreference": None, "reviews": []})
             assert res.status_code == 202
+            assert _until(lambda: _delivered(app.state.store, RID))
             saved = app.state.store.get(RID)
             assert saved.status is RunStatus.DELIVERED and len(saved.search.product_ids) == 30
             assert saved.search.catalog_version_id == version_id      # 파일 고정 UUID 가 아니라 DB 활성 버전
@@ -174,10 +191,11 @@ def test_same_version_resend_does_not_reanalyze(engine, cleanup) -> None:
     with TestClient(app) as client:
         app.state.backend = HttpBackendPort("http://backend.test", "t", 5.0, transport=httpx.MockTransport(handler))
         assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202
-        assert len(sent) == 1 and len(sent[0]["recommendedProductIds"]) == 30
+        assert _until(lambda: len(sent) == 1) and len(sent[0]["recommendedProductIds"]) == 30
+        assert _until(lambda: _delivered(app.state.store, RID))               # 첫 실행이 DELIVERED 로 남은 뒤에 재전송
 
         assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202   # 같은 번호 재전송
-        assert len(sent) == 2                                                 # 재전송이 실제로 나갔다
+        assert _until(lambda: len(sent) == 2)                                 # 재전송이 실제로 나갔다
         assert sent[1] == sent[0]                                             # 최초와 완전히 같은 본문
 
     with engine.connect() as c:
@@ -211,6 +229,7 @@ def test_callback_5xx_is_retried_immediately_with_real_port(engine, cleanup) -> 
     with TestClient(app) as client:
         app.state.backend = HttpBackendPort("http://backend.test", "t", 5.0, transport=httpx.MockTransport(handler))
         assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202
+        assert _until(lambda: len(sent) == 2)                                 # 0.5초 백오프 뒤 재시도까지 기다린다
     assert len(sent) == 2 and sent[0] == sent[1]                              # 500 뒤 같은 본문을 다시 보냈다
 
     with engine.connect() as c:
@@ -247,3 +266,19 @@ def test_503_carries_retry_after_and_recovery_runs(engine, monkeypatch) -> None:
             c.execute(sa.text("update ai_catalog.catalog_versions set is_active = true where id = :v"), {"v": row[0]})
         monkeypatch.undo()
         get_settings.cache_clear()
+
+
+def test_queue_full_is_503_with_short_retry_after_and_no_row(engine, monkeypatch, cleanup) -> None:
+    """Supervisor 가 받지 못하면 503 + Retry-After 30(QUEUE_FULL_RETRY_AFTER_S) — 카탈로그 없음(300)과 다르고, 실행 기록도 남지 않는다.
+    /health 에는 큐 상태(queued·queue_max·rejected)가 보인다."""
+    get_settings.cache_clear()
+    from profiling.main import app
+    with TestClient(app) as client:
+        health = client.get("/health").json()["supervisor"]
+        assert {"slots", "running", "queued", "queue_max", "submitted", "completed", "rejected", "failed"} <= set(health)
+        monkeypatch.setattr(app.state.supervisor, "submit", lambda *a, **k: False)
+        res = client.post("/api/internal/v1/ai/profile/extract-and-pool",
+                          json={"recipientUserId": RID, "sourceVersion": 41, "dislikedCategories": [], "giftPreference": None, "reviews": []})
+        assert res.status_code == 503 and res.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+        assert res.headers["Retry-After"] == str(get_settings().QUEUE_FULL_RETRY_AFTER_S)
+        assert app.state.store.get_run(RID, 41) is None
