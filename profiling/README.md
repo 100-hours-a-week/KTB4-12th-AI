@@ -6,7 +6,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 |---|---|
 | 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
 | 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
-| 테스트 | 단위 154개(외부 의존 없음) + 통합 51개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 203 passed, 2 skipped |
+| 테스트 | 단위 155개(외부 의존 없음) + 통합 51개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 204 passed, 2 skipped |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
 
 ---
@@ -24,7 +24,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | 폴더 · 파일 | 내용 |
 |---|---|
 | `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · **Backend 생애주기 흉내**(`lifecycle.py` — 디바운스→7.6→202→실패·타임아웃 시 같은 번호 재시도 2회(`Retry-After`·백오프)→FAILED) |
-| `tools/loadtest/` | **부하 시험 하네스** `run.py` — 7.6 동시 N건 · `/health` 지연 · `profile_runs` 시각 · `pg_stat_activity` · 정리 · BE 구동 SQL 3종. 절차는 [tools/loadtest/README.md](tools/loadtest/README.md), 결과는 `docs/부하_시험_결과_2026-09-28.md` |
+| `tools/loadtest/` | **부하 시험 하네스** `run.py` — 7.6 동시 N건 · `/health` 지연 · `profile_runs` 시각 · `pg_stat_activity` · 정리 · BE 구동 SQL 3종. 절차는 [tools/loadtest/README.md](tools/loadtest/README.md), 결과는 `docs/부하_시험_결과_2026-09-29.md`(팀 공유용 before/after) · `…_2026-09-28.md`(기준선) |
 | `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버** `drive.py` — 로그인 → 비선호 저장 → 7.6 관찰 → 대분류 제외 검증 → (옵션) AI 다운 시 BE 재시도 관찰. 절차는 `docs/BE_연동_시험_결과_2026-09-27.md` §7 |
 | `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
 | `tools/catalog/load_catalog.py` | Backend 전달 패키지 → `ai_catalog` 적재 · 회신 반영(`--id-map` · `--metrics`) |
@@ -40,6 +40,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | [docs/FE_연동_시험_시나리오.md](docs/FE_연동_시험_시나리오.md) | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
 | [docs/BE_연동_시험_결과_2026-09-27.md](docs/BE_연동_시험_결과_2026-09-27.md) | **BE `develop` 실물 연동 시험** — 7.6·202·대분류 제외 정상, 7.7은 PR3 전이라 401, AI 다운 시 새 번호 반복·PENDING 고착 실측. §7 재현 절차 |
 | [docs/FE_연동_시험_결과_2026-09-25.md](docs/FE_연동_시험_결과_2026-09-25.md) | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
+| [docs/부하_시험_결과_2026-09-29.md](docs/부하_시험_결과_2026-09-29.md) | **부하 시험 재측정 보고(팀 공유용)** — 무엇을 어디서 어떻게 왜 바꿨나(Supervisor 워커+상한 큐 · DB 왕복 34→8 · 슬롯 env) + 시나리오 9종 before/after: 느린 콜백에서 `/health` 실패 15 → 0, 굶는 동안 접수 34.5초 → 6.5ms, 300건은 큐 200에서 503, BE 실물 p50 17.5 → 6.8ms. 하네스 keep-alive 한계와 `--no-keepalive` |
 | [docs/부하_시험_결과_2026-09-28.md](docs/부하_시험_결과_2026-09-28.md) | **부하 시험 기준선과 after** — 동시 100·300 · 슬롯 1·4 · 느린 콜백(500·timeout)에서 `/health` 150초·접수 34.5초 굶음 재현(§4) → 왕복 34→8(§10·§11) → Supervisor 수정 뒤 `/health` 최대 57ms·추가 접수 13ms(§12) · BE 실물 200건. 하네스 [tools/loadtest/README.md](tools/loadtest/README.md) |
 | [docs/시퀀스_전체.md](docs/시퀀스_전체.md) | **구현된 프로파일링 전체 시퀀스** — 기동 · 성공 전체 · 접수 거절 · 분석 실패(침묵) · 콜백 4갈래 · 슬롯 (그림 6장) |
 | [docs/DB_ERD.md](docs/DB_ERD.md) | **AI가 소유한 표 구조(ERD) — 처음 보는 사람용** — 표마다 왜 생겼나·역할·어느 코드가 언제 읽고 쓰나 · 코드 ↔ 표 그림 · 키·인덱스·제약 · FK인 것과 아닌 것 · 바깥 ID 대응 · 자주 헷갈리는 것 (그림 3장) |
@@ -99,7 +100,7 @@ uv sync                                     # .venv + 의존성 (uv.lock 기준)
 cp .env.example .env                        # 필요 시 값 수정
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
 uv run alembic upgrade head                 # 테이블 생성 (0001~0004)
-uv run pytest -q                            # 203 passed, 2 skipped (DB 꺼져 있으면 통합 51개 skip)
+uv run pytest -q                            # 204 passed, 2 skipped (DB 꺼져 있으면 통합 51개 skip)
 uv run ruff check src tests tools alembic   # lint
 ```
 
@@ -177,7 +178,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 4. 테스트
 
-원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 154개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 45개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
+원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 155개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 45개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
 
 | 파일 | 대상 | 방법 | 개수 |
 |---|---|---|---|
@@ -197,7 +198,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | `test_supervisor.py` | Supervisor(워커 + 상한 큐) | 슬롯 1이면 겹치지 않음 · 큐 가득이면 기다리지 않고 False · 예외가 워커를 죽이지 않음 · stop이 큐를 버리고 실행 중은 기다림 · 크기 검증 | 5 |
 | `test_settings_slots_env.py` | 슬롯 수 환경변수 이름 | `PROFILING_SLOTS`·옛 `PROFILING_PROFILING_SLOTS` 둘 다 읽힘 · 기본 1 · 다른 필드 무영향 (이슈 2026-09-28_1424) | 4 |
 | `test_settings_catalog_poll_ttl.py` | 카탈로그 폴링 TTL 환경변수 | `PROFILING_CATALOG_POLL_TTL_S` 읽힘 · 기본 1.0 · 0 허용 | 2 |
-| `test_loadtest_summary.py` | `tools/loadtest/run.py` 집계 | 백분위 · 요약(202·`/health`·완료·대기·재전송 흔적) · AI 로그 도착 파싱·묶음 — 네트워크·DB 없음 | 4 |
+| `test_loadtest_summary.py` | `tools/loadtest/run.py` 집계 | 백분위 · 요약(202·`/health`·완료·대기·재전송 흔적) · AI 로그 도착 파싱·묶음 — 네트워크·DB 없음 · `--no-keepalive` 파싱 | 5 |
 | `integration/test_db_catalog.py` | 마이그레이션 0003 + 적재 SQL | 표·CHECK·활성 버전 1개 · 재적재 멱등 · Backend ID/재고 보존 · `--id-map` 회신 반영 | 7 |
 | `integration/test_db_catalog_reader.py` | `DbCatalogReader` | 활성 버전 읽기·필드 매핑 · 같은 버전이면 재질의 없음 · Backend 번호 우선/임시 번호 · 번호 충돌 거부 · 활성 없음 · **버전과 상품이 한 스냅샷에서 나오는지** · 대분류(parent) 채움 · 폴링 TTL(안이면 질의 없음 · 0이면 호출마다 · 주입 시계로 만료 · 실패는 캐시 안 함) | 12 |
 | `integration/test_db_recipient_profiles.py` | 마이그레이션 결과 | 열 순서·PK 시퀀스 없음·유니크·CHECK·upsert 버전 규칙 | 5 |

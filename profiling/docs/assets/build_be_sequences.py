@@ -3,6 +3,7 @@ python3 build_be_sequences.py  (Chrome 헤드리스 + mermaid CDN. 인터넷 필
   BE_연동_필드표_v1|v2|v3.md → docs/assets/be-seq/<v1|v2|v3>/<이름>.png
   시퀀스_전체.md              → docs/assets/seq/<이름>.png
   DB_ERD.md                   → docs/assets/erd/<이름>.png
+  부하_시험_결과_2026-09-29.md → docs/assets/loadtest/<이름>.png
   docs/issues/*/README.md     → 그 폴더/assets/<이름>.png
 문서의 mermaid를 고치면 이 스크립트를 다시 돌린다 — 그림과 본문이 한 소스."""
 import re
@@ -27,7 +28,7 @@ def targets() -> list[tuple[Path, Path]]:
     out: list[tuple[Path, Path]] = []
     for doc in sorted(DOCS_DIR.glob("BE_연동_필드표_v*.md")):
         out.append((doc, HERE / "be-seq" / doc.stem.rsplit("_", 1)[-1]))   # v1 · v2 · v3
-    for name, folder in (("시퀀스_전체.md", "seq"), ("DB_ERD.md", "erd")):
+    for name, folder in (("시퀀스_전체.md", "seq"), ("DB_ERD.md", "erd"), ("부하_시험_결과_2026-09-29.md", "loadtest")):
         doc = DOCS_DIR / name
         if doc.exists():
             out.append((doc, HERE / folder))

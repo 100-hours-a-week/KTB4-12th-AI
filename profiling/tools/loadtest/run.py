@@ -370,6 +370,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--label", default="run")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--no-samples", action="store_true", help="JSON 에 표본 배열을 넣지 않는다")
+    ap.add_argument("--no-keepalive", action="store_true",
+                    help="7.6 마다 새 TCP 연결(Connection: close). httpx 풀은 keep-alive 연결이 100개쯤이면 초당 50~80건에서 막혀"
+                         "(httpcore 1.0.9, 09-29 확인) 서버 접수 능력을 잴 때 켠다")
     return ap.parse_args(argv)
 
 
@@ -398,11 +401,13 @@ def _cats_of(a: argparse.Namespace):
 async def _run(a: argparse.Namespace, ai_db: LoadAi, lo: int, hi: int, health_before: dict, received_before: int) -> dict[str, Any]:
     token = a.token if a.token is not None else get_settings().SERVICE_TOKEN
     headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if a.no_keepalive:
+        headers["Connection"] = "close"          # 요청마다 새 연결 — 클라이언트 풀 한계를 피해 서버를 잰다
     stop = asyncio.Event()
     probes: list[Probe] = []
     db_samples: list[DbSample] = []
     posts: list[Post] = []
-    limits = httpx.Limits(max_connections=a.concurrency + 8, max_keepalive_connections=a.concurrency)
+    limits = httpx.Limits(max_connections=a.concurrency + 8, max_keepalive_connections=0 if a.no_keepalive else a.concurrency)
     async with httpx.AsyncClient(limits=limits) as post_client, httpx.AsyncClient() as probe_client:
         t0 = time.perf_counter()
         t0_db = await asyncio.to_thread(ai_db.db_now)
@@ -427,7 +432,7 @@ async def _run(a: argparse.Namespace, ai_db: LoadAi, lo: int, hi: int, health_be
                         health_before=health_before, health_after=health_after,
                         received_before=received_before, received_after=received_after, arrivals=arrivals)
     return {"summary": summary, "complete": done,
-            "meta": {"label": a.label, "mode": a.mode, "n": a.n, "concurrency": a.concurrency, "base": lo, "source_version": a.source_version,
+            "meta": {"label": a.label, "mode": a.mode, "n": a.n, "concurrency": a.concurrency, "keepalive": not a.no_keepalive, "base": lo, "source_version": a.source_version,
                      "fake_mode": a.fake_mode or "ok", "t0_wall": t0_wall.isoformat(timespec="milliseconds"), "t0_db": t0_db.isoformat(),
                      "git": _git_head(), "health_before": health_before, "health_after": health_after,
                      "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(a).items()}},

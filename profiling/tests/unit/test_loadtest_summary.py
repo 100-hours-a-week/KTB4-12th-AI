@@ -7,6 +7,7 @@ from tools.loadtest.run import (
     DbSample,
     Post,
     Probe,
+    _parse_args,
     arrival_stats,
     dist,
     markdown,
@@ -83,3 +84,9 @@ def test_parse_ai_log_and_arrivals(tmp_path: Path) -> None:
     assert stats["n"] == 3 and [c["size"] for c in stats["clusters"]] == [2, 1]
     assert stats["max_per_second"] == 2 and abs(stats["gap_ms"]["max"] - 10_380.0) < 1e-6
     assert arrival_stats([])["clusters"] == []
+
+
+def test_no_keepalive_flag_parses_and_defaults_off() -> None:
+    """--no-keepalive: 요청마다 새 연결(Connection: close). 기본은 keep-alive — 09-28 결과와 비교할 때 그대로 두고, 서버 접수 능력을 잴 때 켠다."""
+    assert _parse_args(["--no-keepalive"]).no_keepalive is True
+    assert _parse_args([]).no_keepalive is False

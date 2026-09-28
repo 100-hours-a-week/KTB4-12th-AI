@@ -43,6 +43,7 @@ uv run python -m tools.loadtest.run --n 100 --concurrency 100 --base 900001 --cl
 | `--cleanup-only` | 정리만(RUNNING 이 남았으면 거부 → AI 를 내린 뒤) |
 | `--expect-slots k` | `/health supervisor.slots` 가 k 가 아니면 중단 |
 | `--out` `--label` `--no-samples` | JSON 저장 · 이름표 · 표본 배열 제외 |
+| `--no-keepalive` | 7.6 마다 새 TCP 연결(`Connection: close`). **동시성 100 이상에서 서버 접수 능력을 잴 때 켠다** — 아래 주의 |
 
 종료 코드: 0 전부 종료 · 1 시간 초과 · 2 사전 점검·가드 실패.
 
@@ -81,3 +82,4 @@ uv run python -m tools.loadtest.run --mode be --n 200 --base 900001 --wait 180 -
 - 시나리오 사이마다 `--cleanup`. `/health` 의 `undelivered` 는 `count(*)` 순차 스캔이라 행 수에 비례해 느려진다.
 - 클라이언트 타임아웃은 서버 작업을 취소하지 않는다. 완료는 DB 행으로 센다. RUNNING 이 남으면 정리를 거부한다.
 - `--fake-mode timeout` 은 슬롯 1 에서 100건에 약 29분 — `--wait 120` 부분 실행 뒤 AI 를 내리고 `--cleanup-only`.
+- **하네스 자체의 한계(09-29 확인)**: httpx 풀이 keep-alive 연결을 100개쯤 쥐면 요청 배정이 느려져 초당 50~80건이 상한이 된다(httpcore 1.0.9). 같은 동시성으로 `/openapi.json` 을 때려도 같아서 서버 문제가 아니다 — 원시 소켓 keep-alive 클라이언트는 8,000/s, `Connection: close` 는 900/s 가 나온다. `--n` 이 `--concurrency` 보다 크면 `--no-keepalive` 로 재고, keep-alive 값은 '클라이언트 포함 지연'으로만 읽는다. 09-28 S-A′(300건) 의 202 p50 1.0초·p95 3.7초는 이 한계가 섞인 값이다([부하_시험_결과_2026-09-29 §4.3](../../docs/부하_시험_결과_2026-09-29.md)).
