@@ -46,3 +46,5 @@ dialog{border:1px solid var(--line);color:var(--ink);padding:0;background:white}
 .category-conflict{font-size:11px;line-height:1.65;color:var(--exclude);margin-top:9px}
 .add-field button{width:40px;font-size:11px;color:var(--accent)}
 @media(max-width:760px){.workspace{display:block}.filters{width:min(340px,calc(100vw - 36px));visibility:hidden}.filters.open{visibility:visible}.category-check{width:32px;min-height:44px}.category-row>button{min-height:44px}.category-children label{min-height:40px;font-size:12px}.category-search,.category-picker-body .category-search{font-size:16px}.filter-chips button{min-height:32px;font-size:11px}.filter-toggle{min-height:36px}}
+
+#reporter-name{display:block;width:100%;box-sizing:border-box;padding:10px 12px;margin:8px 0 16px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}

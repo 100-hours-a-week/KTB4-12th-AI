@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
 import {parseJSON, stringifyJSON, parseProductId, parseCategoryId} from '../static/json.js';
 
 // Run the production UI with a minimal DOM and deterministic HTTP responses.
@@ -14,7 +15,7 @@ function harness(snapshot='current') {
     return nodes.get(selector);
   }
   const requests=[], responses=[], copied=[];
-  const context=vm.createContext({document:{querySelector:node,querySelectorAll:selector=>lists.get(selector)??[],addEventListener(){},body:{style:{}}},
+  const context=vm.createContext({crypto:webcrypto,document:{querySelector:node,querySelectorAll:selector=>lists.get(selector)??[],addEventListener(){},body:{style:{}}},
     location:new URL('http://localhost/'),navigator:{clipboard:{writeText:async text=>copied.push(text)}},history:{replaceState(){}},URL,URLSearchParams,AbortController,structuredClone,performance,setTimeout:()=>0,clearTimeout,
     parseJSON,stringifyJSON,parseProductId,parseCategoryId,fetch:async(url,init)=>{requests.push({url,body:init?.body?parseJSON(init.body):undefined});const reply=await responses.shift();return reply?.httpError?{ok:false,status:reply.status,text:async()=>stringifyJSON(reply.body)}:{ok:true,status:200,text:async()=>stringifyJSON(reply)};}});
   const source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8').replace(/^import .*;\n/, '').replace(/init\(\);\s*$/, '');
@@ -107,7 +108,7 @@ test('API console examples and detail lookup preserve BIGINT values',async()=>{
   const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{value:'',textContent:'',addEventListener(event,handler){handlers.set(selector+':'+event,handler);},setAttribute(){}});return nodes.get(selector);};
   node('#request-source').value='chat';
   node('#request-body').value='{"query":"스피커", "filters":{"excludeProductIds":[9223372036854775807]}}';
-  const context=vm.createContext({document:{querySelector:node,querySelectorAll:()=>[]},location:{origin:'http://localhost'},
+  const context=vm.createContext({crypto:webcrypto,document:{querySelector:node,querySelectorAll:()=>[]},location:{origin:'http://localhost'},
     parseJSON,stringifyJSON,AbortSignal,performance,setTimeout,clearTimeout,
     fetch:async(path,options)=>{if(!options?.body)return {ok:true,text:async()=>'{"status":"ready","products":1}'};
       rawRequests.push(options.body);requests.push(parseJSON(options.body));if(reply)return reply;return {ok:true,status:200,text:async()=>' {"hits":[{"productId":9223372036854775807}],"snapshotId":"current"}'};}});
@@ -346,4 +347,23 @@ test('a failed initial search retains metadata so the user can retry',async()=>{
   assert.equal(ui.node('#error').textContent,'Busy');
   ui.responses.push(page());await ui.exec('run()');
   assert.equal(ui.exec('state.rows.length'),48);
+});
+
+
+test('failed feedback keeps its draft and retries with the same submission id', async()=>{
+  const ui=harness();ui.apply(page());
+  ui.exec("openNote(state.contexts.get('1'),'filter_violation')");
+  ui.node('#note-text').value='조건 확인 부탁합니다';
+  ui.node('#reporter-name').value='에멧';
+  ui.responses.push({httpError:true,status:503,body:{message:'보관 실패',error:{code:'FEEDBACK_STORAGE_UNAVAILABLE'}}});
+  const submit=ui.node('#note-form').handlers.get('submit');
+  await submit({preventDefault(){}});
+  assert.equal(ui.node('#note-text').value,'조건 확인 부탁합니다');
+  assert.equal(ui.exec('state.ratings.size'),0);
+  ui.responses.push({saved:true,id:'test'});
+  await submit({preventDefault(){}});
+  assert.match(ui.requests[0].body.submissionId,/^[a-f0-9]{32}$/);
+  assert.equal(ui.requests[0].body.submissionId,ui.requests[1].body.submissionId);
+  assert.equal(ui.exec('state.ratings.size'),1);
+  assert.equal(ui.requests[1].body.reporterName,'에멧');
 });

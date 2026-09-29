@@ -19,7 +19,7 @@ docker compose up -d --wait search
 
 `sample`은 합성 상품 3개로 검색 자료를 만든다. 기존 데이터가 있으면 덮어쓰지 않는다. 개인 Dataset이나 토큰은 필요 없다. 최초 빌드는 공개 모델을 다운로드하며 revision과 해시를 검증한다. 모델 라이선스는 [model.lock.json](embedding/model.lock.json)의 CC-BY-NC-4.0이다.
 
-데이터와 검색 기록은 각각 `data`, `qa` Docker 볼륨에 저장한다. `docker compose down`은 보존하고 `down -v`는 삭제한다. 호스트에는 localhost로만 공개하며 자체 인증은 없다.
+데이터와 검색 기록은 각각 `data`, `qa` Docker 볼륨에 저장한다. `docker compose down`은 보존하고 `down -v`는 삭제한다. 호스트에는 localhost로만 공개하며 자체 인증은 없다. 외부 공개에는 인증 프록시와 원본 포트 접근 제한이 필요하다. QA에는 검색 원문·의견이 저장되므로 실제 개인정보를 입력하지 않는다.
 
 이미 제공받은 이미지를 쓰려면 `.env.example`을 `.env`로 복사해 `AI_SEARCH_IMAGE`를 해당 주소로 지정하고 `docker compose pull search`를 실행한다. 이후 위의 `sample`, `up` 명령을 사용한다. 설정 예시는 [.env.example](.env.example)을 참고한다.
 
@@ -36,6 +36,8 @@ docker compose run --rm sync \
 기본은 입력 검증과 변경량 확인이다. 같은 명령에 `--apply`를 붙이면 임베딩·검색 인덱스 검증 후 활성 데이터를 교체한다. 최초 생성이 끝나면 `docker compose up -d --wait search`로 실행한다. 갱신 실패 시 기존 데이터를 유지한다. 자동 스케줄러는 없다.
 
 - export 계약: [AI 위키 §7.9](https://github.com/100-hours-a-week/KTB4-12th-wiki/wiki/모델-API-설계#79-상품-전체-export)
+
+export와 categories URL은 같은 origin(스킴·호스트·포트)이어야 한다. URL의 자격증명·쿼리·fragment와 리다이렉트는 허용하지 않는다. localhost/loopback 외에는 HTTPS가 기본이며, 신뢰하는 사설망 HTTP가 필요한 경우에만 동기화 명령에 `--allow-insecure-http`를 명시한다. 이 옵션은 통신을 암호화하지 않는다.
 - `BACKEND_SERVICE_TOKEN`은 Git에서 제외되는 로컬 `.env` 또는 셸 환경변수로 전달한다.
 - 카테고리는 현재 Backend `develop`의 `/products/categories` 계층 응답을 사용한다. 이 응답은 위키의 평면·페이지네이션 예시와 다르다. 실제 Backend 접속은 아직 검증하지 않았다.
 - export에 없는 이미지·상품 유형·원본 ID는 새로 만들지 않는다. 처음 export만으로 준비하면 이미지 없이 표시되며 해당 값은 비어 있거나 null이다.
@@ -74,3 +76,5 @@ uv run python tools/sync_catalog.py \
 ```
 
 로컬 실행 포트는 4325다. API 사용은 [연동 안내](INTEGRATION.md)를 참고한다.
+
+QA 의견에는 선택 입력한 이름(`reporterName`)을 남길 수 있다. 인증된 신원은 아니며, 기존 익명 의견의 작성자는 알 수 없다. 원래 제보 테이블은 유지하고 이름·검토 상태는 `feedback_meta`에 저장한다. HF 데모의 별도 관리자 화면과 인증은 데모 저장소에서 관리한다.

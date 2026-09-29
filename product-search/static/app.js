@@ -240,8 +240,12 @@ async function detail(id) {
 }
 function safeUrl(url){try{const u=new URL(url);return ['https:','http:'].includes(u.protocol)?esc(u.href):'#';}catch{return '#';}}
 function closeDetail(){$('#detail-dialog').close();document.body.style.overflow='';state.detail=null;}
-async function rate(context,verdict,note='') {
-  try {await api('/api/feedback',{searchId:context.searchId,productId:context.product?.productId??null,verdict,note});state.ratings.set(context.searchId+':'+context.product?.productId,verdict);const cardEl=$$('.product-card').find(c=>c.dataset.id===String(context.product?.productId));if(cardEl)$$('.feedback-actions button',cardEl).forEach(b=>b.classList.toggle('rated',b.dataset.action===verdict));toast('QA 의견을 저장했습니다.');return true;}catch(e){toast(e.message);return false;}
+const submissions = new Map();
+async function rate(context,verdict,note='',reporterName='') {
+  const key=stringifyJSON([context.searchId,context.product?.productId??null,verdict,note,reporterName]);
+  if(!submissions.has(key))submissions.set(key,Array.from(crypto.getRandomValues(new Uint8Array(16)),x=>x.toString(16).padStart(2,'0')).join(''));
+  const submissionId=submissions.get(key);
+  try {await api('/api/feedback',{submissionId,searchId:context.searchId,productId:context.product?.productId??null,verdict,note,reporterName});state.ratings.set(context.searchId+':'+context.product?.productId,verdict);const cardEl=$$('.product-card').find(c=>c.dataset.id===String(context.product?.productId));if(cardEl)$$('.feedback-actions button',cardEl).forEach(b=>b.classList.toggle('rated',b.dataset.action===verdict));toast('QA 의견을 저장했습니다.');return true;}catch(e){toast(e.message);return false;}
 }
 function openNote(context,verdict){state.note={context,verdict};$('#note-title').textContent=verdict==='missing'?'누락된 상품 제보':'검색 조건 위반 제보';$('#note-description').textContent=verdict==='missing'?'나와야 하는 상품명이나 기대한 결과를 남겨 주세요.':context.product.name;$('#note-text').value='';$('#note-dialog').showModal();$('#note-text').focus();}
 async function copy(text){try{await navigator.clipboard.writeText(text);toast('복사했습니다.');}catch{const input=document.createElement('textarea');input.value=text;document.body.append(input);input.select();document.execCommand('copy');input.remove();toast('복사했습니다.');}}
@@ -317,7 +321,7 @@ $('#detail-body').addEventListener('click',e=>{const action=e.target.closest('[d
 $('#detail-exclude').addEventListener('click',()=>{if(!state.detail)return;state.filters.excludeProductIds=[...new Set([...state.filters.excludeProductIds,state.detail.product.productId])];closeDetail();syncFilters();run();});
 $('#missing-button').addEventListener('click',()=>{if(state.result)openNote({searchId:state.result.searchId},'missing');});
 $('#close-note').addEventListener('click',()=>$('#note-dialog').close());$('#cancel-note').addEventListener('click',()=>$('#note-dialog').close());
-$('#note-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('[type=submit]',$('#note-form'));button.disabled=true;try{if(await rate(state.note.context,state.note.verdict,$('#note-text').value.trim()))$('#note-dialog').close();}finally{button.disabled=false;}});
+$('#note-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('[type=submit]',$('#note-form'));button.disabled=true;try{if(await rate(state.note.context,state.note.verdict,$('#note-text').value.trim(),$('#reporter-name').value.trim()))$('#note-dialog').close();}finally{button.disabled=false;}});
 $('#share-button').addEventListener('click',()=>{if(state.shareSearchId)copy(`${location.origin}/?run=${state.shareSearchId}`);});
 $('#export-button').addEventListener('click',()=>{if(!state.result)return;const blob=new Blob([stringifyJSON(state.result,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`search-${state.result.searchId.slice(0,8)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);});
 $('#about-button').addEventListener('click',()=>$('#about-dialog').showModal());$('#close-about').addEventListener('click',()=>$('#about-dialog').close());

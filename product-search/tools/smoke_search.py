@@ -38,7 +38,7 @@ def smoke(url, *, expected_products=None, fixture=False, qa_receipt=None, resume
     deadline = time.monotonic()+120
     while True:
         try:
-            ready = call('/readyz')
+            ready = call('/readyz?probe=true')
             break
         except (OSError, AssertionError):
             if time.monotonic() >= deadline:
