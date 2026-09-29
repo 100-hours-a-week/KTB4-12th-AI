@@ -5,6 +5,7 @@ python3 build_be_sequences.py  (Chrome 헤드리스 + mermaid CDN. 인터넷 필
   DB_ERD.md                   → docs/assets/erd/<이름>.png
   부하_시험_결과_2026-09-29.md → docs/assets/loadtest/<이름>.png
   docs/issues/*/README.md     → 그 폴더/assets/<이름>.png
+  docs/학습_가이드/*.md        → docs/학습_가이드/assets/<이름>.png
 문서의 mermaid를 고치면 이 스크립트를 다시 돌린다 — 그림과 본문이 한 소스."""
 import re
 import subprocess
@@ -35,6 +36,9 @@ def targets() -> list[tuple[Path, Path]]:
     # 이슈 문서 — 폴더마다 README.md 의 그림을 그 폴더의 assets/ 에 (docs/issues/README.md 규칙)
     for readme in sorted((DOCS_DIR / "issues").glob("*/README.md")):
         out.append((readme, readme.parent / "assets"))
+    # 학습 가이드 — 장마다 그림을 docs/학습_가이드/assets/ 에 (이슈 폴더와 같은 "문서 옆 assets" 규칙)
+    for doc in sorted((DOCS_DIR / "학습_가이드").glob("*.md")):
+        out.append((doc, doc.parent / "assets"))
     return out
 
 
