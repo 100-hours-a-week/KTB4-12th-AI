@@ -71,7 +71,7 @@ PROFILING_SERVICE_TOKEN=local-profiling-token PROFILING_BACKEND_BASE_URL=http://
 uv run python -m tools.loadtest.run --mode be --n 200 --base 900001 --wait 180 --cleanup --yes \
     --ai-log tools/loadtest/results/ai-S-C.log --label S-C --out tools/loadtest/results/S-C.json
 # BE (KTB4-12th-BE, 무수정): set -a && . ./.env && set +a && AI_PROFILE_DISPATCH_INTERVAL=10s AI_PROFILE_BATCH_SIZE=100 \
-#   APP_AIPROFILE_QUIETPERIOD=10s APP_AIPROFILE_MAXIMUMWINDOW=60s SCHEDULING_ENABLED=true JAVA_HOME=… ./gradlew bootRun
+#   APP_AIPROFILE_QUIETPERIOD=10s APP_AIPROFILE_MAXIMUMWINDOW=60s SCHEDULING_ENABLED=true AI_PROFILE_SCHEDULING_ENABLED=true JAVA_HOME=… ./gradlew bootRun
 ```
 
 재실행은 `be_reset.sql`(버전은 유지 — 0 으로 되돌리면 AI 가 재전송으로 판정) + 하네스 `--cleanup`. 끝에 `be_cleanup.sql`(남은 수 0).

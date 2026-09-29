@@ -488,6 +488,7 @@ FK(외래 키)는 "이 열의 값은 저 표에 반드시 있어야 한다"를 D
 | `categories.backend_category_id` | Backend `categories.id` | **67 / 67 (09-25 회신 반영)** — 7.6 `dislikedCategories[].categoryId`가 이 값(대분류 1~10) |
 | `products.source_product_id` | 수집처(`KAKAO_GIFT:…`) · 팀원 검색기의 상품 ID | 같은 체계 |
 | `catalog_versions.id` | — (AI 내부) | 7.7에는 나가지 않는다. 감사용 |
+| (없음) | 팀원 검색기 `snapshotId`(카탈로그 내용 해시 20자) | `catalog_versions.id`(UUID)와 **대응표 없음** — 검색 연결(v2) 때 정한다(09-29) |
 
 번호가 비어 있는 동안에는 `DbCatalogReader`가 수집처 ID의 숫자부를 **임시 번호**로 쓰고 `/health`에 `provisional_ids: true`를 띄운다. 09-25 회신을 반영한 뒤로는 전건 채워져 그 표시가 나오지 않는다.
 

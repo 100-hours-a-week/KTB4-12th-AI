@@ -1,11 +1,11 @@
 # profiling — 수신자 프로파일링 (AI 백엔드 · Profile / Catalog 파트)
 
-Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 **7.6**으로 보내면, 즉시 `202`로 접수하고 백그라운드에서 추천 상품 30개를 골라 **7.7 콜백**으로 돌려주는 서비스. 태그는 AI가 보관하고 Backend에는 상품 번호만 보낸다(DR-035). 상품 목록은 Backend의 **7.9 export**로 받는다.
+Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 **7.6**으로 보내면, 즉시 `202`로 접수하고 백그라운드에서 추천 상품 30개를 골라 **7.7 콜백**으로 돌려주는 서비스. 태그는 AI가 보관하고 Backend에는 상품 번호만 보낸다(DR-035). 상품 목록은 지금은 Backend 전달 파일(+09-25 회신)로 `ai_catalog` 에 적재하고, **7.9 export** 는 BE 가 제공하면 붙인다(검색 연결 v2 때).
 
 | 상태 (2026-09-29) | |
 |---|---|
 | 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
-| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
+| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그도 DB(`ai_catalog`, `0003`, 09-23) — 배포는 `CATALOG_SOURCE=db`, 로컬 기본만 파일(`catalog_sample.json`). 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
 | 테스트 | 단위 155개(외부 의존 없음) + 통합 51개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 204 passed, 2 skipped |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
 
@@ -19,7 +19,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 > 그림 원본: `docs/assets/build_structure.py` → `structure.svg` (PNG는 Chrome 헤드리스). 모듈이 늘거나 포트가 바뀌면 스크립트를 고치고 다시 만든다.
 
-`src/profiling/` 모듈 12개의 역할은 위 그림에 있다. 나머지 폴더는 이렇다.
+`src/profiling/` 모듈 11개(+`__init__.py`)의 역할은 위 그림에 있다. 나머지 폴더는 이렇다.
 
 | 폴더 · 파일 | 내용 |
 |---|---|
@@ -93,7 +93,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | 의존성 | fastapi · uvicorn[standard] · pydantic · pydantic-settings · httpx · sqlalchemy · alembic · psycopg[binary] | dev: pytest · ruff |
 | 설정 | 환경변수 `PROFILING_*` 또는 `profiling/.env` (`.env.example` 복사) | 코드는 `settings.X`로만 접근 — 이름 바꿀 때 `settings.py` 한 곳 |
 | DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`~`0004` | 저장소는 PostgreSQL 하나뿐 — 연결 실패면 앱이 뜨지 않는다 (DB 없이 띄우는 모드는 없음) |
-| 카탈로그 | 기본 `tests/fixtures/catalog_sample.json`(111건) · 전체 4,231건은 `.env`에서 경로 지정 | 팀원 카탈로그 DB 전까지 파일 |
+| 카탈로그 | 로컬 기본 `CATALOG_SOURCE=file`(`catalog_sample.json` 111건) · 배포 `db`(`ai_catalog` 4,231건, `load_catalog --package` 로 적재) | `.env.example` 참고 |
 
 ```bash
 cd profiling
@@ -105,7 +105,7 @@ uv run pytest -q                            # 204 passed, 2 skipped (DB 꺼져 �
 uv run ruff check src tests tools alembic   # lint
 ```
 
-**팀원 골격과의 차이 (합칠 때 바꿀 것)** — 팀원 레포 골격은 루트 `app/` 레이아웃 · pip/requirements · Python 3.11 · env 이름 `DATABASE_URL`·`INTERNAL_SERVICE_TOKEN`·`MAIN_BACKEND_URL`. 지금은 각자 로컬로 개발하고, 합칠 때 `profiling/src/profiling/*` → `app/profiling/*` 이동 + `settings.py` env 이름 통일 + 루트 단일 `pyproject`로 전환한다(환경 PR 초안은 브랜치 `chore/uv-environment`). 근거·규칙은 [docs/환경_설정.md](docs/환경_설정.md).
+**팀원 골격과의 차이 (합칠 때 바꿀 것)** — 팀원 골격은 아직 없다(09-18 초기 골격 `app/`·pip·3.11 은 같은 날 되돌려졌다). 팀원 `product-search/` 는 uv · Python ≥3.13 · 헬스 `/readyz` · 포트 4326(origin/main 기준 — 이 브랜치의 사본은 09-22 판). 지금은 각자 로컬로 개발하고, 합칠 위치·env 이름·루트 단일 `pyproject` 는 [할 일 2-7](docs/할_일_목록_2026-09-28.md)(레이아웃·CI 정렬)에서 정한다(환경 PR 초안은 미푸시 브랜치 `chore/uv-environment`). 근거·규칙은 [docs/환경_설정.md](docs/환경_설정.md).
 
 ---
 
@@ -164,11 +164,12 @@ curl -s -X POST localhost:8000/api/internal/v1/ai/profile/extract-and-pool \
 curl -s localhost:8081/received | python3 -m json.tool | head -30
 ```
 
-실제 Backend 상품으로 바꾸기 (7.9 가져오기 + ID 대조):
+카탈로그 적재(배포 경로) — Backend 전달 패키지를 `ai_catalog` 에 넣는다:
 ```bash
-uv run python -m tools.catalog.fetch_export --base-url http://localhost:8081 --token dev-token --out data/catalog_export.json --compare-db
+uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1     # 적재 (트랜잭션 하나, 활성 버전 교체)
+uv run python -m tools.catalog.load_catalog --id-map … --category-id-map … --metrics …            # 09-25 회신(Backend 번호·재고·조회수) 반영
 ```
-계약 점검(필드 이름·타입·모르는 필드) → 지금 카탈로그·`ai_search.products`와 ID 대조 → 저장. 종료 코드 0 일치 · 1 계약 위반(저장 안 함) · 2 차이 있음 · 3 연결 실패. 저장 뒤 `.env`의 `PROFILING_CATALOG_FILE`을 그 경로로.
+`fetch_export` 는 **7.9 계약 점검·파일 카탈로그용**이다(`--base-url … --out data/catalog_export.json`, 종료 코드 0 일치 · 1 계약 위반 · 2 차이 · 3 연결 실패. `--compare-db` 의 대조 대상은 팀원 옛 표 — [할 일 2-6 ②](docs/할_일_목록_2026-09-28.md)). **7.9 export JSON 을 `ai_catalog` 에 넣는 경로는 아직 없다** — BE 7.9 가 나오고 검색 연결(v2)을 팀원과 맞출 때 같이 만든다([할 일 2-10](docs/할_일_목록_2026-09-28.md)).
 
 DB에 남은 것 확인:
 ```bash
@@ -223,7 +224,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | 3 | ~~상품 카탈로그 DB~~ **완료(09-23)** — `0003` + `load_catalog.py`로 4,231건·67분류 적재, `DbCatalogReader`로 읽기까지. `PROFILING_CATALOG_SOURCE=db`가 배포 경로다. Backend 번호가 없는 동안은 임시 번호로 돌고 `/health`가 `provisional_ids`로 표시한다(2번이 끝나면 사라짐) | — | `pipeline.py`·`ports.py` |
 | 4 | ~~접수 단계 중복 판정~~ **완료(09-25)** — Backend가 같은 `sourceVersion`으로 최대 2회 재전송하기로 해서 필수가 됐다. `decide()`가 analyze/resend/skip으로 가른다 | — | 어댑터·ports |
 | 5 | ~~7.7 재시도(5xx 최대 3회) · 재시작 복구(RUNNING→FAILED 정리)~~ **완료(09-26·27)** — `intake._send_and_record`가 0.5초·2초 뒤 최대 3회(`CALLBACK_MAX_ATTEMPTS`·`CALLBACK_BACKOFF_S`), `recover_stale_runs`가 시작 시 정리 | — | 포트 시그니처 |
-| 6 | 배포 — `Dockerfile` · compose에 `ai-app` · 시작 시 `alembic upgrade head` | `docker-compose.yml` · `Dockerfile` | |
+| 6 | ~~배포 파일~~ **파일 완료** — `Dockerfile` · compose(`ai-migrate`·`ai-app`) 있음(§3). 남은 것: 로컬 빌드 검증(Docker 프록시) · 토큰 fallback 제거 → [할 일 2-3·2-4](docs/할_일_목록_2026-09-28.md) | `docker-compose.yml` · `Dockerfile` | |
 | 7 | **v3** 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) + **팀원 Search 호출** | `pipeline.profile` 2)단계 · `model.py` · `ports.py`에 `SearchPort`·`ProfileModel` 추가 | 접수·저장·콜백 |
 | 7′ | **v3 마이그레이션** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/000N_*.py` (`add_column`) · `types.RecipientProfile` 필드 · 통합 테스트 | 기존 마이그레이션 |
 | 8 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
