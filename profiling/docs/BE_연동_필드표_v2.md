@@ -56,7 +56,7 @@ v1([BE_연동_필드표_v1.md](BE_연동_필드표_v1.md))에서 **바뀌는 것
 
 빈 목록은 `200` + `products: []`. 품절(재고 0)도 `available: false`로 **포함**한다.
 
-재고를 모르는 상품은 `available`을 **보내지 않거나 `null`** 로 보내면 AI가 `unknown`으로 저장한다 — AI는 `unknown`을 `true`/`false`로 추정하지 않는다(검색기와 같은 규칙). 지금 AI가 적재한 카탈로그 패키지에는 재고 정보가 없어 4,231건이 전부 `unknown`이다.
+재고를 모르는 상품은 `available`을 **보내지 않거나 `null`** 로 보내면 AI가 `unknown`으로 저장한다 — AI는 `unknown`을 `true`/`false`로 추정하지 않는다(검색기와 같은 규칙). 처음 적재한 패키지에는 재고 정보가 없어 4,231건이 전부 `unknown`이었고, 09-25 Backend 회신(`load_catalog.py --metrics`)으로 지금은 전건 값이 채워졌다([DB_ERD §3](DB_ERD.md)).
 
 ### 응답 — 오류 (BE가 돌려주는 것)
 

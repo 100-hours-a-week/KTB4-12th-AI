@@ -4,7 +4,7 @@ FE가 보는 화면은 **Backend의 `profileStatus`와 상품 목록 정렬**이
 
 | | |
 |---|---|
-| 층 | L1 AI 단독(단위·통합 시험 142개) · **L2 BE↔AI(이 문서)** · L3 FE→BE→AI(실물 연동 때) |
+| 층 | L1 AI 단독(단위 155 · 통합 51) · **L2 BE↔AI(이 문서)** · L3 FE→BE→AI(실물 연동 때) |
 | 도구 | `tools/fake_backend` — 09-25 합의(디바운스 → 7.6 → 202 → 타임아웃 시 같은 번호 재전송 2회 → FAILED)를 그대로 구현했다 |
 | 시간 | 실제 BE는 디바운스 1시간·타임아웃 10분. 여기서는 **초 단위로 줄여** 한 시나리오가 30초 안에 끝난다 |
 | 확인 | AI `/health`·로그·`profile_runs` · BE(fake) `/console/be/state`·`/console/be/events` |

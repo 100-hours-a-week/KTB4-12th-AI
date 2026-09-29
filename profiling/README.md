@@ -2,7 +2,7 @@
 
 Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 **7.6**으로 보내면, 즉시 `202`로 접수하고 백그라운드에서 추천 상품 30개를 골라 **7.7 콜백**으로 돌려주는 서비스. 태그는 AI가 보관하고 Backend에는 상품 번호만 보낸다(DR-035). 상품 목록은 Backend의 **7.9 export**로 받는다.
 
-| 상태 (2026-09-23) | |
+| 상태 (2026-09-29) | |
 |---|---|
 | 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
 | 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
@@ -52,7 +52,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | [docs/문서_목록.md](docs/문서_목록.md) | **문서 검토 트리 + 최신성** — README 에서 링크로 닿는 순서(스크립트가 만듦)와 문서마다 코드와 맞는지 |
 | [docs/issues/](docs/issues/README.md) | 발견한 문제 기록 — 발견 시각별 폴더(문서 + 그림). 이슈·트러블슈팅으로 그대로 옮긴다 |
 | [docs/환경_설정.md](docs/환경_설정.md) | uv · Python 3.12 · 의존성 규칙 |
-| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 9장) · `seq/`(전체 시퀀스 6장) · `erd/`(DB 표 구조 3장). 각각 `build_*.py`가 만든다 |
+| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 10장) · `seq/`(전체 시퀀스 6장) · `erd/`(DB 표 구조 3장) · `loadtest/`(부하 보고 그림 3장). 각각 `build_*.py`가 만든다 |
 | [이름_대조표.md](이름_대조표.md) | 같은 뜻 · 다른 이름 정리 (camelCase ↔ snake_case) |
 
 
@@ -92,7 +92,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | 패키지 | **uv** — `pyproject.toml` + `uv.lock`(커밋) · `.venv`(커밋 안 함) | 폴더별 가상환경 만들지 않음 |
 | 의존성 | fastapi · uvicorn[standard] · pydantic · pydantic-settings · httpx · sqlalchemy · alembic · psycopg[binary] | dev: pytest · ruff |
 | 설정 | 환경변수 `PROFILING_*` 또는 `profiling/.env` (`.env.example` 복사) | 코드는 `settings.X`로만 접근 — 이름 바꿀 때 `settings.py` 한 곳 |
-| DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`~`0003` | 저장소는 PostgreSQL 하나뿐 — 연결 실패면 앱이 뜨지 않는다 (DB 없이 띄우는 모드는 없음) |
+| DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`~`0004` | 저장소는 PostgreSQL 하나뿐 — 연결 실패면 앱이 뜨지 않는다 (DB 없이 띄우는 모드는 없음) |
 | 카탈로그 | 기본 `tests/fixtures/catalog_sample.json`(111건) · 전체 4,231건은 `.env`에서 경로 지정 | 팀원 카탈로그 DB 전까지 파일 |
 
 ```bash
@@ -117,7 +117,7 @@ DB + 두 프로세스. **실행 위치는 `profiling/`** (예시 카탈로그 �
 docker compose up -d && uv run alembic upgrade head     # DB (한 번 켜 두면 됨)
 # 터미널 1 — 가짜 Backend + 시험 콘솔 (:8081)
 uv run uvicorn tools.fake_backend.app:app --port 8081
-# 터미널 2 — AI 앱 (:8000)  — 시작 로그에 "DB 연결 … migration=0002"
+# 터미널 2 — AI 앱 (:8000)  — 시작 로그에 "DB 연결 … migration=0004"
 uv run uvicorn profiling.main:app --port 8000 --reload
 ```
 
@@ -179,7 +179,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 4. 테스트
 
-원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 155개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 45개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
+원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 155개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 51개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
 
 | 파일 | 대상 | 방법 | 개수 |
 |---|---|---|---|
@@ -200,7 +200,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | `test_settings_slots_env.py` | 슬롯 수 환경변수 이름 | `PROFILING_SLOTS`·옛 `PROFILING_PROFILING_SLOTS` 둘 다 읽힘 · 기본 1 · 다른 필드 무영향 (이슈 2026-09-28_1424) | 4 |
 | `test_settings_catalog_poll_ttl.py` | 카탈로그 폴링 TTL 환경변수 | `PROFILING_CATALOG_POLL_TTL_S` 읽힘 · 기본 1.0 · 0 허용 | 2 |
 | `test_loadtest_summary.py` | `tools/loadtest/run.py` 집계 | 백분위 · 요약(202·`/health`·완료·대기·재전송 흔적) · AI 로그 도착 파싱·묶음 — 네트워크·DB 없음 · `--no-keepalive` 파싱 | 5 |
-| `integration/test_db_catalog.py` | 마이그레이션 0003 + 적재 SQL | 표·CHECK·활성 버전 1개 · 재적재 멱등 · Backend ID/재고 보존 · `--id-map` 회신 반영 | 7 |
+| `integration/test_db_catalog.py` | 마이그레이션 0003 + 적재 SQL | 표·CHECK·활성 버전 1개 · 재적재 멱등 · Backend ID/재고 보존 · `--id-map` 회신 반영 | 9 |
 | `integration/test_db_catalog_reader.py` | `DbCatalogReader` | 활성 버전 읽기·필드 매핑 · 같은 버전이면 재질의 없음 · Backend 번호 우선/임시 번호 · 번호 충돌 거부 · 활성 없음 · **버전과 상품이 한 스냅샷에서 나오는지** · 대분류(parent) 채움 · 폴링 TTL(안이면 질의 없음 · 0이면 호출마다 · 주입 시계로 만료 · 실패는 캐시 안 함) | 12 |
 | `integration/test_db_recipient_profiles.py` | 마이그레이션 결과 | 열 순서·PK 시퀀스 없음·유니크·CHECK·upsert 버전 규칙 | 5 |
 | `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED · 0004 열 주석 · 잠금 안 저장소 호출은 풀에서 더 꺼내지 않음(체크아웃 0) | 15 |

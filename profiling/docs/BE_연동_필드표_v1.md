@@ -118,7 +118,7 @@ AI는 **HTTP 상태 코드로만** 분기한다. 본문은 로그용이라 형�
 | 400 | `INVALID_REQUEST` | 필수 필드 누락·타입·ID 31개 이상 | 재시도 없음 | 〃 (`reason="400 INVALID_REQUEST"`) |
 | 401 / 403 | `UNAUTHORIZED` / `FORBIDDEN` | 토큰 | 재시도 없음 | 〃 (`reason="401 UNAUTHORIZED"`) |
 | 409 | `STALE_SOURCE_VERSION` | 순서 역전 — BE에 더 새 `sourceVersion` 결과가 이미 있음 | **폐기**, 재시도 없음 | `status=SUPERSEDED`, `error.code=CALLBACK_STALE` |
-| 500 / 503 | `INTERNAL_SERVER_ERROR` / `SERVICE_UNAVAILABLE` | BE 오류 | 지금은 1회. 결과를 보관해 두고 **재전송 대상**으로 남김 (자동 재시도 3회는 다음 작업) | `status=RESULT_READY`, `error.code=CALLBACK_UNREACHABLE`, `reason="503 SERVICE_UNAVAILABLE"` |
+| 500 / 503 | `INTERNAL_SERVER_ERROR` / `SERVICE_UNAVAILABLE` | BE 오류 | 같은 슬롯에서 **즉시 3회**(0.5초·2초 뒤) 다시 보내고, 그래도 실패면 결과를 보관해 **재전송 대상**으로 남김(§6.2) | `status=RESULT_READY`, `error.code=CALLBACK_UNREACHABLE`, `reason="503 SERVICE_UNAVAILABLE"` |
 | 연결 실패·타임아웃(5초) | — | BE 안 뜸, 네트워크 | 〃 | `status=RESULT_READY`, `error.code=CALLBACK_UNREACHABLE`, `reason="ConnectTimeout: …"` |
 
 BE에 부탁: **400과 409는 위 조건대로 구분**해 달라. 409를 400으로 주면 AI는 "계약 불일치"로 기록해 원인을 찾기 어렵다.
