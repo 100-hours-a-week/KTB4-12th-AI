@@ -52,7 +52,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | [docs/문서_목록.md](docs/문서_목록.md) | **문서 검토 트리 + 최신성** — README 에서 링크로 닿는 순서(스크립트가 만듦)와 문서마다 코드와 맞는지 |
 | [docs/issues/](docs/issues/README.md) | 발견한 문제 기록 — 발견 시각별 폴더(문서 + 그림). 이슈·트러블슈팅으로 그대로 옮긴다 |
 | [docs/환경_설정.md](docs/환경_설정.md) | uv · Python 3.12 · 의존성 규칙 |
-| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 10장) · `seq/`(전체 시퀀스 6장) · `erd/`(DB 표 구조 3장) · `loadtest/`(부하 보고 그림 3장). 각각 `build_*.py`가 만든다 |
+| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 10장) · `seq/`(전체 시퀀스 6장) · `erd/`(DB 표 구조 3장) · `loadtest/`(부하 보고 그림 4장 — 왕복 전/후는 HTML 표 → `build_roundtrips.py`). 각각 `build_*.py`가 만든다 |
 | [이름_대조표.md](이름_대조표.md) | 같은 뜻 · 다른 이름 정리 (camelCase ↔ snake_case) |
 
 

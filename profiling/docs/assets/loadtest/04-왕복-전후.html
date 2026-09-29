@@ -1,0 +1,79 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<style>
+  body{margin:0;padding:28px 32px;background:#fff;font-family:"Apple SD Gothic Neo","Noto Sans KR",sans-serif;color:#212121;width:1440px}
+  h1{font-size:26px;margin:0 0 6px}
+  .sub{font-size:15px;color:#616161;margin:0 0 18px}
+  table{border-collapse:collapse;width:100%}
+  th{font-size:16px;text-align:left;padding:8px 10px;border-bottom:2px solid #263238}
+  th.before{color:#b71c1c} th.after{color:#1b5e20}
+  td{vertical-align:middle;padding:9px 10px;border-bottom:1px solid #e0e0e0}
+  td.step{width:250px;font-size:15px;color:#0d47a1;background:#e3f2fd;border-right:2px solid #fff;font-weight:600}
+  td.before{width:640px} td.after{width:470px}
+  .chip{display:inline-block;padding:6px 10px;margin:2px 6px 2px 0;border-radius:6px;font-size:14px;font-family:"SF Mono",Menlo,monospace;white-space:nowrap;border:1.5px solid}
+  .ping{background:#eeeeee;border-color:#9e9e9e;color:#616161}
+  .tx{background:#fff3e0;border-color:#fb8c00;color:#e65100}
+  .sql{background:#e8f5e9;border-color:#2e7d32;color:#1b5e20;font-weight:600}
+  .none{background:#fff;border:1.5px dashed #bdbdbd;color:#757575;font-family:"Apple SD Gothic Neo",sans-serif}
+  .arrow{color:#9e9e9e;margin:0 4px 0 -2px;font-size:13px}
+  tr.total td{background:#fafafa;font-size:15px;font-weight:700;border-top:2px solid #263238;border-bottom:none}
+  tr.total td.before{color:#b71c1c} tr.total td.after{color:#1b5e20}
+  .legend{margin-top:16px;font-size:14px;color:#424242}
+  .legend .chip{font-size:13px;padding:3px 8px}
+  .note{margin-top:10px;font-size:14px;color:#424242}
+  .src{margin-top:8px;font-size:12px;color:#9e9e9e;font-family:Menlo,monospace}
+</style></head><body>
+<h1>7.6 한 건의 DB 왕복 — 수정 전 34 → 수정 후 8</h1>
+<p class="sub">칩 하나 = PostgreSQL 왕복 하나. 초록(실제 SQL)은 양쪽이 같고, 회색·주황(핑·트랜잭션 포장)만 사라졌다.</p>
+<table>
+<tr><th></th><th class="before">수정 전 — 34 (09-28, 커밋 82df108 이전)</th><th class="after">수정 후 — 8 (커밋 82df108 · e998f43)</th></tr>
+
+<tr><td class="step">① 접수 — 활성 카탈로그 폴링</td>
+<td class="before"><span class="chip ping">핑 ;</span><span class="arrow">→</span><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">SELECT 활성 카탈로그 버전</span><span class="arrow">→</span><span class="chip tx">ROLLBACK</span></td>
+<td class="after"><span class="chip none">1초 TTL 안이면 없음 · 단독 요청이면 핑 ; + SELECT = 2</span></td></tr>
+
+<tr><td class="step">② 잠금</td>
+<td class="before"><span class="chip ping">핑 ;</span><span class="arrow">→</span><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">pg_try_advisory_lock</span><span class="arrow">→</span><span class="chip tx">COMMIT</span></td>
+<td class="after"><span class="chip ping">핑 ;</span><span class="arrow">→</span><span class="chip sql">pg_try_advisory_lock</span> <span class="chip none">AUTOCOMMIT 커넥션</span></td></tr>
+
+<tr><td class="step">③ 중복 판정 (get_run)</td>
+<td class="before"><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">SELECT profile_runs</span><span class="arrow">→</span><span class="chip tx">COMMIT</span> <span class="chip none">다른 커넥션</span></td>
+<td class="after"><span class="chip sql">SELECT profile_runs</span> <span class="chip none">같은 잠금 커넥션</span></td></tr>
+
+<tr><td class="step">④ 실행 기록 RUNNING</td>
+<td class="before"><span class="chip ping">핑 ;</span><span class="arrow">→</span><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">UPSERT profile_runs → RUNNING</span><span class="arrow">→</span><span class="chip tx">COMMIT</span></td>
+<td class="after"><span class="chip sql">UPSERT profile_runs → RUNNING</span></td></tr>
+
+<tr><td class="step">⑤ 슬롯 안 — 카탈로그 폴링 (또)</td>
+<td class="before"><span class="chip ping">핑 ;</span><span class="arrow">→</span><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">SELECT 활성 카탈로그 버전</span><span class="arrow">→</span><span class="chip tx">ROLLBACK</span></td>
+<td class="after"><span class="chip none">없음 — 접수 때 캐시한 스냅샷 재사용</span></td></tr>
+
+<tr><td class="step">⑥ 실행 기록 RESULT_READY</td>
+<td class="before"><span class="chip ping">핑 ;</span><span class="arrow">→</span><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">UPSERT profile_runs → RESULT_READY</span><span class="arrow">→</span><span class="chip tx">COMMIT</span></td>
+<td class="after"><span class="chip sql">UPSERT profile_runs → RESULT_READY</span></td></tr>
+
+<tr><td class="step">⑦ 수신자 프로필</td>
+<td class="before"><span class="chip ping">핑 ;</span><span class="arrow">→</span><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">UPSERT recipient_profiles</span><span class="arrow">→</span><span class="chip tx">COMMIT</span></td>
+<td class="after"><span class="chip sql">UPSERT recipient_profiles</span></td></tr>
+
+<tr><td class="step">⑧ 콜백 뒤 DELIVERED</td>
+<td class="before"><span class="chip ping">핑 ;</span><span class="arrow">→</span><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">UPSERT profile_runs → DELIVERED</span><span class="arrow">→</span><span class="chip tx">COMMIT</span></td>
+<td class="after"><span class="chip sql">UPSERT profile_runs → DELIVERED</span></td></tr>
+
+<tr><td class="step">⑨ 잠금 해제</td>
+<td class="before"><span class="chip tx">BEGIN</span><span class="arrow">→</span><span class="chip sql">pg_advisory_unlock</span><span class="arrow">→</span><span class="chip tx">COMMIT</span></td>
+<td class="after"><span class="chip sql">pg_advisory_unlock</span></td></tr>
+
+<tr class="total"><td class="step">합계</td>
+<td class="before">34 = SQL 9 + 핑 7 + BEGIN 9 + COMMIT/ROLLBACK 9</td>
+<td class="after">8 = SQL 7 + 핑 1 &nbsp;(단독 요청은 ① 2개 더해 10)</td></tr>
+</table>
+
+<div class="legend">
+<span class="chip sql">실제 SQL</span> 양쪽 같음 &nbsp;·&nbsp;
+<span class="chip ping">핑 ;</span> 풀에서 커넥션 꺼낼 때 살아 있는지 확인 &nbsp;·&nbsp;
+<span class="chip tx">BEGIN / COMMIT / ROLLBACK</span> SQLAlchemy 자동 트랜잭션 포장 &nbsp;·&nbsp;
+<span class="chip none">없음</span> 캐시·재사용으로 사라진 왕복
+</div>
+<div class="note">무엇이 지웠나: 폴링 1초 TTL → ①(연속 요청)·⑤ &nbsp;|&nbsp; 잠금 커넥션 AUTOCOMMIT → ②⑨의 BEGIN/COMMIT &nbsp;|&nbsp; 잠금 쥔 동안 같은 커넥션 재사용 → ③④⑥⑦⑧의 핑·BEGIN·COMMIT &nbsp;|&nbsp; 읽기 AUTOCOMMIT → 단독 요청 ①의 BEGIN/ROLLBACK, /health 12 → 4</div>
+<div class="src">출처: tools/loadtest/results/pg-statements.txt (수신자 900600) · pg-statements-after2.txt (900997 연속 · 900999 단독) — log_statement=all, 2026-09-28</div>
+</body></html>
