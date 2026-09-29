@@ -105,7 +105,9 @@ class ProfileExtractRequest(BaseModel):
 
     recipientUserId: int = Field(gt=0)
     sourceVersion: int = Field(ge=0, description="호출 시점의 최신 값. 등록 데이터가 없으면 0")
-    dislikedCategories: list[DislikedCategoryDto] = Field(description="없으면 []; 필드 생략 불가")
+    dislikedCategories: list[DislikedCategoryDto] = Field(
+        max_length=5,
+        description="없으면 []; 필드 생략 불가. 최대 5 — BE PreferencePolicy.MAX_SELECTABLE_COUNT 와 같은 값(09-27 결정), 6개 이상은 400")
     giftPreference: str | None = Field(default=None, description="취향 자유 텍스트(v3). v1은 보내지 않음 → null")
     reviews: list[ReviewDto] = Field(default_factory=list, max_length=10, description="작성일 최신순 최대 10개(v3). v1은 보내지 않음 → []")
 

@@ -1,12 +1,11 @@
 """설정 — 환경변수 → 객체 하나. 실험 config.json의 값 중 서비스에 필요한 것만 옮긴다.
 
 읽는 순서(pydantic-settings): 환경변수 > .env 파일 > 아래 기본값. 접두사 PROFILING_ 을 붙인 이름만 읽는다
-(예: PROFILING_BACKEND_BASE_URL). 접두사와 이름은 팀원 골격(DATABASE_URL·INTERNAL_SERVICE_TOKEN·MAIN_BACKEND_URL,
-접두사 없음)과 다르므로 합칠 때 여기 한 파일만 바꾼다 — 코드는 settings.BACKEND_BASE_URL 처럼 속성으로만 쓴다.
+(예: PROFILING_BACKEND_BASE_URL). 팀원 골격은 아직 없다(09-18 초기 골격은 되돌려짐) — 합칠 때 접두사·이름을 맞추더라도
+여기 한 파일만 바꾼다. 코드는 settings.BACKEND_BASE_URL 처럼 속성으로만 쓴다.
 
 값의 출처
-  - POOL_SIZE 30 · MAX_REVIEWS 10 : 모델 API 설계 §7.6·§7.7
-  - MAX_DISLIKED 5                : 화면 설계 C-05 (문서 1에는 상한 없음 — 결정 b)
+  - POOL_SIZE 30                  : 모델 API 설계 §7.7 (7.6 의 비선호 5·리뷰 10 상한은 schemas.py 의 max_length — 계약값, 설정 아님)
   - CALLBACK_TIMEOUT_S 5          : 실험 하네스 config.json timeout_s(120)은 LLM용. 콜백은 짧게
 """
 
@@ -41,7 +40,7 @@ class Settings(BaseSettings):
         description="재시도 대기의 첫 값(초). 다음은 4배씩 — 기본 0.5초·2초. 대기는 슬롯을 잡은 채 하므로 "
                     "최악은 0.5 + 2 + 타임아웃 5초 × 3 ≈ 17.5초")
 
-    # ---- DB (로컬 compose 기본값. 팀원 골격 이름은 DATABASE_URL — 합칠 때 접두사만 맞춤)
+    # ---- DB (로컬 compose 기본값. 합칠 때 접두사만 맞춤)
     DATABASE_URL: str = Field(default="postgresql+psycopg://ai_user:ai_password@localhost:5432/ai_chat",
                               description="SQLAlchemy URL (psycopg 3). Alembic env.py도 이 값을 쓴다")
 
@@ -64,10 +63,8 @@ class Settings(BaseSettings):
                     "최대 이 시간만큼 늦는다. 0 = 호출마다 묻는다(옛 동작). CATALOG_SOURCE=db 일 때만 쓴다",
     )
 
-    # ---- 계약 상한 (문서 1 §7.6·§7.7 · C-05)
+    # ---- 계약 상한 (문서 1 §7.7). 7.6 의 비선호 5·리뷰 10 은 schemas.py 의 max_length 가 정본 — 설정으로 두지 않는다(09-29, 아무 데서도 안 읽었다)
     POOL_SIZE: int = Field(default=30, ge=1, le=30, description="7.7 recommendedProductIds 개수 상한")
-    MAX_DISLIKED: int = Field(default=5, ge=0, description="dislikedCategories 상한 (C-05)")
-    MAX_REVIEWS: int = Field(default=10, ge=0, description="reviews 상한 (7.6: 최신순 최대 10)")
 
     # ---- 실행 (3단계 구현 상세 §12.1 개발 시험 시작값)
     PROFILING_SLOTS: int = Field(

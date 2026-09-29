@@ -34,7 +34,7 @@ AI 프로파일링 서비스가 **지금 실제로 보내고 받는 필드**와 
 |---|---|---|---|---|---|---|
 | `recipientUserId` | integer | ✔ | ✕ | > 0 | 수신자 users.id | |
 | `sourceVersion` | integer | ✔ | ✕ | ≥ 0 | **BE가 7.6을 보내기 직전에 +1 하고 저장한 번호** (§3.5) | 7.7에 그대로 돌아옴 → BE는 이 값이 마지막으로 보낸 번호와 같은지로 **최신 여부**를 안다 |
-| `dislikedCategories` | array | ✔ | ✕ | 없으면 `[]` (키 생략 불가) | 비선호 카테고리 목록 | BE 화면 규칙상 최대 5. AI는 상한을 두지 않음 |
+| `dislikedCategories` | array | ✔ | ✕ | 없으면 `[]` (키 생략 불가) | 비선호 카테고리 목록 | **최대 5** — BE 화면 규칙(`PreferencePolicy.MAX_SELECTABLE_COUNT`)과 같은 값. AI 도 6개 이상이면 400 `INVALID_REQUEST`(09-29) |
 | `dislikedCategories[].categoryId` | integer | ✔ | ✕ | > 0 | categories.id — **대분류(root) id 1~10** | BE는 root 카테고리만 비선호로 저장한다(`PreferenceSaveService`, 최대 5 · 09-27 결정: 사용자 친화성). AI는 그 대분류의 **하위 소분류 전체**를 풀에서 제외한다 |
 | `dislikedCategories[].categoryName` | string | ✔ | ✕ | | categories.name | ID가 안 맞아도 이름으로 한 번 더 거른다 |
 
@@ -69,6 +69,7 @@ v1 본문은 이 **세 필드가 전부**다. (⚠ 계약 원문에는 `giftPref
 | 400 | `INVALID_REQUEST` | 타입 오류 | `요청 형식이 올바르지 않습니다: recipientUserId — Input should be a valid integer, unable to parse string as an integer` | 〃 |
 | 400 | `INVALID_REQUEST` | 범위 | `… recipientUserId — Input should be greater than 0` | 〃 |
 | 400 | `INVALID_REQUEST` | 하위 필드 누락 | `… dislikedCategories.0.categoryName — Field required` | 〃 |
+| 400 | `INVALID_REQUEST` | 목록 상한 초과 (비선호 5 · 리뷰 10) | `… dislikedCategories — List should have at most 5 items after validation, not 6` | 〃 |
 | 401 | `UNAUTHORIZED` | `Authorization` 없음 / `Bearer ` 아님 | `서비스 토큰이 없습니다.` | 토큰 설정 확인 |
 | 401 | `UNAUTHORIZED` | 토큰 값 다름 | `서비스 토큰이 올바르지 않습니다.` | 〃 |
 | 503 | `SERVICE_UNAVAILABLE` | AI에 활성 카탈로그(상품 목록 적재본)가 없음 · **또는 접수 대기열 가득(09-28)** | `활성 카탈로그가 없습니다.` · `접수 대기열이 가득 찼습니다.` | `Retry-After`(카탈로그 없음 300초 · 대기열 가득 30초) 뒤 **같은 번호** 재시도 (§3.6). 상태 불변. **헤더 `Retry-After: 300` 을 실제로 보낸다**(09-26 구현) |
@@ -477,7 +478,7 @@ BE 계획 5-1은 AI 응답을 "오류 유형"으로 나눠 재시도 여부를 �
 | HTTP | `error.code` | 언제 | `message` | BE 재시도 (계획 5-1) |
 |---|---|---|---|---|
 | 202 | — | 접수. `data.profileStatus`는 항상 `PENDING` | `프로파일 분석이 시작되었습니다.` | — |
-| 400 | `INVALID_REQUEST` | 본문이 JSON이 아님 · 필수 키 누락 · 타입·범위 오류. `message`에 **필드 경로와 사유** | `요청 본문이 JSON이 아닙니다.` / `요청 형식이 올바르지 않습니다: <경로> — <사유>` | 없음 — 계약 오류 로그 |
+| 400 | `INVALID_REQUEST` | 본문이 JSON이 아님 · 필수 키 누락 · 타입·범위 오류 · 목록 상한(비선호 5·리뷰 10). `message`에 **필드 경로와 사유** | `요청 본문이 JSON이 아닙니다.` / `요청 형식이 올바르지 않습니다: <경로> — <사유>` | 없음 — 계약 오류 로그 |
 | 401 | `UNAUTHORIZED` | `Authorization` 없음·`Bearer ` 아님 / 토큰 값 다름 | `서비스 토큰이 없습니다.` / `서비스 토큰이 올바르지 않습니다.` | 없음 — 토큰 설정 |
 | 404 | `NOT_FOUND` | 경로 오타 | `Not Found` | 없음 — 주소 확인 |
 | 405 | `INTERNAL_SERVER_ERROR` | 잘못된 메서드(GET 등). 코드 이름이 상황과 맞지 않는다 — 알려진 한계 | `Method Not Allowed` | 없음 — 메서드 확인 |

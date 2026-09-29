@@ -34,7 +34,7 @@ uv run python -m tools.loadtest.run --n 100 --concurrency 100 --base 900001 --cl
 |---|---|
 | `--mode burst\|be` | burst: 하네스가 7.6 을 보낸다 · be: 보내지 않고 BE 가 보내는 동안 잰다(`--ai-log` 로 도착 시각) |
 | `--n` `--concurrency` | 건수 · 동시성(수신자 `--base`~`base+n-1`, 각 `--source-version` 하나) |
-| `--dislike rotate\|1,2` | 비선호 대분류 — 수신자마다 1~10 순환, 또는 고정 목록 |
+| `--dislike rotate\|1,2` | 비선호 대분류 — 수신자마다 1~10 순환, 또는 고정 목록(최대 5 — 7.6 상한, 넘기면 400) |
 | `--fake-mode ok\|500\|timeout\|409\|400` | 시작 전 가짜 백엔드 실패 주입, 끝나면 ok 로 복구. `500` 은 슬롯당 ≈2.5초, `timeout` 은 ≈17.5초 |
 | `--health-interval 0.25` `--health-threshold-ms 1000` `--probe-timeout 10` | `/health` 순차 프로브 |
 | `--db-interval 0.5` | `pg_stat_activity` 커넥션 · 구간 진행 표본 |

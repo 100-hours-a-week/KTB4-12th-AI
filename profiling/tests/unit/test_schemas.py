@@ -37,6 +37,9 @@ def test_extract_request_v1_three_fields_only() -> None:
     assert req.giftPreference is None and req.reviews == []
     with pytest.raises(ValidationError):                                         # dislikedCategories는 v1 핵심 — 키 생략 불가
         ProfileExtractRequest(recipientUserId=1, sourceVersion=0)
+    with pytest.raises(ValidationError):                                         # 최대 5 — BE MAX_SELECTABLE_COUNT 와 같은 값(09-29). 6개면 400
+        ProfileExtractRequest(recipientUserId=1, sourceVersion=0,
+                              dislikedCategories=[{"categoryId": i, "categoryName": f"c{i}"} for i in range(1, 7)])
 
 
 def test_callback_request_no_tags_and_max_30() -> None:
