@@ -28,6 +28,7 @@ from search.responses import (
 )
 
 from search.health import SearchHealth
+from search.http_limits import RequestBodyLimit
 from search.feedback import save as save_feedback, restore as restore_feedback, FeedbackError
 
 ROOT = Path(__file__).resolve().parent
@@ -100,6 +101,7 @@ async def lifespan(app):
 
 app = FastAPI(title="상품 검색 API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=700, compresslevel=4)
+app.add_middleware(RequestBodyLimit)
 
 
 class APIException(HTTPException):

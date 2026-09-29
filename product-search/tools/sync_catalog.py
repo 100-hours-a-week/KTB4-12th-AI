@@ -23,6 +23,7 @@ from search.encoder_contract import encoder_contract, initial_manifest
 from search.identity import load_id_mapping
 from search.service import SearchService
 from search.snapshots import active_data_dir, sync_lock, write_bytes, publish
+from http_security import bearer_token, service_url
 
 
 
@@ -124,13 +125,19 @@ def sync(root, fetch, *, embed=encode_documents, fingerprint=encoder_contract, a
             if temporary.exists(): shutil.rmtree(temporary)
 
 
-def fetcher(export_url, categories_url, token):
+def fetcher(export_url, categories_url, token, *, allow_insecure_http=False):
+    urls = [service_url(url, allow_insecure_http=allow_insecure_http)
+            for url in (export_url, categories_url)]
+    if (urls[0].scheme, urls[0].host, urls[0].port) != (urls[1].scheme, urls[1].host, urls[1].port):
+        raise ValueError('Export and categories must use the same origin')
+    if token:
+        token = bearer_token(token)
     def fetch():
         headers = {'Accept':'application/json'}
         if token: headers['Authorization']='Bearer '+token
         with httpx.Client(timeout=httpx.Timeout(60,connect=5),trust_env=False,follow_redirects=False) as client:
             responses=[]
-            for url in [export_url,categories_url]:
+            for url in urls:
                 response=client.get(url,headers=headers)
                 # Avoid emitting URLs/headers from HTTP exceptions, which may hold credentials.
                 if response.status_code!=200: raise RuntimeError(f'Backend returned HTTP {response.status_code}')
@@ -148,6 +155,7 @@ if __name__ == '__main__':
     parser.add_argument('--categories-url',help='Backend category hierarchy API, same trusted server')
     parser.add_argument('--categories-file',type=Path)
     parser.add_argument('--token-env',default='BACKEND_SERVICE_TOKEN',help='Environment variable name; never pass the token itself')
+    parser.add_argument('--allow-insecure-http',action='store_true',help='Explicitly allow HTTP on a trusted private network; HTTPS is the default outside loopback')
     parser.add_argument('--apply',action='store_true',help='Default validates and reports expected changes without embedding or publishing')
     parser.add_argument('--initial-only',action='store_true',help='Refuse to replace an existing catalog')
     args=parser.parse_args()
@@ -157,7 +165,10 @@ if __name__ == '__main__':
         token=os.getenv(args.token_env)
         if not token:
             parser.error('Set the service token environment variable for Backend requests')
-        fetch=fetcher(args.export_url,args.categories_url,token)
+        try:
+            fetch=fetcher(args.export_url,args.categories_url,token,allow_insecure_http=args.allow_insecure_http)
+        except ValueError as exc:
+            parser.error(str(exc))
     else:
         if not args.categories_file or args.categories_url:
             parser.error('--export-file requires --categories-file and no --categories-url')

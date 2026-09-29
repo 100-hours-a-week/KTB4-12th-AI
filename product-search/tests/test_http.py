@@ -89,6 +89,29 @@ async def test_execution_failure_is_not_reported_as_empty_results(api, service, 
     assert server.app.state.active_profile_searches == 0
 
 
+async def test_oversized_json_is_rejected_before_search_or_qa_storage(api, service, monkeypatch):
+    from search.http_limits import MAX_REQUEST_BYTES
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail('oversized request reached search')
+
+    monkeypatch.setattr(service, 'search', forbidden)
+
+    async def chunks():
+        yield b'{"query":"'
+        yield b'x' * MAX_REQUEST_BYTES
+        yield b'"}'
+
+    async with httpx.AsyncClient(transport=api, base_url='http://test') as http:
+        for path in ('/api/search', '/v1/search'):
+            response = await http.post(path, content=chunks(), headers={'Content-Type': 'application/json'})
+            assert response.status_code == 413
+            assert response.json()['error']['code'] == 'REQUEST_TOO_LARGE'
+            assert response.headers['cache-control'] == 'no-store'
+    with server.db() as con:
+        assert con.execute('SELECT count(*) FROM searches').fetchone()[0] == 0
+
+
 async def test_profile_limit_leaves_room_for_chat_and_releases_slots(api, service, monkeypatch):
     entered, release = asyncio.Event(), asyncio.Event()
     original = service.search
