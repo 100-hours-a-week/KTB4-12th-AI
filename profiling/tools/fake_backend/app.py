@@ -226,7 +226,9 @@ def console_catalog() -> dict:
     cats = sorted({(p["categoryId"], p["categoryName"]) for p in products}, key=lambda c: c[1])
     return {"file": str(CATALOG_FILE), "count": len(products),
             "categories": [{"categoryId": i, "categoryName": n} for i, n in cats],
-            "products": [{k: p[k] for k in ("productId", "name", "brand", "categoryId", "categoryName", "available", "viewCount")} for p in products]}
+            "products": [{**{k: p[k] for k in ("productId", "name", "brand", "categoryId", "categoryName", "viewCount")},
+                          "available": p["availability"] != "unavailable"}   # 재고는 3값(09-23) — 화면은 판매 가능 여부만 본다. unknown 은 가능으로(AI 규칙과 같다)
+                         for p in products]}
 
 
 @app.post("/console/send-7.6")

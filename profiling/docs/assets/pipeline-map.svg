@@ -10,7 +10,7 @@
 .impl{fill:none;stroke:#3b6fb6;stroke-width:1.3;stroke-dasharray:6 4;marker-end:url(#a)}
 .box{fill:#fff;stroke:#bcc5cd;stroke-width:1.3}.stage{fill:#fff;stroke:#3b6fb6;stroke-width:1.6}.band{fill:#eef3fa;stroke:#9db0d2;stroke-width:1.2}.old{fill:#f7f8fa;stroke:#d5dbe0;stroke-width:1.2}
 .db{fill:#fff7f2;stroke:#e0a080;stroke-width:1.4}.ext{fill:#f7f8fa;stroke:#bcc5cd;stroke-width:1.2}.v3{fill:#fffbe6;stroke:#e6d98a;stroke-width:1;stroke-dasharray:4 3}.rule{stroke:#d9dee3;stroke-width:1}</style></defs><rect width="1700" height="1076" fill="white"/>
-<text x="40" y="44" class="title">프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-28 코드 기준 · 큐·워커·왕복 줄이기까지)</text>
+<text x="40" y="44" class="title">프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-10-06 코드 기준 · BE 콜백(PR #247) 실물 연결까지)</text>
 <text x="40" y="70" class="small">위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.</text>
 <rect x="40" y="90" width="1620" height="104" rx="6" class="band"/>
 <text x="52" y="110" class="h">조립 — main.py  lifespan()  (프로세스 시작 1회, app.state에 둠)</text>
@@ -50,11 +50,11 @@
 <text x="52" y="442" class="sub">· analyze 분석 · resend 콜백만 · skip 아무것도 안 함</text>
 <text x="52" y="456" class="sub">  잠금 못 얻으면(다른 실행 처리 중) 아무것도 안 한다</text>
 <text x="52" y="470" class="monob">⑥ 202 SuccessResponse[ProfileAccepted] · PENDING</text>
-<text x="52" y="484" class="mono"></text>
+<text x="52" y="484" class="sub">dislikedCategories ≤5 · reviews ≤10 — max_length, 설정 아님</text>
 <text x="52" y="498" class="sub">의존성(Depends, 전부 async): get_catalog · get_store · get_recipient_store</text>
 <text x="52" y="512" class="sub">· get_backend · get_supervisor · get_io_limiter · settings_dep  ← app.state</text>
 <text x="52" y="526" class="sub">_error() → HTTPException → main.on_http_error 봉투</text>
-<text x="52" y="540" class="sub">Backend는 실패·타임아웃이면 같은 번호로 최대 2회 재시도(09-27 BE 계획)</text>
+<text x="52" y="540" class="sub">BE develop(10-06): 실패해도 다음 틱에 새 번호 재발송 · 합의안은 §4</text>
 <text x="462" y="316" class="monob">submit(fn, *args) → bool</text>
 <text x="462" y="330" class="mono">  put_nowait — 가득·closing 이면 False → 라우터가 503</text>
 <text x="462" y="344" class="sub">  대기는 큐에서 — anyio 스레드풀 토큰을 안 쓴다 (09-28)</text>
@@ -174,9 +174,9 @@
 <text x="872" y="930" class="sub">수신자 1명 = 1행 · recipient_user_id PK (시퀀스 없음)</text>
 <text x="872" y="945" class="sub">preferred/disliked_tags · disliked_categories jsonb · 0001</text>
 <rect x="1270" y="888" width="385" height="76" rx="5" class="ext"/>
-<text x="1282" y="910" class="h2">Backend  (로컬: tools/fake_backend  :8081)</text>
-<text x="1282" y="930" class="sub">POST 7.7 수신 (실패 주입 ok/409/400/500/timeout)</text>
-<text x="1282" y="945" class="sub">GET 7.9 export · 시험 콘솔 /console</text>
+<text x="1282" y="910" class="h2">Backend  develop :8080 (PR #247) · 가짜 :8081</text>
+<text x="1282" y="930" class="sub">실물 7.7: 200 · 409 오래됨/번호 0 · 400 없는 상품 거부</text>
+<text x="1282" y="945" class="sub">가짜: 실패 주입 ok/409/400/500/timeout · 7.9 · 콘솔</text>
 <path d="M232.5 850 V888" class="grey"/>
 <text x="240.5" y="874" class="sub">읽기(활성 버전 바뀔 때)</text>
 <path d="M642.5 850 V888" class="write"/>
@@ -189,7 +189,7 @@
 <text x="40" y="1012" class="h2">자료형</text>
 <text x="110" y="1012" class="sub">ProfileExtractRequest(camel) → to_internal → ProfileRequest(snake) → ProfileOutcome(= profile_runs 행) → callback_body → ProfileCallbackRequest(camel) → RunStatus.   RecipientProfile(= recipient_profiles 행).   변환 함수는 to_internal · callback_body 둘뿐.</text>
 <text x="40" y="1034" class="h2">실패 경로</text>
-<text x="110" y="1034" class="sub">400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.</text>
+<text x="110" y="1034" class="sub">400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵 · BE는 PENDING 그대로, 합의안 ⑤ 복구 전송) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.</text>
 <text x="40" y="1056" class="h2">시험</text>
-<text x="110" y="1056" class="sub">단위(tests/unit, 154): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 51): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql</text>
+<text x="110" y="1056" class="sub">단위(tests/unit, 155): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 51): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql</text>
 </svg>

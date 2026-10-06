@@ -1,6 +1,6 @@
 """현재 구현된 파이프라인 지도 — 단계(접수 → 슬롯 → 처리 → 콜백)마다 실제로 부르는 함수와, 포트를 거쳐 연결되는 어댑터·바깥.
 python3 build_pipeline_map.py → pipeline-map.svg (PNG는 Chrome 헤드리스: --headless --screenshot --window-size=2W,2H)
-함수 이름은 코드 기준(2026-09-23, 패키지 평탄화 후). 바뀌면 여기도 고친다."""
+함수 이름은 코드 기준(2026-09-23 패키지 평탄화 후 · 2026-10-06 BE 콜백 실물 연결 반영). 바뀌면 여기도 고친다."""
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -43,7 +43,7 @@ def lines(x, y, rows, dy=14):
         t(x, y + i * dy, s, c)
 
 
-t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-09-28 코드 기준 · 큐·워커·왕복 줄이기까지)', 'title')
+t(40, 44, '프로파일링 파이프라인 지도 — 단계마다 부르는 함수와 연결된 것 (v1, 2026-10-06 코드 기준 · BE 콜백(PR #247) 실물 연결까지)', 'title')
 t(40, 70, '위에서 아래로: 조립 → 요청 한 건의 4단계 → 포트(Protocol) → 어댑터(구현) → 바깥. 파랑 = 호출 · 빨강 = DB에 씀 · 회색 점선 = 조건부/HTTP · 노랑 점선 = v3 자리(미구현). 숫자 = pipeline.profile()의 단계 번호.', 'small')
 
 # ───────────────────── 0. 조립 (main.py lifespan) ─────────────────────
@@ -87,11 +87,11 @@ lines(x + 12, TOP + 84, [
     ('· analyze 분석 · resend 콜백만 · skip 아무것도 안 함', 'sub'),
     ('  잠금 못 얻으면(다른 실행 처리 중) 아무것도 안 한다', 'sub'),
     ('⑥ 202 SuccessResponse[ProfileAccepted] · PENDING', 'monob'),
-    ('', 'mono'),
+    ('dislikedCategories ≤5 · reviews ≤10 — max_length, 설정 아님', 'sub'),
     ('의존성(Depends, 전부 async): get_catalog · get_store · get_recipient_store', 'sub'),
     ('· get_backend · get_supervisor · get_io_limiter · settings_dep  ← app.state', 'sub'),
     ('_error() → HTTPException → main.on_http_error 봉투', 'sub'),
-    ('Backend는 실패·타임아웃이면 같은 번호로 최대 2회 재시도(09-27 BE 계획)', 'sub'),
+    ('BE develop(10-06): 실패해도 다음 틱에 새 번호 재발송 · 합의안은 §4', 'sub'),
 ])
 # 2 슬롯
 x = XS[1]
@@ -218,7 +218,7 @@ ext = [
                                                  'Backend 번호·재고·조회수 전건 채움 (09-25 회신)'], 'db'),
     ('PostgreSQL  ai_chat → ai_profile.profile_runs', ['실행 1건 = 1행 · (recipient_user_id, source_version) UNIQUE', 'status CHECK · callback_payload jsonb · alembic 0002'], 'db'),
     ('PostgreSQL  ai_chat → ai_profile.recipient_profiles', ['수신자 1명 = 1행 · recipient_user_id PK (시퀀스 없음)', 'preferred/disliked_tags · disliked_categories jsonb · 0001'], 'db'),
-    ('Backend  (로컬: tools/fake_backend  :8081)', ['POST 7.7 수신 (실패 주입 ok/409/400/500/timeout)', 'GET 7.9 export · 시험 콘솔 /console'], 'ext'),
+    ('Backend  develop :8080 (PR #247) · 가짜 :8081', ['실물 7.7: 200 · 409 오래됨/번호 0 · 400 없는 상품 거부', '가짜: 실패 주입 ok/409/400/500/timeout · 7.9 · 콘솔'], 'ext'),
 ]
 for (name, subs, cls_), x in zip(ext, XS):
     box(x, EY, CW, EH, cls_, 5)
@@ -236,9 +236,9 @@ parts.append(f'<line x1="40" y1="{NY}" x2="{W-40}" y2="{NY}" class="rule"/>')
 t(40, NY + 22, '자료형', 'h2')
 t(110, NY + 22, 'ProfileExtractRequest(camel) → to_internal → ProfileRequest(snake) → ProfileOutcome(= profile_runs 행) → callback_body → ProfileCallbackRequest(camel) → RunStatus.   RecipientProfile(= recipient_profiles 행).   변환 함수는 to_internal · callback_body 둘뿐.', 'sub')
 t(40, NY + 44, '실패 경로', 'h2')
-t(110, NY + 44, '400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵, Backend가 PENDING 지속 시간으로 판정) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.', 'sub')
+t(110, NY + 44, '400/401/503은 접수에서 끝(백그라운드 없음) · 처리 중 예외는 전부 FAILED로 기록되고 콜백 없음(AI는 침묵 · BE는 PENDING 그대로, 합의안 ⑤ 복구 전송) · 콜백 5xx는 RESULT_READY로 남아 재전송 대상 · 백그라운드 예외는 run_and_callback이 잡아 로그.', 'sub')
 t(40, NY + 66, '시험', 'h2')
-t(110, NY + 66, '단위(tests/unit, 154): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 51): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
+t(110, NY + 66, '단위(tests/unit, 155): 가짜 CatalogReader·ProfileRunStore·RecipientProfileStore·BackendPort로 3·4단계 — DB 없이   ·   통합(tests/integration, 51): 진짜 PostgreSQL로 구현·카탈로그 적재·앱 전체(7.6→7.7 e2e)   ·   수동: fake_backend 콘솔 → 7.6 → 7.7 → psql', 'sub')
 parts.append('</svg>')
 (P / 'pipeline-map.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')
 print('svg ok')
