@@ -60,77 +60,77 @@ AI 프로파일링이 **소유한 표**가 무엇이고, **왜 생겼고**, **�
 <!-- fig: 01-전체 -->
 ```mermaid
 erDiagram
-  "ai_catalog.catalog_versions" ||--o{ "ai_catalog.products" : "package_id 로 묶임 (FK 아님)"
-  "ai_catalog.categories" ||--o{ "ai_catalog.products" : "source_category_id (FK)"
-  "ai_catalog.categories" ||--o{ "ai_catalog.categories" : "parent_source_category_id (FK · 대분류→소분류)"
-  "ai_profile.profile_runs" }o--|| "ai_profile.recipient_profiles" : "같은 recipient_user_id (FK 아님)"
-  "ai_profile.profile_runs" }o--o| "ai_catalog.catalog_versions" : "catalog_version_id 기록 (FK 아님)"
+  "ai_catalog.catalog_versions" ||--o{ "ai_catalog.products" : "package_id"
+  "ai_catalog.categories" ||--o{ "ai_catalog.products" : "source_category_id"
+  "ai_catalog.categories" ||--o{ "ai_catalog.categories" : "parent (대분류→소분류)"
+  "ai_profile.profile_runs" }o--|| "ai_profile.recipient_profiles" : "recipient_user_id"
+  "ai_profile.profile_runs" }o--o| "ai_catalog.catalog_versions" : "catalog_version_id"
 
   "ai_profile.recipient_profiles" {
-    bigint recipient_user_id PK "수신자 1명 = 1행"
-    bigint source_version "낮은 버전은 덮지 않음"
-    jsonb preferred_tags "선호 태그 (v1은 [])"
-    jsonb disliked_tags "비선호 태그"
-    jsonb disliked_categories "7.6 명시 비선호 사본"
+    bigint recipient_user_id PK
+    bigint source_version
+    jsonb preferred_tags
+    jsonb disliked_tags
+    jsonb disliked_categories
     timestamptz created_at
     timestamptz updated_at
   }
   "ai_profile.profile_runs" {
-    uuid id PK "gen_random_uuid()"
-    bigint recipient_user_id UK "(수신자, 버전) 유니크"
+    uuid id PK
+    bigint recipient_user_id UK
     bigint source_version UK
-    text input_hash "7.6 본문 해시"
-    text status "RUNNING→RESULT_READY→DELIVERED"
-    int attempt "분석 재실행 횟수"
-    uuid catalog_version_id "쓴 카탈로그 버전"
-    jsonb callback_payload "7.7 본문"
+    text input_hash
+    text status
+    int attempt
+    uuid catalog_version_id
+    jsonb callback_payload
     text callback_hash
     int callback_attempts
-    jsonb error "실패 사유"
-    timestamptz created_at "접수 시각"
-    timestamptz updated_at "저장마다 now() · 끊긴 RUNNING 판정 기준"
+    jsonb error
+    timestamptz created_at
+    timestamptz updated_at
   }
   "ai_catalog.catalog_versions" {
-    uuid id PK "SearchResult.catalog_version_id"
-    text package_id "전달 패키지 이름"
+    uuid id PK
+    text package_id
     text taxonomy_version
     int product_count
     int category_count
     jsonb source_sha256
-    bool is_active "활성은 항상 1개"
+    bool is_active
     timestamptz loaded_at
   }
   "ai_catalog.categories" {
-    text source_category_id PK "GROUP-01 · CAT-01-02"
-    text parent_source_category_id FK "소분류만 값"
+    text source_category_id PK
+    text parent_source_category_id FK
     text name
-    smallint level "1 대분류 · 2 소분류"
+    smallint level
     int product_count
-    bigint backend_category_id UK "Backend 발급 · 67/67 채움"
+    bigint backend_category_id UK
     text taxonomy_version
     timestamptz updated_at
   }
   "ai_catalog.products" {
-    text source_product_id PK "KAKAO_GIFT:10002797"
-    bigint backend_product_id UK "Backend 발급 · 4,231/4,231 채움"
+    text source_product_id PK
+    bigint backend_product_id UK
     text name
     text brand
-    text source_category_id FK "소분류만"
+    text source_category_id FK
     text product_kind
-    text product_type "Shipping·Pickup·Voucher"
+    text product_type
     text description
     jsonb attributes
     int unit_price
-    int list_price "미확인 NULL"
-    text currency "KRW"
-    int stock_quantity "전건 NULL"
-    text availability "available·unavailable·unknown"
-    int view_count "전건 채움(09-25) · v1 정렬 키"
+    int list_price
+    text currency
+    int stock_quantity
+    text availability
+    int view_count
     text source_provider
     text source_product_url
     text source_image_url
     text image_asset_id
-    text package_id "어느 적재분인지"
+    text package_id
     timestamptz updated_at
   }
 ```
@@ -212,23 +212,13 @@ select recipient_user_id, source_version, disliked_tags, disliked_categories, up
 <!-- fig: 02-실행-상태 -->
 ```mermaid
 stateDiagram-v2
-  direction LR
   [*] --> RUNNING : 7.6 접수
-  RUNNING --> RESULT_READY : 풀 30개 + 콜백 본문 커밋
-  RUNNING --> FAILED : 카탈로그 없음·저장 실패·업무 오류·시작 시 정리(끊긴 RUNNING)
-  RESULT_READY --> DELIVERED : 200
-  RESULT_READY --> SUPERSEDED : 409
-  RESULT_READY --> FAILED : 4xx
-  RESULT_READY --> RESULT_READY : 5xx·네트워크
-  note right of RESULT_READY
-    7.7 콜백 응답으로 갈린다
-    200 전달 완료 · 409 더 새 버전 있음(폐기)
-    4xx 계약 거부 · 5xx·네트워크는 재전송 대상
-  end note
-  note left of FAILED
-    콜백을 보내지 않는다
-    Backend가 다음 주기에 다시 7.6
-  end note
+  RUNNING --> RESULT_READY : 풀 30개 저장
+  RUNNING --> FAILED : 저장·카탈로그·업무 오류
+  RESULT_READY --> DELIVERED : 7.7 200
+  RESULT_READY --> SUPERSEDED : 7.7 409
+  RESULT_READY --> FAILED : 7.7 4xx
+  note right of RESULT_READY : 7.7 5xx → 재시도, 상태 유지
   DELIVERED --> [*]
   SUPERSEDED --> [*]
   FAILED --> [*]
@@ -401,26 +391,26 @@ select availability, count(*), count(backend_product_id) as with_backend_id, cou
 <!-- fig: 03-코드-상호작용 -->
 ```mermaid
 flowchart LR
-  subgraph app["ai-app (uvicorn) · Engine 하나"]
+  subgraph app["ai-app"]
     direction TB
-    A1["기동 · /health · 7.6 접수<br/>main.lifespan · main.health · intake.extract_and_pool"]
-    A2["요청 처리 (슬롯 안)<br/>intake.dispatch → pipeline.profile → intake._send_and_record"]
-    C["catalog.DbCatalogReader<br/>활성 id 폴링 · 바뀌면 재로드 · 메모리 캐시"]
+    A1["접수 · /health<br/>intake · main"]
+    A2["처리 (워커)<br/>dispatch → profile → 콜백"]
+    C["DbCatalogReader<br/>활성 버전 캐시"]
   end
   subgraph tools["앱 밖"]
     direction TB
-    T1["tools/catalog/load_catalog.py<br/>적재 · --id-map · --metrics"]
-    T3["alembic upgrade head<br/>DDL 0001~0004"]
-    T2["tools/be_integration/drive.py<br/>시험 읽기 · 정리"]
+    T1["load_catalog.py"]
+    T3["alembic upgrade head"]
+    T2["be_integration/drive.py"]
   end
   subgraph db["PostgreSQL ai_chat"]
     direction TB
-    R[("ai_profile.profile_runs")]
-    P[("ai_profile.recipient_profiles")]
-    V[("ai_catalog.catalog_versions")]
-    K[("ai_catalog.categories")]
-    D[("ai_catalog.products")]
-    M[("public.alembic_version")]
+    R[("profile_runs")]
+    P[("recipient_profiles")]
+    V[("catalog_versions")]
+    K[("categories")]
+    D[("products")]
+    M[("alembic_version")]
   end
   A1 --> C
   A1 --> R

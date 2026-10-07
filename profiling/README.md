@@ -19,7 +19,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 > 그림 원본: `docs/assets/build_structure.py` → `structure.svg` (PNG는 Chrome 헤드리스). 모듈이 늘거나 포트가 바뀌면 스크립트를 고치고 다시 만든다.
 
-`src/profiling/` 모듈 11개(+`__init__.py`)의 역할은 위 그림에 있다. 나머지 폴더는 이렇다.
+`src/profiling/` 모듈 11개(+`__init__.py`)는 위 그림의 자리(층)와 의존 방향만 보면 된다. 모듈·함수별 역할은 [docs/코드_안내서.md](docs/코드_안내서.md)와 [지도 §1](docs/파이프라인_지도/2026-10-06.md)에 있다. 나머지 폴더는 이렇다.
 
 | 폴더 · 파일 | 내용 |
 |---|---|
@@ -67,7 +67,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 ![파이프라인 지도](docs/assets/pipeline-map.png)
 
-(단계마다 부르는 함수와 포트·어댑터·바깥의 연결. 시퀀스 형태는 [v1-flow.png](docs/assets/v1-flow.png))
+(4단계 · 포트 · 구현 · 바깥의 연결만 그렸다(10-07 단순화). 단계마다 부르는 함수 목록은 [지도 10-06 §1](docs/파이프라인_지도/2026-10-06.md), 시퀀스 형태는 [v1-flow.png](docs/assets/v1-flow.png))
 
 1. `POST 7.6` → Pydantic 검증(위반 400 `INVALID_REQUEST`) → 서비스 토큰(401) → 활성 카탈로그 없으면 503(Retry-After 300) → Supervisor 큐에 넣기(가득이면 503, Retry-After 30) → **202 `PENDING`** (HTTP 끝)
 2. Supervisor 워커 스레드에서 `dispatch`(잠금·판정) → `run_and_callback`: `to_internal` → `profile()` — `store.save(RUNNING, input_hash)` → `catalog.active()` 한 번(같은 버전 유지) → 비선호 이름만 담은 `ValidationResult` → `build_pool`(재고 없음(`unavailable`)만 제외 · 비선호 **대분류**의 하위 소분류 전체 제외 · 조회수 내림차순 · 30개) → `ProfileOutcome(RESULT_READY)` → `store.save`(콜백 본문을 DB에 먼저 커밋) → `recipient_store.upsert(from_outcome)`
@@ -92,14 +92,14 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | Python | **3.12** (`.python-version`) | `StrEnum`·타입 문법 · torch/sentence-transformers 안정 |
 | 패키지 | **uv** — `pyproject.toml` + `uv.lock`(커밋) · `.venv`(커밋 안 함) | 폴더별 가상환경 만들지 않음 |
 | 의존성 | fastapi · uvicorn[standard] · pydantic · pydantic-settings · httpx · sqlalchemy · alembic · psycopg[binary] | dev: pytest · ruff |
-| 설정 | 환경변수 `PROFILING_*` 또는 `profiling/.env` (`.env.example` 복사) | 코드는 `settings.X`로만 접근 — 이름 바꿀 때 `settings.py` 한 곳 |
+| 설정 | 환경변수 `PROFILING_*` 또는 `profiling/.env`(예시 파일은 담당자에게 받아 복사 — `.env.example`도 저장소에 두지 않는다, 10-07) | 코드는 `settings.X`로만 접근 — 이름 바꿀 때 `settings.py` 한 곳 |
 | DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`~`0004` | 저장소는 PostgreSQL 하나뿐 — 연결 실패면 앱이 뜨지 않는다 (DB 없이 띄우는 모드는 없음) |
-| 카탈로그 | 로컬 기본 `CATALOG_SOURCE=file`(`catalog_sample.json` 111건) · 배포 `db`(`ai_catalog` 4,231건, `load_catalog --package` 로 적재) | `.env.example` 참고 |
+| 카탈로그 | 로컬 기본 `CATALOG_SOURCE=file`(`catalog_sample.json` 111건) · 배포 `db`(`ai_catalog` 4,231건, `load_catalog --package` 로 적재) | `settings.py`의 `CATALOG_SOURCE`·`CATALOG_FILE` 참고 |
 
 ```bash
 cd profiling
 uv sync                                     # .venv + 의존성 (uv.lock 기준)
-cp .env.example .env                        # 필요 시 값 수정
+# .env 만들기: 담당자에게 받은 .env.example 을 복사한다 (저장소에는 없음 · 키 목록은 src/profiling/settings.py)
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
 uv run alembic upgrade head                 # 테이블 생성 (0001~0004)
 uv run pytest -q                            # 204 passed, 2 skipped (DB 꺼져 있으면 통합 51개 skip)

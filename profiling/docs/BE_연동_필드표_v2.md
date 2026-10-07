@@ -102,19 +102,16 @@ CLI가 **어느 상품의 어느 필드가 어떻게** 다른지 출력하고 **
 sequenceDiagram
   autonumber
   participant OP as 운영자
-  participant AI as AI Catalog CLI
+  participant AI as fetch_export.py
   participant BE as Backend
-  participant APP as AI 프로파일링 앱
-  OP->>AI: fetch_export.py --out data/catalog_export.json --compare-db
+  participant APP as AI 앱
+  OP->>AI: fetch_export.py --out … --compare-db
   AI->>BE: GET 7.9 export (Bearer)
-  BE-->>AI: 200 data.products[] (productId = products.id, views)
-  AI->>AI: 계약 점검 (필수·타입·모르는 필드·조회수 이름)
-  AI->>AI: ID 대조 (직전 카탈로그 · ai_search.products)
-  AI->>AI: 저장 (계약 이름으로 정규화)
+  BE-->>AI: 200 data.products[]
+  AI->>AI: 계약 점검 · ID 대조 · 저장
   AI-->>OP: 보고 · 종료 코드 0/2
-  OP->>APP: .env CATALOG_FILE 교체 · 재시작
+  OP->>APP: 카탈로그 교체 · 재시작
   APP->>APP: 활성 카탈로그 = 새 목록
-  Note over BE,APP: 이후 7.6 → 7.7 흐름은 v1 §4.1 그대로
 ```
 
 ### 4.2 7.9 실패 — 계약 불일치 / 401
@@ -126,18 +123,17 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant OP as 운영자
-  participant AI as AI Catalog CLI
+  participant AI as fetch_export.py
   participant BE as Backend
   OP->>AI: fetch_export.py …
   AI->>BE: GET 7.9 export (Bearer)
   alt 토큰 불일치
-    BE-->>AI: 401 {code: UNAUTHORIZED}
-    AI-->>OP: ✗ 가져오기 실패 · 종료 3 · 기존 카탈로그 유지
-  else 200 이지만 필드가 다름 (예: price 누락)
-    BE-->>AI: 200 data.products[] (price 없음)
-    AI->>AI: 계약 점검 → CONTRACT_7_9_SCHEMA
-    AI-->>OP: ✗ products[0] price: Field required · 종료 1 · 저장 안 함
-    Note over OP,BE: BE 필드 이름·타입 맞춘 뒤 다시 실행
+    BE-->>AI: 401 UNAUTHORIZED
+    AI-->>OP: ✗ 종료 3 · 기존 카탈로그 유지
+  else 필드가 계약과 다름
+    BE-->>AI: 200 (price 없음)
+    AI->>AI: CONTRACT_7_9_SCHEMA
+    AI-->>OP: ✗ 종료 1 · 저장 안 함
   end
 ```
 

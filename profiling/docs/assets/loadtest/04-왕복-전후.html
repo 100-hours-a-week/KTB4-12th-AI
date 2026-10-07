@@ -22,8 +22,7 @@
   .note{margin-top:10px;font-size:14px;color:#424242}
   .src{margin-top:8px;font-size:12px;color:#9e9e9e;font-family:Menlo,monospace}
 </style></head><body>
-<h1>7.6 한 건의 DB 왕복 — 수정 전 34 → 수정 후 8</h1>
-<p class="sub">칩 하나 = PostgreSQL 왕복 하나. 초록(실제 SQL)은 양쪽이 같고, 회색·주황(핑·트랜잭션 포장)만 사라졌다.</p>
+<h1>7.6 한 건의 DB 왕복 — 34 → 8</h1>
 <table>
 <tr><th></th><th class="before">수정 전 — 34 (09-28, 커밋 82df108 이전)</th><th class="after">수정 후 — 8 (커밋 82df108 · e998f43)</th></tr>
 
@@ -74,6 +73,4 @@
 <span class="chip tx">BEGIN / COMMIT / ROLLBACK</span> SQLAlchemy 자동 트랜잭션 포장 &nbsp;·&nbsp;
 <span class="chip none">없음</span> 캐시·재사용으로 사라진 왕복
 </div>
-<div class="note">무엇이 지웠나: 폴링 1초 TTL → ①(연속 요청)·⑤ &nbsp;|&nbsp; 잠금 커넥션 AUTOCOMMIT → ②⑨의 BEGIN/COMMIT &nbsp;|&nbsp; 잠금 쥔 동안 같은 커넥션 재사용 → ③④⑥⑦⑧의 핑·BEGIN·COMMIT &nbsp;|&nbsp; 읽기 AUTOCOMMIT → 단독 요청 ①의 BEGIN/ROLLBACK, /health 12 → 4</div>
-<div class="src">출처: tools/loadtest/results/pg-statements.txt (수신자 900600) · pg-statements-after2.txt (900997 연속 · 900999 단독) — log_statement=all, 2026-09-28</div>
 </body></html>

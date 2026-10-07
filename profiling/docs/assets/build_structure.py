@@ -1,25 +1,26 @@
-"""구조 그림 — src/profiling/ 모듈 12개가 어느 자리에 있고 의존이 어느 방향으로 흐르는지. README §1의 그림.
+"""구조 그림 — src/profiling/ 모듈이 어느 층에 있고 의존이 어느 방향인지. README §1의 그림.
 python3 build_structure.py → structure.svg (PNG는 Chrome 헤드리스: --headless --screenshot --window-size=2W,2H)
-모듈이 늘거나 포트가 바뀌면 여기도 고친다 (코드 기준 2026-09-23, 패키지 평탄화 + 저장소 DB 전용화 후)."""
+2026-10-07: 설명문을 걷어내고 상자 이름 + 함수 이름만 남겼다. 각 모듈이 하는 일은 README §1 표와 docs/코드_안내서.md 에 있다.
+모듈이 늘거나 포트가 바뀌면 여기도 고친다."""
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 P = Path(__file__).resolve().parent
-W, H = 1700, 1015
+W, H = 1700, 790
 parts = [f'''<svg xmlns="http://www.w3.org/2000/svg" width="{W*2}" height="{H*2}" viewBox="0 0 {W} {H}" role="img">
 <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#3b6fb6"/></marker>
 <marker id="g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#9aa4ad"/></marker>
 <marker id="w" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#c0392b"/></marker>
 <style>text{{font-family:"Apple SD Gothic Neo","Noto Sans KR",Arial,sans-serif;fill:#18212b}}.title{{font-size:30px;font-weight:700;letter-spacing:-.6px}}
-.h{{font-size:15px;font-weight:700}}.h2{{font-size:13px;font-weight:700;fill:#3f4a54}}.sub{{font-size:12px;fill:#5e6873}}.msg{{font-size:13px}}
-.mono{{font-family:Menlo,ui-monospace,monospace;font-size:11px;fill:#3f4a54}}.monob{{font-family:Menlo,ui-monospace,monospace;font-size:13px;font-weight:700;fill:#18212b}}
-.small{{font-size:13px;fill:#5e6873}}.tag{{font-size:11px;font-weight:700;fill:#8a94a0;letter-spacing:.4px}}
-.port{{font-family:Menlo,ui-monospace,monospace;font-size:13px;font-weight:700;fill:#3b6fb6}}
+.h{{font-size:16px;font-weight:700}}.h2{{font-size:14px;font-weight:700;fill:#3f4a54}}.sub{{font-size:12.5px;fill:#5e6873}}.msg{{font-size:13.5px}}
+.mono{{font-family:Menlo,ui-monospace,monospace;font-size:12.5px;fill:#3f4a54}}.monob{{font-family:Menlo,ui-monospace,monospace;font-size:15px;font-weight:700;fill:#18212b}}
+.small{{font-size:13px;fill:#5e6873}}.tag{{font-size:12px;font-weight:700;fill:#8a94a0;letter-spacing:.4px}}
+.port{{font-family:Menlo,ui-monospace,monospace;font-size:14px;font-weight:700;fill:#3b6fb6}}
 .call{{fill:none;stroke:#3b6fb6;stroke-width:1.8;marker-end:url(#a)}}.grey{{fill:none;stroke:#9aa4ad;stroke-width:1.4;stroke-dasharray:5 4;marker-end:url(#g)}}
 .write{{fill:none;stroke:#c0392b;stroke-width:1.8;marker-end:url(#w)}}.impl{{fill:none;stroke:#3b6fb6;stroke-width:1.3;stroke-dasharray:6 4;marker-end:url(#a)}}
 .box{{fill:#fff;stroke:#bcc5cd;stroke-width:1.3}}.stage{{fill:#fff;stroke:#3b6fb6;stroke-width:1.6}}.band{{fill:#eef3fa;stroke:#9db0d2;stroke-width:1.2}}
 .core{{fill:#f4f8ff;stroke:#3b6fb6;stroke-width:1.8}}.db{{fill:#fff7f2;stroke:#e0a080;stroke-width:1.4}}.ext{{fill:#f7f8fa;stroke:#bcc5cd;stroke-width:1.2}}
-.rule{{stroke:#d9dee3;stroke-width:1}}</style></defs><rect width="{W}" height="{H}" fill="white"/>''']
+</style></defs><rect width="{W}" height="{H}" fill="white"/>''']
 
 
 def t(x, y, s, c='msg', anchor=None):
@@ -35,123 +36,93 @@ def path(d, cls_='call'):
     parts.append(f'<path d="{d}" class="{cls_}"/>')
 
 
-def lines(x, y, rows, dy=15):
-    for i, (s, c) in enumerate(rows):
-        t(x, y + i * dy, s, c)
-
-
 # ---------------------------------------------------------------- 머리
-t(40, 46, 'profiling 구조 — src/profiling/ 모듈 12개와 의존 방향 (v1, 2026-09-28)', 'title')
-t(40, 70, 'Ports & Adapters(헥사고날). 업무 코드는 바깥(HTTP·파일·DB)을 모른다. 바깥이 업무가 정한 "포트(모양)"에 맞춰 들어온다 — 화살표는 항상 안쪽을 향한다.', 'small')
+t(40, 46, 'profiling 구조 — 모듈과 의존 방향 (v1)', 'title')
+t(40, 70, '파랑 호출 · 빨강 DB 쓰기 · 회색 점선 조립 · 화살표는 안쪽(업무)으로', 'small')
 
 LANES = [(170, 350), (546, 350), (922, 350), (1298, 350)]   # (x, w) — 포트 4개가 세로로 한 줄씩
 
 # ---------------------------------------------------------------- 조립 (main.py)
-box(40, 92, W - 80, 62, 'band')
-t(56, 114, 'main.py', 'monob')
-t(140, 114, '[조립 · Composition Root]  여기서만 구체 클래스를 안다 — lifespan에서 4개를 만들어 app.state에 두고, 종료 때 정리한다 (아래 회색 점선).', 'msg')
-t(56, 136, '_connect_db(DATABASE_URL) → Db/FileCatalogReader(CATALOG_SOURCE) · DbProfileRunStore(engine) · DbRecipientProfileStore(engine) · HttpBackendPort(BACKEND_BASE_URL) · Supervisor(SLOTS, QUEUE_MAX)', 'mono')
-t(W - 56, 114, 'settings.py — 환경변수 PROFILING_* 한 곳', 'sub', 'end')
-t(W - 56, 136, '__init__.py — 공개 표면(profile · 자료형 · Settings)', 'sub', 'end')
+box(40, 90, W - 80, 46, 'band')
+t(56, 119, 'main.py', 'monob')
+t(150, 119, 'lifespan() — 구현 4개 + Supervisor 를 만들어 app.state 에 둔다 · GET /health', 'msg')
+t(W - 56, 119, 'settings.py — PROFILING_*', 'sub', 'end')
+for _x, _w in LANES:                                   # 조립 점선 — 상자 뒤에 깔린다
+    path(f'M {_x+_w/2} 136 L {_x+_w/2} 520', 'grey')
 
-# 조립 점선 — 먼저 그려 두면 아래에서 그리는 상자들이 덮어, 띠 사이 틈에서만 보인다
-for _x, _w in LANES:
-    path(f'M {_x+_w/2} 156 L {_x+_w/2} 588', 'grey')
+# ---------------------------------------------------------------- 경계
+TOP = 168
+t(40, TOP - 8, '경계', 'tag')
+box(40, TOP, 300, 74, 'ext')
+t(56, TOP + 26, 'Backend', 'h')
+t(56, TOP + 50, 'POST 7.6  extract-and-pool', 'mono')
 
-# ---------------------------------------------------------------- 경계 (Transport)
-TOP = 186
-t(40, TOP - 8, '경계 — 바깥 계약이 닿는 곳', 'tag')
-box(40, TOP, 300, 96, 'ext')
-t(56, TOP + 24, 'Backend', 'h')
-lines(56, TOP + 44, [('POST 7.6 extract-and-pool', 'mono'), ('Authorization: Bearer <토큰>', 'mono'), ('카탈로그 없으면 503 · 검증 실패 400', 'sub')])
+box(390, TOP, 420, 74, 'stage')
+t(406, TOP + 26, 'intake.py', 'monob')
+t(406, TOP + 48, 'extract_and_pool() → 202 PENDING', 'mono')
+t(406, TOP + 65, 'dispatch() → run_and_callback | resend_callback', 'mono')
 
-box(390, TOP, 420, 96, 'stage')
-t(406, TOP + 24, 'intake.py', 'monob')
-lines(406, TOP + 44, [('[Transport] 토큰 → 검증 → 202 PENDING', 'msg'),
-                      ('extract_and_pool() → dispatch(잠금·판정)', 'mono'),
-                      ('  → run_and_callback | resend_callback', 'mono'),
-                      ('여기서 Backend와의 HTTP가 끝난다', 'sub')])
+box(840, TOP, 360, 74, 'stage')
+t(856, TOP + 26, 'schemas.py', 'monob')
+t(856, TOP + 50, '7.6 · 7.7 · 7.9 DTO  (camelCase)', 'mono')
 
-box(840, TOP, 360, 96, 'stage')
-t(856, TOP + 24, 'schemas.py', 'monob')
-lines(856, TOP + 44, [('[바깥 계약] 7.6·7.7·7.9 DTO', 'msg'),
-                      ('camelCase — 문서 1과 1:1', 'mono'),
-                      ('모르는 필드는 무시하고 경고만', 'sub')])
+box(1230, TOP, 430, 74, 'stage')
+t(1246, TOP + 26, 'supervisor.py', 'monob')
+t(1246, TOP + 50, 'submit() → 큐 → 워커 N  (가득이면 503)', 'mono')
 
-box(1230, TOP, 430, 96, 'stage')
-t(1246, TOP + 24, 'supervisor.py', 'monob')
-lines(1246, TOP + 44, [('[Supervisor] 워커 스레드 N + 상한 큐(가득이면 503)', 'msg'),
-                       ('submit() → 큐 → 워커가 실행 · stop()이 큐를 버림', 'mono'),
-                       ('기한·취소는 다음', 'sub')])
-
-path(f'M 340 {TOP+40} L 384 {TOP+40}')
-path(f'M 810 {TOP+70} L 836 {TOP+70}', 'grey')
-path(f'M 1200 {TOP+40} L 1224 {TOP+40}')
+path(f'M 340 {TOP+37} L 384 {TOP+37}')
+path(f'M 810 {TOP+58} L 836 {TOP+58}', 'grey')
+path(f'M 1200 {TOP+37} L 1224 {TOP+37}')
 
 # ---------------------------------------------------------------- 업무 (안쪽)
-MID = 322
-t(40, MID - 8, '업무 (안쪽) — 바깥을 모른다. 인자로 받은 포트 모양만 쓴다', 'tag')
-box(40, MID, W - 80, 118, 'core')
-box(66, MID + 20, 780, 78, 'box')
-t(82, MID + 44, 'pipeline.py', 'monob')
-lines(82, MID + 64, [('profile() — 0 RUNNING 기록 → 1 카탈로그 → 2 검증 → 3 풀 30개 → 4 결과 → 5 기록 → 6 프로필', 'mono'),
-                     ('to_internal · input_hash · needs_model · build_pool.  예외는 FAILED로 바꿔 돌려주고 밖으로 안 던진다', 'mono')])
-box(874, MID + 20, 760, 78, 'box')
-t(890, MID + 44, 'types.py', 'monob')
-lines(890, MID + 64, [('[내부 자료형 snake_case] ProfileRequest · ValidationResult · SearchResult', 'mono'),
-                      ('ProfileOutcome(=profile_runs 행) · RecipientProfile(=recipient_profiles 행) · RunStatus · ErrorCode', 'mono')])
+MID = 288
+t(40, MID - 8, '업무 — 바깥을 모른다', 'tag')
+box(40, MID, W - 80, 96, 'core')
+box(66, MID + 16, 780, 64, 'box')
+t(82, MID + 40, 'pipeline.py', 'monob')
+t(82, MID + 62, 'profile()  ·  to_internal  ·  needs_model  ·  build_pool', 'mono')
+box(874, MID + 16, 760, 64, 'box')
+t(890, MID + 40, 'types.py', 'monob')
+t(890, MID + 62, 'ProfileRequest · ProfileOutcome · RecipientProfile · RunStatus', 'mono')
 
-path(f'M 590 {TOP+96} L 590 {MID-2}')
-t(600, MID - 14, 'run_and_callback(rq, catalog, store, backend, recipient_store)', 'mono')
+path(f'M 590 {TOP+74} L 590 {MID-2}')
+t(600, MID - 16, 'run_and_callback()', 'mono')
 
 # ---------------------------------------------------------------- 포트
-PORT_Y = 484
-t(40, PORT_Y - 10, '포트 — 업무가 바깥에 요구하는 "모양" (typing.Protocol · ports.py). 업무 코드는 이 파일만 import한다', 'tag')
-box(40, PORT_Y, W - 80, 52, 'band')
+PORT_Y = 428
+t(40, PORT_Y - 10, '포트 (typing.Protocol)', 'tag')
+box(40, PORT_Y, W - 80, 50, 'band')
 t(56, PORT_Y + 31, 'ports.py', 'monob')
-PORTS = ['CatalogReader', 'ProfileRunStore', 'RecipientProfileStore', 'BackendPort']
-for (x, w), name in zip(LANES, PORTS):
+for (x, w), name in zip(LANES, ['CatalogReader', 'ProfileRunStore', 'RecipientProfileStore', 'BackendPort']):
     t(x + w / 2, PORT_Y + 31, name, 'port', 'middle')
-
-path(f'M 1560 {MID+118} L 1560 {PORT_Y-2}')
-t(1548, PORT_Y - 10, '포트 모양으로만 부른다', 'sub', 'end')
+path(f'M 1560 {MID+96} L 1560 {PORT_Y-2}')
 
 # ---------------------------------------------------------------- 구현
-IMPL_Y = 590
-t(40, IMPL_Y - 10, '구현 — 포트에 꽂히는 실제 코드. 업무 코드는 이 파일들을 import하지 않는다', 'tag')
-IMPL = [('catalog.py', 'DbCatalogReader / FileCatalogReader', ['active() → (버전, 상품 전체)', 'DB: 활성 버전 id만 묻고 바뀔 때만 다시 읽음', '상품번호 = backend_product_id']),
-        ('stores.py', 'DbProfileRunStore', ['save() — UPSERT 한 문장', 'get() · get_run(rid, sv) · run_lock(rid, sv)', 'recover_stale_runs() · undelivered_count()']),
-        ('stores.py', 'DbRecipientProfileStore', ['upsert() — 버전 가드', 'get() · delete()', '낮은 버전은 DB가 무시']),
-        ('backend.py', 'HttpBackendPort', ['send_profile_callback()', '→ CallbackResult(상태·코드)', 'to_callback · callback_body'])]
-for (x, w), (mod, cls_, rows) in zip(LANES, IMPL):
-    box(x, IMPL_Y, w, 118, 'box')
-    t(x + 16, IMPL_Y + 26, cls_, 'h')
-    t(x + w - 16, IMPL_Y + 26, mod, 'mono', 'end')
-    lines(x + 16, IMPL_Y + 48, [(r, 'mono') for r in rows])
-    path(f'M {x+w/2} {IMPL_Y-2} L {x+w/2} {PORT_Y+54}', 'impl')
-t(LANES[3][0] + LANES[3][1] / 2 + 12, PORT_Y + 78, '«구현»', 'sub')
+IMPL_Y = 528
+t(40, IMPL_Y - 10, '구현', 'tag')
+IMPL = [('catalog.py', 'DbCatalogReader / FileCatalogReader', 'active()'),
+        ('stores.py', 'DbProfileRunStore', 'save() · get_run() · run_lock()'),
+        ('stores.py', 'DbRecipientProfileStore', 'upsert() · get()'),
+        ('backend.py', 'HttpBackendPort', 'send_profile_callback()')]
+for (x, w), (mod, cls_, fn) in zip(LANES, IMPL):
+    box(x, IMPL_Y, w, 70, 'box')
+    t(x + 16, IMPL_Y + 28, cls_, 'h2')
+    t(x + w - 16, IMPL_Y + 28, mod, 'mono', 'end')
+    t(x + 16, IMPL_Y + 52, fn, 'mono')
+    path(f'M {x+w/2} {IMPL_Y-2} L {x+w/2} {PORT_Y+52}', 'impl')
 
 # ---------------------------------------------------------------- 바깥
-OUT_Y = 760
-t(40, OUT_Y - 10, '바깥 — 실제 자원', 'tag')
-OUT = [('PostgreSQL  ai_catalog (0003)', 'db', ['products 4,231 · categories 67', 'Backend 번호·재고·조회수 채움 (09-25)', '파일 카탈로그는 로컬 시험용']),
-       ('PostgreSQL  ai_profile.profile_runs', 'db', ['실행 1건 = 1행', '(수신자, source_version) UNIQUE', 'alembic 0002']),
-       ('PostgreSQL  ai_profile.recipient_profiles', 'db', ['수신자 1명 = 1행', '태그는 여기 보관 (DR-035)', 'alembic 0001']),
-       ('Backend', 'ext', ['POST 7.7 상품 ID ≤30', '200 DELIVERED · 409 SUPERSEDED', '4xx FAILED · 5xx 재전송 대상'])]
-for (x, w), (name, cls_, rows) in zip(LANES, OUT):
-    box(x, OUT_Y, w, 96, cls_)
-    t(x + 16, OUT_Y + 26, name, 'h2')
-    lines(x + 16, OUT_Y + 46, [(r, 'mono') for r in rows])
-    path(f'M {x+w/2} {IMPL_Y+118} L {x+w/2} {OUT_Y-2}', 'write' if cls_ == 'db' else 'call')
-
-# ---------------------------------------------------------------- 규칙
-NY = 890
-parts.append(f'<line x1="40" y1="{NY}" x2="{W-40}" y2="{NY}" class="rule"/>')
-lines(40, NY + 26, [
-    ('이름 규칙 — HTTP 경계만 camelCase(schemas.py). 그 밖의 파이썬은 전부 snake_case. 두 세계를 잇는 변환은 pipeline.to_internal() 과 backend.to_callback() 두 함수뿐이다.', 'small'),
-    ('바꿔 끼우기 — 포트가 같은 모양이면 무엇이든 꽂힌다. 단위 테스트는 가짜 구현을, 운영은 위 4개를 쓴다. 파일 카탈로그를 DB로 바꿔도 pipeline.py 는 한 줄도 바뀌지 않는다.', 'small'),
-    ('아직 없는 것 — 팀원 Search 호출(v3, 질의어가 생길 때) · ProfileModel(LLM 태그 추출, v3). 그때 포트가 하나씩 늘고 구현 칸이 채워진다.', 'small'),
-], 22)
+OUT_Y = 660
+t(40, OUT_Y - 10, '바깥', 'tag')
+OUT = [('PostgreSQL  ai_catalog', 'db', '상품 4,231 · 카테고리 67'),
+       ('PostgreSQL  ai_profile.profile_runs', 'db', '실행 1건 = 1행'),
+       ('PostgreSQL  ai_profile.recipient_profiles', 'db', '수신자 1명 = 1행'),
+       ('Backend', 'ext', 'POST 7.7  상품 ID ≤30')]
+for (x, w), (name, cls_, sub) in zip(LANES, OUT):
+    box(x, OUT_Y, w, 64, cls_)
+    t(x + 16, OUT_Y + 27, name, 'h2')
+    t(x + 16, OUT_Y + 50, sub, 'mono')
+    path(f'M {x+w/2} {IMPL_Y+70} L {x+w/2} {OUT_Y-2}', 'write' if cls_ == 'db' else 'call')
 
 parts.append('</svg>')
 (P / 'structure.svg').write_text('\n'.join(parts) + '\n', encoding='utf-8')

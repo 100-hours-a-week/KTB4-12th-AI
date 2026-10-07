@@ -2,3 +2,13 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# 비밀·환경 파일 — 어느 폴더에서든 커밋하지 않는다. .env.example 도 포함(담당자가 저장소 밖에서 관리, 2026-10-07)
+.env
+.env.*
+docker-compose.override.yml
+*.pem
+*.key
+*.p12
+*.jks
+secrets/

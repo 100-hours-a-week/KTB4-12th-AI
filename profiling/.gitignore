@@ -10,3 +10,9 @@ data/
 
 # 부하 시험 결과 JSON·로그 (tools/loadtest/run.py --out) — 커밋하지 않음
 tools/loadtest/results/
+
+# 환경 파일은 예시(.env.example)까지 커밋하지 않는다 — 담당자가 저장소 밖에서 관리 (2026-10-07). 루트 .gitignore 와 같은 규칙
+.env.*
+docker-compose.override.yml
+*.pem
+*.key

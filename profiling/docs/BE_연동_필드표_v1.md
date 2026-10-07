@@ -284,29 +284,28 @@ PNG는 `docs/assets/be-seq/v1/`(`build_be_sequences.py`가 이 문서의 mermaid
 ```mermaid
 sequenceDiagram
   autonumber
-  participant U as 사용자(수신자·발신자)
+  participant U as 사용자
   participant BE as Backend
-  participant AI as AI 프로파일링
+  participant AI as AI
   participant DB as AI DB
-  Note over BE,AI: 사전 1회 (v1 수동) — BE가 상품 목록 파일 전달, AI가 적재
-  BE-->>AI: 상품 목록 파일 (productId = products.id, categoryId, views)
-  AI->>AI: 계약 점검 · 저장 → 활성 카탈로그
+  BE-->>AI: 상품 목록 파일 (사전 1회)
+  AI->>AI: 적재 → 활성 카탈로그
   U->>BE: 비선호 카테고리 저장
-  BE->>BE: last_changed_at 기록 (번호는 아직)
-  Note over BE: 마지막 변경 후 1h (최대 6h)
-  BE->>BE: source_version += 1 → v (요청보다 먼저 저장)
-  BE->>AI: POST 7.6 {recipientUserId, sourceVersion: v, dislikedCategories[]}
+  BE->>BE: last_changed_at 기록
+  Note over BE: 디바운스 1h (최대 6h)
+  BE->>BE: source_version += 1 → v
+  BE->>AI: POST 7.6 (v, dislikedCategories)
   AI->>DB: profile_runs(v) RUNNING
-  AI-->>BE: 202 {profileStatus: PENDING, sourceVersion: v}
-  BE->>BE: analyzed < v 이면 PENDING · last_changed_at 조건부 비움
+  AI-->>BE: 202 PENDING
+  BE->>BE: PENDING (조건부)
   AI->>AI: 비선호 제외 → 조회수순 30개
-  AI->>DB: profile_runs(v) RESULT_READY + 콜백 본문 · recipient_profiles upsert
-  AI->>BE: POST 7.7 {recipientUserId, sourceVersion: v, profileStatus: COMPLETED, recommendedProductIds[≤30]}
-  BE->>BE: v ≥ analyzed → 30개 저장 · analyzed=v · v == source_version → COMPLETED (최신)
-  BE-->>AI: 200 {profileStatus: COMPLETED}
+  AI->>DB: RESULT_READY · recipient_profiles upsert
+  AI->>BE: POST 7.7 (v, COMPLETED, recommendedProductIds ≤30)
+  BE->>BE: 30개 저장 · analyzed = v → COMPLETED
+  BE-->>AI: 200
   AI->>DB: profile_runs(v) DELIVERED
-  U->>BE: 상품 목록 (sort=AI_RECOMMENDED, recipientUserId)
-  BE-->>U: 30개 우선 노출 (비선호 카테고리는 뒤로)
+  U->>BE: 상품 목록 (sort=AI_RECOMMENDED)
+  BE-->>U: 30개 우선 노출
 ```
 
 ### 4.2 실패 — 7.6 이 503 (AI에 활성 카탈로그 없음)
@@ -318,13 +317,12 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant BE as Backend
-  participant AI as AI 프로파일링
-  BE->>AI: POST 7.6 (sourceVersion: v)
-  AI-->>BE: 503 {code: SERVICE_UNAVAILABLE, message: "활성 카탈로그가 없습니다."}  Retry-After: 300
-  Note over BE: profile_status 그대로(이전 값) · next_retry_at = now + 300 · retry_count 0
-  Note over AI: 운영자: 상품 목록 파일 적재 → 활성
-  BE->>AI: POST 7.6 (같은 번호 v) — Retry-After 뒤 재시도 1 (retry_count 1)
-  Note over BE,AI: 접수가 안 됐으니 AI에는 기록이 없다 → 같은 번호가 와도 새로 분석한다(§3.4 ①). 2회를 다 쓰면 FAILED
+  participant AI as AI
+  BE->>AI: POST 7.6 (v)
+  AI-->>BE: 503 SERVICE_UNAVAILABLE · Retry-After 300
+  Note over BE: 상태 그대로 · 재시도 예약
+  Note over AI: 운영자가 카탈로그 적재
+  BE->>AI: POST 7.6 (같은 v) — 재시도
   AI-->>BE: 202 PENDING
   AI->>BE: POST 7.7 (v)
   BE-->>AI: 200 → COMPLETED
@@ -340,25 +338,24 @@ sequenceDiagram
   autonumber
   participant U as 사용자
   participant BE as Backend
-  participant AI as AI 프로파일링
-  BE->>BE: source_version 4 → 5 (저장)
+  participant AI as AI
+  BE->>BE: source_version 4 → 5
   BE->>AI: POST 7.6 (v5)
-  AI-->>BE: 202 → PENDING (analyzed 없음 < 5)
-  U->>BE: 비선호 다시 수정 → last_changed_at 재기록 (번호는 그대로 5)
-  Note over BE: 1h 뒤 — v5 결과가 아직 안 왔어도 다음 번호로 보냄 (v3처럼 처리가 길면 생김)
-  BE->>BE: source_version 5 → 6 (저장)
+  AI-->>BE: 202 → PENDING
+  U->>BE: 비선호 다시 수정
+  Note over BE: 1h 뒤 — v5 결과 전에 다음 번호
+  BE->>BE: source_version 5 → 6
   BE->>AI: POST 7.6 (v6)
-  AI-->>BE: 202 → PENDING 유지
-  AI->>BE: POST 7.7 (v5) — 먼저 끝난 쪽
-  BE->>BE: 5 ≥ analyzed(없음) → 30개 저장, analyzed=5 · 5 < source_version 6 → PENDING 유지
+  AI-->>BE: 202 → PENDING
+  AI->>BE: POST 7.7 (v5)
+  BE->>BE: 저장 · analyzed=5 · PENDING 유지
   BE-->>AI: 200
   AI->>BE: POST 7.7 (v6)
-  BE->>BE: 6 ≥ 5 → 저장, analyzed=6 · 6 == source_version → COMPLETED (최신)
+  BE->>BE: 저장 · analyzed=6 → COMPLETED
   BE-->>AI: 200
-  Note over AI,BE: 그 뒤 v5 콜백이 재전송으로 늦게 도착하면
-  AI->>BE: POST 7.7 (v5)
-  BE-->>AI: 409 {code: STALE_SOURCE_VERSION}
-  Note over AI: profile_runs(v5) SUPERSEDED · 재시도 없음
+  AI->>BE: POST 7.7 (v5) — 늦은 재전송
+  BE-->>AI: 409 STALE_SOURCE_VERSION
+  Note over AI: profile_runs(v5) SUPERSEDED
 ```
 
 ### 4.4 실패 — AI 처리 실패(침묵) → PENDING 타임아웃 → FAILED → 자동 재전송
@@ -370,18 +367,16 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant BE as Backend
-  participant AI as AI 프로파일링
+  participant AI as AI
   participant DB as AI DB
   BE->>AI: POST 7.6 (v)
   AI->>DB: profile_runs(v) RUNNING
-  AI-->>BE: 202 → PENDING, pending_since 기록
-  AI--xDB: 결과 저장 실패 (예: DB 연결 끊김)
-  Note over AI: profile_runs(v) FAILED {code: STORE_FAILED} · 7.7 보내지 않음 (AI는 침묵)
-  Note over BE: 10분 경과 · last_changed_at 비어 있음
-  BE->>BE: profile_status = FAILED
-  Note over BE: 재전송(09-25): retry_count < 2 면 같은 번호로 다시 보낸다
-  BE->>AI: POST 7.6 (같은 v)
-  AI->>DB: get_run(수신자, v) → FAILED 이므로 다시 분석 (attempt=2)
+  AI-->>BE: 202 → PENDING
+  AI--xDB: 결과 저장 실패
+  Note over AI: FAILED · 7.7 없음 (침묵)
+  Note over BE: 10분 경과 → FAILED (9/22 안)
+  BE->>AI: POST 7.6 (같은 v) — 재전송
+  AI->>DB: get_run → FAILED → 다시 분석
   AI-->>BE: 202 → PENDING
   AI->>DB: RESULT_READY
   AI->>BE: POST 7.7 (v)
@@ -397,17 +392,17 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant BE as Backend
-  participant AI as AI 프로파일링
+  participant AI as AI
   BE->>AI: POST 7.6 (v)
-  AI-->>BE: 202 (BE 쪽 트랜잭션은 아직 열려 있음)
-  AI->>BE: POST 7.7 (v) — 202 뒤 50ms
-  BE->>BE: v ≥ analyzed → 저장, COMPLETED(v)
+  AI-->>BE: 202 (BE 트랜잭션 열림)
+  AI->>BE: POST 7.7 (v) — 50ms 뒤
+  BE->>BE: 저장 · COMPLETED(v)
   BE-->>AI: 200
-  BE->>BE: 202 처리 계속 — PENDING으로 바꾸려 함
-  alt 조건부 갱신: analyzed(v) < source_version(v) ? → 아니오
+  BE->>BE: 202 처리 계속
+  alt 조건부 갱신 (analyzed < source_version ?)
     Note over BE: COMPLETED 유지 ✓
   else 무조건 갱신
-    Note over BE: PENDING으로 덮음 ✗ → 10분 뒤 FAILED 오판
+    Note over BE: PENDING으로 덮음 ✗
   end
 ```
 
@@ -420,21 +415,20 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant BE as Backend
-  participant AI as AI 프로파일링
+  participant AI as AI
   participant DB as AI DB
-  BE->>AI: POST 7.6 (sourceVersion v) — 최초
-  AI-->>BE: 202 PENDING · retry_count 0
-  AI->>DB: profile_runs(v) RUNNING → RESULT_READY + 콜백 본문
-  AI--xBE: POST 7.7 (v) — 유실 또는 5xx
-  Note over BE: PENDING 10분 경과 · retry_count(0) < 2
-  BE->>BE: retry_count = 1 (조건부 원자 갱신)
+  BE->>AI: POST 7.6 (v) — 최초
+  AI-->>BE: 202 PENDING
+  AI->>DB: RUNNING → RESULT_READY + 콜백 본문
+  AI--xBE: POST 7.7 (v) — 유실 · 5xx
+  Note over BE: PENDING 10분 경과 (9/22 안)
   BE->>AI: POST 7.6 (같은 v · 같은 본문)
-  AI->>DB: get_run(수신자, v) → RESULT_READY · input_hash 같음
-  AI-->>BE: 202 PENDING (분석은 돌리지 않는다)
-  AI->>BE: POST 7.7 (v) — 저장해 둔 그 30개 그대로
-  BE->>BE: 저장 · COMPLETED · retry_count = 0
+  AI->>DB: get_run → RESULT_READY · input_hash 같음
+  AI-->>BE: 202 PENDING (분석 없음)
+  AI->>BE: POST 7.7 (v) — 저장해 둔 30개
+  BE->>BE: 저장 · COMPLETED
   BE-->>AI: 200
-  AI->>DB: profile_runs(v) DELIVERED · callback_attempts 2 · attempt 1
+  AI->>DB: profile_runs(v) DELIVERED
 ```
 
 분석이 아직 돌고 있으면(`RUNNING`) AI는 **아무것도 하지 않고** 202만 준다 — 원래 실행이 끝나면 콜백이 간다. 실패했거나(`FAILED`) 죽은 `RUNNING`(5분 초과)이면 다시 분석한다.

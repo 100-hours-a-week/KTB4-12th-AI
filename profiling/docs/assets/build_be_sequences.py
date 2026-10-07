@@ -1,5 +1,6 @@
 """docs 안의 mermaid 시퀀스 다이어그램을 PNG로 — `<!-- fig: 이름 -->` 표시가 붙은 ```mermaid 블록만.
-python3 build_be_sequences.py  (Chrome 헤드리스 + mermaid CDN. 인터넷 필요)
+python3 build_be_sequences.py [이름…]  (Chrome 헤드리스 + mermaid CDN. 인터넷 필요)
+  이름을 주면 문서 이름·그림 폴더 이름에 그 글자가 든 것만 다시 그린다 (예: seq erd 학습_가이드). 없으면 전부.
   BE_연동_필드표_v1|v2|v3.md → docs/assets/be-seq/<v1|v2|v3>/<이름>.png
   시퀀스_전체.md              → docs/assets/seq/<이름>.png
   DB_ERD.md                   → docs/assets/erd/<이름>.png
@@ -47,7 +48,10 @@ def main() -> int:
     if not pairs:
         print("그릴 문서 없음", file=sys.stderr)
         return 1
+    only = sys.argv[1:]
     for doc, out in pairs:
+        if only and not any(o in doc.name or o in out.name or o in out.parent.name for o in only):
+            continue
         out.mkdir(parents=True, exist_ok=True)
         text = doc.read_text(encoding="utf-8")
         figs = re.findall(r"<!-- fig: ([\w-]+) -->\s*```mermaid\n(.*?)```", text, re.S)

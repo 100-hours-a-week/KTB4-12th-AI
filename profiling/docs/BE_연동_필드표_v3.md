@@ -82,24 +82,22 @@ sequenceDiagram
   autonumber
   participant U as 수신자
   participant BE as Backend
-  participant AI as AI 프로파일링
+  participant AI as AI
   participant M as 모델(LLM)
   participant DB as AI DB
-  U->>BE: 리뷰 작성 / 취향 문장 저장
+  U->>BE: 리뷰 · 취향 문장 저장
   BE->>BE: last_changed_at 기록
   Note over BE: 디바운스 1h (최대 6h)
-  BE->>BE: source_version += 1 → v (요청보다 먼저 저장)
-  BE->>AI: POST 7.6 {…, giftPreference, reviews[≤10]}
+  BE->>BE: source_version += 1 → v
+  BE->>AI: POST 7.6 (v, giftPreference, reviews ≤10)
   AI->>DB: profile_runs(v) RUNNING
   AI-->>BE: 202 PENDING
-  BE->>BE: 조건부 PENDING (v1 §3.4 ②)
-  AI->>AI: 리뷰 productId → 카탈로그 조인 (상품명·카테고리·설명)
-  AI->>M: 태그 추출 1회 (JSON 스키마 강제)
-  M-->>AI: 태그 초안 {likes, dislikes, key_features}
-  AI->>AI: 검증기 — 근거 대조·비선호 충돌·상한 (코드, 모델 없음)
-  AI->>AI: 검색 — 3축 가중 → 30개
-  AI->>DB: profile_runs(v) RESULT_READY · recipient_profiles upsert (태그 보관)
-  AI->>BE: POST 7.7 {recipientUserId, sourceVersion: v, profileStatus: COMPLETED, recommendedProductIds[≤30]}
+  AI->>AI: 리뷰 상품 조인
+  AI->>M: 태그 추출
+  M-->>AI: {likes, dislikes, key_features}
+  AI->>AI: 검증기 → 검색 30개
+  AI->>DB: RESULT_READY · recipient_profiles upsert
+  AI->>BE: POST 7.7 (v, COMPLETED, recommendedProductIds ≤30)
   BE-->>AI: 200 → COMPLETED
   AI->>DB: DELIVERED
 ```
@@ -113,20 +111,18 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant BE as Backend
-  participant AI as AI 프로파일링
+  participant AI as AI
   participant M as 모델(LLM)
   participant DB as AI DB
   BE->>AI: POST 7.6 (v, 리뷰 포함)
-  AI-->>BE: 202 PENDING, pending_since 기록
+  AI-->>BE: 202 PENDING
   AI->>M: 태그 추출
   M--xAI: 타임아웃
-  AI->>M: 재시도 (예산 안에서)
+  AI->>M: 재시도
   M--xAI: 파싱 실패
-  Note over AI: 재시도 소진 → profile_runs(v) FAILED {code: PIPELINE_ERROR} · 7.7 보내지 않음
-  Note over BE: PENDING 10분 · 대기 중 수정 없음
-  BE->>BE: profile_status = FAILED
-  Note over BE: 권장: last_changed_at = now() → 1~2회 자동 재전송 (v1 §3.4 ⑤)
-  BE->>AI: POST 7.6 (같은 v)
+  Note over AI: FAILED · PIPELINE_ERROR · 7.7 없음
+  Note over BE: PENDING 10분 → FAILED (9/22 안)
+  BE->>AI: POST 7.6 (같은 v) — 재전송
   AI->>DB: 같은 행 RUNNING attempt=2
   AI-->>BE: 202 PENDING
   AI->>M: 태그 추출
