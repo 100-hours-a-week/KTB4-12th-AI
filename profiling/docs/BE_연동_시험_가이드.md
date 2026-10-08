@@ -161,6 +161,18 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:8080/api/internal/v1/recipi
 
 ## 7. 시험 D — 장애 재현
 
+> **10-08 갱신 — BE가 통합 수정점 v0.7을 구현한 뒤의 장애 시험은 [`drive_v07.py`](../tools/be_integration/drive_v07.py)로 돌린다.** 아래 D1·D2는 v0.7 **이전** BE의 동작을 적은 것이라, 지금은 "이렇게 되면 안 된다"의 기준으로만 읽는다. 결과는 [BE_연동_시험_결과_2026-10-08.md](BE_연동_시험_결과_2026-10-08.md).
+>
+> | 시나리오(명령) | 왜 하나 | 기대 |
+> |---|---|---|
+> | S1 `s1` | 연동의 바닥 — 저장 후 디바운스+틱 안에 7.6 → 7.7 → COMPLETED | 10~20초 안 완주 |
+> | S2 `s2-observe` → AI 켜기 → `s2-recover` | D1: AI 꺼짐에 번호만 오르던 결함. 핑이 틱을 건너뛰고 복구 뒤 한 번만 나가야 | 번호 유지 → 복구 뒤 새 번호 1건 |
+> | S3/S4 `s34-start`(콜백 불통 AI) → 정상 AI → `s34-finish` | D2: 7.7 불통 → PENDING 고착·이후 변경 차단. PENDING 중 새 번호(⑧)와 maximum-window 뒤 같은 번호 복구(⑤), AI 재전송. **A5**: 대체된 미전달 행 SUPERSEDED·undelivered 0 | v2 새 번호 → 60초 뒤 복구 → 완주 · v1 SUPERSEDED |
+> | S5 `s5-start`(토큰 틀린 AI) → 정상 AI → `s5-finish` | ②⑥: 재시도 불가 실패는 디바운스 재시작 1회 뒤 접음. 접은 변경은 다음 변경까지 유실 | retry 0→1→0 · 30초 무발송 · 다음 변경 정상 |
+> | S6 `docker stop profiling-ai-db` → `s6-observe` → `docker start` → `s6-recover` | ①의 둘째 조건: 프로세스는 살아도 DB가 죽으면 `/health` 200 + 두 false → BE 틱 건너뜀 | 번호 유지 → DB 복구 0.1초 뒤 새 번호 1건 |
+>
+> 주의: BE 비선호 저장은 **멱등**이라 같은 집합을 다시 저장하면 7.6이 안 나간다 — 드라이버가 지금 값과 다른 집합을 고른다(`changed_set`).
+
 ### D1. AI가 꺼진 동안 취향 변경 (BE의 7.6 실패 처리)
 
 1) 터미널 A에서 AI를 Ctrl+C로 내린다. 2) 사용자 2로 §5의 로그인·저장을 한다. 3) BE 행을 3초마다 본다:
