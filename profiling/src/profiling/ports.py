@@ -79,7 +79,7 @@ class ProfileRunStore(Protocol):
     def get_run(self, recipient_user_id: int, source_version: int) -> ProfileOutcome | None:
         """그 (수신자, 원본 버전) 한 행. 없으면 None.
 
-        접수 단계 중복 판정이 쓴다 — Backend가 같은 sourceVersion으로 재전송하면(10분 PENDING 타임아웃, 최대 2회)
+        접수 단계 중복 판정이 쓴다 — Backend가 같은 sourceVersion으로 복구 전송하면(PENDING이 maximum-window ⚙6h를 넘었을 때, v0.7 ⑤)
         이미 도는 분석을 또 돌리거나 이미 만든 결과를 다시 만들지 않기 위해. get()은 "최신 한 건"이라 키를 지정해 찾을 수 없다.
         반환값의 updated_at으로 RUNNING이 아직 살아 있는지 본다.
         """

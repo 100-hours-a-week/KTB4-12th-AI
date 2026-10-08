@@ -276,6 +276,27 @@ def test_undelivered_count_counts_result_ready(engine, stores) -> None:
         runs.delete_recipient(rid)
 
 
+
+def test_delivered_supersedes_older_undelivered_rows(stores) -> None:
+    """10-08 실측 S3: 콜백 불통으로 v1 이 RESULT_READY 로 남은 채 v2 가 DELIVERED 되면 v1 은 Backend 가 다시 묻지 않는 번호다.
+    save(DELIVERED) 가 그보다 낮은 RESULT_READY 를 SUPERSEDED(CALLBACK_STALE) 로 내려 undelivered 에서 뺀다. 더 높은 번호는 건드리지 않는다."""
+    runs, _ = stores
+
+    def ready(sv: int) -> ProfileOutcome:
+        return ProfileOutcome(recipient_user_id=RID, source_version=sv, status=RunStatus.RESULT_READY, input_hash=f"h{sv}",
+                              search=SearchResult(product_ids=[1], query_text="", catalog_version_id=FILE_CATALOG_VERSION_ID))
+
+    for sv in (1, 2, 3):
+        runs.save(ready(sv))
+    before = runs.undelivered_count()
+    runs.save(ready(2).model_copy(update={"status": RunStatus.DELIVERED, "callback_attempts": 1}))
+    v1, v2, v3 = (runs.get_run(RID, sv) for sv in (1, 2, 3))
+    assert v1.status is RunStatus.SUPERSEDED and v1.failure_code is ErrorCode.CALLBACK_STALE and "v2" in v1.failure_reason
+    assert v2.status is RunStatus.DELIVERED
+    assert v3.status is RunStatus.RESULT_READY                      # 더 높은 번호는 그대로 — 아직 전달 대상
+    assert runs.undelivered_count() == before - 2                   # v1(대체) · v2(전달) 둘이 빠지고 v3 만 남는다
+
+
 def test_run_lock_does_not_leave_transaction_open(engine) -> None:
     """이슈 2026-09-27_1633 A — 잠금을 든 커넥션이 작업 내내 `idle in transaction` 이면 안 된다.
 

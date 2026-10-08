@@ -140,8 +140,8 @@ app.include_router(intake.router)
 def _error_response(status: int, code: str, message: str, trace_id: str | None = None, *, retry_after: int | None = None) -> JSONResponse:
     """문서 1 §3 오류 봉투 {message, error: {code, traceId}}. 모든 오류 응답은 이 함수만 거친다.
 
-    503 에는 `Retry-After` 를 붙인다 — 활성 카탈로그는 사람이 적재해야 돌아오므로 Backend 가 곧바로 다시 보내면
-    의미 없는 요청만 쌓인다(그동안 sourceVersion 만 올라간다). 필드표 v1 §3.6 이 이 헤더를 전제로 쓰여 있다.
+    503 에는 `Retry-After` 를 붙인다. **Backend 는 이 헤더를 읽지 않는다**(통합 수정점 v0.7, 10-08 실측) — 503 을 재시도 가능
+    실패로 보고 틱을 끝내며 디바운스를 1회 재시작한다(두 번째면 접음). 헤더는 운영자·다른 호출자를 위한 표준 힌트로 남긴다.
     retry_after 가 오면 그 값(예: 대기열 가득은 QUEUE_FULL_RETRY_AFTER_S), 없으면 RETRY_AFTER_S(카탈로그 없음).
     """
     body = ErrorResponse(message=message, error=ErrorBody(code=code, traceId=trace_id))
@@ -176,7 +176,8 @@ async def on_http_error(request: Request, exc: StarletteHTTPException) -> JSONRe
 
 @app.exception_handler(Exception)
 async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
-    """잡히지 않은 예외 → 500 INTERNAL_SERVER_ERROR. Backend는 다음 디바운스 주기에 재시도한다(문서 1 §7.6)."""
+    """잡히지 않은 예외 → 500 INTERNAL_SERVER_ERROR. Backend 는 재시도 가능 실패로 보고 틱을 끝내며 디바운스를 1회 재시작한다
+    (통합 수정점 v0.7 ②③, 10-08 실측 — 위키 7.6 의 "다음 디바운스 주기에 재시도"는 옛 문구)."""
     log.exception("500 %s", request.url.path)
     return _error_response(500, "INTERNAL_SERVER_ERROR", "서버 오류가 발생했습니다.")
 
@@ -184,6 +185,10 @@ async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
 @app.get("/health", tags=["ops"])
 async def health(request: Request) -> dict:
     """살아 있는지 + 활성 카탈로그가 있는지. 카탈로그가 없어도 200 — 프로세스는 살아 있으므로(7.6은 503).
+
+    **BE 핑 계약(통합 수정점 v0.7 ①, 10-08 실측):** Backend 는 틱마다 토큰 없이 `GET /health`(2초 타임아웃)를 부르고,
+    200 이면서 `catalog.active` 와 `store.connected` 가 **둘 다 true** 일 때만 7.6 을 보낸다 — 아니면 번호를 올리지 않고 틱을 건너뛴다.
+    이 두 키의 이름·뜻·타입(bool)을 바꾸면 Backend 가 모든 틱을 건너뛴다. tests/unit/test_health_contract.py 가 지킨다.
 
     async 라 기본 스레드풀 토큰을 쓰지 않는다. DB 문장 셋은 io_limiter(별도 스레드)에서 — 실행 대기가 쌓여도 /health 는 답한다(09-28).
     """

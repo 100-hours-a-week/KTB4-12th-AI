@@ -94,6 +94,17 @@ _RUN_UPSERT = sa.text(f"""
         updated_at         = now()
     returning id, attempt""")
 
+## 더 새 번호가 Backend 에 반영됐을 때(DELIVERED · 409 SUPERSEDED) 그보다 낮은 번호의 미전달(RESULT_READY) 행 — Backend 는 최신 번호만
+## 복구 전송하므로 다시 묻지 않는 번호다. 그대로 두면 /health 의 undelivered 가 영영 1 이상으로 고정된다(10-08 실측 S3: v1).
+_SUPERSEDE_OLDER = sa.text(f"""
+    update {RUNS_TABLE}
+       set status = 'SUPERSEDED',
+           error = cast(:error as jsonb),
+           updated_at = now()
+     where recipient_user_id = :rid
+       and source_version < :sv
+       and status = 'RESULT_READY'""")
+
 _RUN_COLUMNS = ("recipient_user_id, source_version, input_hash, status, catalog_version_id, "
                 "callback_payload, callback_attempts, error, updated_at")
 
@@ -176,6 +187,16 @@ class DbProfileRunStore:
         run_id, attempt = _one(self._engine, _RUN_UPSERT, params, lambda r: r.one(), write=True)
         log.debug("profile_runs recipient=%s source_version=%s → %s (id=%s attempt=%s callback_attempts=%s)",
                   outcome.recipient_user_id, outcome.source_version, outcome.status, run_id, attempt, outcome.callback_attempts)
+        if outcome.status in (RunStatus.DELIVERED, RunStatus.SUPERSEDED):
+            # 이 번호가 Backend 에 반영됐다(또는 더 새 것이 이미 있다) → 낮은 번호의 미전달 행은 다시 보낼 일이 없다. 문장 하나, 멱등.
+            reason = f"더 새 번호 v{outcome.source_version}가 Backend에 반영됨 — Backend가 다시 묻지 않는 번호"
+            superseded = _one(self._engine, _SUPERSEDE_OLDER,
+                              {"rid": outcome.recipient_user_id, "sv": outcome.source_version,
+                               "error": json.dumps({"code": ErrorCode.CALLBACK_STALE.value, "reason": reason}, ensure_ascii=False)},
+                              lambda r: r.rowcount, write=True)
+            if superseded:
+                log.info("profile_runs recipient=%s: v%s 보다 낮은 미전달 행 %d건을 SUPERSEDED 로 내림",
+                         outcome.recipient_user_id, outcome.source_version, superseded)
 
     def get(self, recipient_user_id: int) -> ProfileOutcome | None:
         row = _one(self._engine, _RUN_LATEST, {"rid": recipient_user_id}, lambda r: r.mappings().first(), write=False)
@@ -261,7 +282,7 @@ class DbProfileRunStore:
         """결과는 있는데 Backend 에 전달하지 못한 행 수(RESULT_READY). /health 가 보여준다.
 
         0 이 정상이다. 늘어나면 7.7 경로(네트워크·Backend 5xx)에 문제가 있다는 뜻이고, 그 행들은 Backend 가
-        같은 번호로 다시 보낼 때 재전송된다.
+        같은 번호로 복구 전송할 때 재전송된다. 더 새 번호가 반영돼 다시 묻지 않을 행은 save() 가 SUPERSEDED 로 내려 여기 세지 않는다(10-08).
         """
         return _one(self._engine, sa.text(f"select count(*) from {RUNS_TABLE} where status = 'RESULT_READY'"), {},
                     lambda r: r.scalar_one(), write=False)

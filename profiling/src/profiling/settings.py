@@ -77,21 +77,21 @@ class Settings(BaseSettings):
     RUNNING_STALE_S: int = Field(
         default=300, ge=1,
         description="RUNNING 기록을 '죽은 실행'으로 보는 기준(초). 접수 단계 중복 판정이 쓴다 — 이보다 오래된 RUNNING은 "
-                    "프로세스가 죽어 남은 행으로 보고 다시 분석한다. Backend의 PENDING 타임아웃(10분)보다 짧아야 "
-                    "Backend 재전송이 의미를 갖는다",
+                    "프로세스가 죽어 남은 행으로 보고 다시 분석한다. Backend 의 복구 전송 간격(maximum-window ⚙6h)보다 훨씬 짧아야 "
+                    "복구 전송이 '이미 분석 중'에 막히지 않고 재분석으로 이어진다(v0.7 ⑤)",
     )
 
     # ---- 운영
     RETRY_AFTER_S: int = Field(
         default=300, ge=1,
-        description="503(활성 카탈로그 없음) 응답에 실어 보내는 Retry-After 초. Backend 가 언제 다시 보낼지 정하는 근거 "
-                    "(BE_연동_필드표 v1 §3.6). 없으면 Backend 가 매 주기 곧바로 다시 보낸다",
+        description="503(활성 카탈로그 없음) 응답에 실어 보내는 Retry-After 초. Backend 는 이 헤더를 읽지 않는다"
+                    "(통합 수정점 v0.7, 10-08 실측) — 운영자·다른 호출자용 표준 힌트로만 남긴다",
     )
     QUEUE_MAX: int = Field(
         default=200, ge=1,
-        description="접수 대기열 상한(건). 슬롯이 다 찼을 때 큐에 둘 수 있는 수 — BE 배치(100) 두 번이 시작값. 넘치면 7.6 을 "
-                    "503 + Retry-After(QUEUE_FULL_RETRY_AFTER_S) 로 거절하고 Backend 가 같은 번호로 다시 보낸다(BE 계획 5-1). "
-                    "대기는 큐에서 하므로 스레드풀 토큰을 쓰지 않는다(09-28)",
+        description="접수 대기열 상한(건). 슬롯이 다 찼을 때 큐에 둘 수 있는 수. 넘치면 7.6 을 503 으로 거절하는데, Backend 는 503 을 "
+                    "재시도 가능 실패로 보고 틱을 끝내며 디바운스를 1회만 재시작한다(두 번째면 접음, v0.7 ②③). 그래서 BE 틱당 "
+                    "일반 ⚙100 + 복구 ⚙50 = 150 보다 커야 한다(BE 도 150 ≤ 200 을 검증). 대기는 큐에서 하므로 스레드풀 토큰을 쓰지 않는다(09-28)",
     )
     QUEUE_FULL_RETRY_AFTER_S: int = Field(
         default=30, ge=1,
@@ -104,8 +104,8 @@ class Settings(BaseSettings):
     )
     SHUTDOWN_DRAIN_S: float = Field(
         default=5.0, ge=0,
-        description="종료 시 실행 중인 분석을 기다리는 최대 초. 큐에 남은 것은 버린다(Backend 가 PENDING 타임아웃 뒤 같은 번호로 "
-                    "재전송). compose 종료 유예 10초보다 짧게",
+        description="종료 시 실행 중인 분석을 기다리는 최대 초. 큐에 남은 것은 버린다(Backend 가 maximum-window 뒤 같은 번호로 "
+                    "복구 전송). compose 종료 유예 10초보다 짧게",
     )
     LOG_LEVEL: str = Field(default="INFO", description="logging 레벨 이름")
 

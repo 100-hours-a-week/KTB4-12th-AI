@@ -29,8 +29,9 @@ ProfileExtractErrorCode = Literal[
     "INVALID_REQUEST",  # 400 — 필수 필드 누락·타입 오류·reviews 10개 초과·rating 범위 밖. Backend 재시도 안 함
     "UNAUTHORIZED",  # 401 — 서비스 토큰 오류
     "FORBIDDEN",  # 403 — 접근 권한 없음
-    "INTERNAL_SERVER_ERROR",  # 500 — Backend가 다음 디바운스 주기에 재시도
-    "SERVICE_UNAVAILABLE",  # 503 — 활성 카탈로그 없음·모델 서버 다운. Backend가 다음 주기에 재시도
+    "INTERNAL_SERVER_ERROR",  # 500 — Backend: 재시도 가능 실패 → 틱 중단 + 디바운스 재시작 1회, 두 번째 실패면 접음(통합 수정점 v0.7 ②③, 10-08 실측)
+    "SERVICE_UNAVAILABLE",  # 503 — 활성 카탈로그 없음·대기열 가득. Backend 처리는 500과 같다(Retry-After 는 읽지 않음).
+                             #       카탈로그 없음은 보통 /health 핑(catalog.active=false)에서 먼저 걸러져 7.6 자체가 오지 않는다
 ]
 
 ## 7.7 오류 코드 — AI가 콜백을 보낸 뒤 Backend에게 받는 것

@@ -9,6 +9,7 @@ Transport 역할만 한다: 인증 → 스키마 검증 → 활성 카탈로그 
   400 INVALID_REQUEST     스키마 위반 — FastAPI 기본 422를 main.py의 exception_handler가 400 봉투로 바꾼다 (여기서는 안 함)
   401 UNAUTHORIZED        Authorization 헤더 없음 · Bearer 아님 · 토큰 불일치
   503 SERVICE_UNAVAILABLE 활성 카탈로그 없음(Retry-After 300) · 접수 대기열 가득(Retry-After QUEUE_FULL_RETRY_AFTER_S, 09-28)
+                          — Retry-After 는 Backend 가 읽지 않는다(통합 수정점 v0.7, 10-08 실측). 503 은 재시도 가능 실패로 틱 중단 + 디바운스 재시작 1회
   실패한 분석은 7.6에도 7.7에도 FAILED를 보내지 않는다 (AI는 침묵, Backend가 판정)
 """
 
@@ -125,7 +126,8 @@ def run_and_callback(
 
     - 여기서 나는 예외는 응답과 무관하므로(이미 202를 보냈다) 로그로만 남긴다. 죽은 백그라운드 작업은 조용히 사라지기 때문에
       반드시 잡아서 기록해야 한다.
-    - FAILED는 콜백하지 않는다. Backend는 콜백이 오지 않으면 다음 디바운스 주기에 다시 7.6을 호출한다.
+    - FAILED는 콜백하지 않는다. Backend는 콜백이 오지 않으면 PENDING이 maximum-window(⚙6h)를 넘긴 뒤 **같은 번호로 복구 전송**한다
+      (통합 수정점 v0.7 ⑤, 10-08 실측). 그때 decide()가 FAILED 행을 보고 다시 분석한다.
     - 콜백 결과(RunStatus: DELIVERED·SUPERSEDED·FAILED·RESULT_READY)를 같은 행에 저장한다 — profile_runs.status·callback_attempts.
       RESULT_READY(5xx·네트워크)면 행은 "결과 있음·미전달"로 남아 재전송 대상이 된다. 재시도·백오프 자체는 #23.
     """
@@ -189,7 +191,8 @@ def _send_and_record(
 
 # ---------------------------------------------------------------------------
 # 접수 단계 중복 판정 — 같은 (수신자, sourceVersion)이 또 왔을 때 무엇을 할까
-# (3단계 구현 상세 §10.2 · Backend는 10분 PENDING 타임아웃 시 같은 번호로 최대 2회 재전송한다)
+# (3단계 구현 상세 §10.2 · Backend는 PENDING이 maximum-window(⚙6h)를 넘으면 같은 번호로 **복구 전송**한다 — 창마다 반복, 틱당 ⚙50.
+#  통합 수정점 v0.7 ⑤, 10-08 실측. 옛 모델 "10분 타임아웃 · 같은 번호 최대 2회"(09-25)는 폐기됐다)
 # ---------------------------------------------------------------------------
 
 ANALYZE, RESEND, SKIP = "analyze", "resend", "skip"
@@ -253,7 +256,7 @@ def dispatch(
     """**잠금 → 판정 → 실행**을 한 덩어리로. Supervisor 워커 스레드(슬롯) 하나에서 끝까지 돈다.
 
     판정을 접수(HTTP) 쪽에 두면 "읽고 나서 쓰기까지" 사이가 벌어져, 같은 (수신자, 버전)이 동시에 오면
-    둘 다 "기록 없음"을 보고 둘 다 분석한다. Backend 는 같은 번호로 최대 2회 재전송하므로 실제로 겹칠 수 있다.
+    둘 다 "기록 없음"을 보고 둘 다 분석한다. Backend 는 복구 전송으로 같은 번호를 다시 보내므로(v0.7 ⑤) 실제로 겹칠 수 있다.
     그래서 판정과 그 실행을 같은 잠금 안에 넣는다 — 잠금을 못 얻으면 다른 실행이 그 키를 처리 중이라는 뜻이니
     이번 것은 할 일이 없다.
     """
@@ -298,7 +301,8 @@ async def extract_and_pool(
       3) 활성 카탈로그 — 없으면 지금 503. 백그라운드에서 발견하면 Backend는 영영 모르기 때문에 접수 단계에서 걸러야 한다
       4) Supervisor 큐에 제출 — 가득이거나 종료 중이면 503 + Retry-After(QUEUE_FULL_RETRY_AFTER_S). 기다리지 않는다
       5) 202 — 요청 값 그대로 + PENDING
-    같은 (수신자, 버전)의 중복 접수: Backend는 10분 PENDING 타임아웃 시 **같은 sourceVersion으로 최대 2회** 재전송한다(09-25 합의).
+    같은 (수신자, 버전)의 중복 접수: Backend는 PENDING이 maximum-window(⚙6h)를 넘으면 **같은 sourceVersion으로 복구 전송**한다
+    (통합 수정점 v0.7 ⑤, 10-08 실측 — 창마다 반복, 틱당 ⚙50. 새 변경이 있으면 복구 대신 새 번호).
     그 판정(decide)은 워커 스레드의 슬롯 안에서 한다 — dispatch() 참고. 어느 쪽이든 응답은 202 PENDING이다
     (Backend 입장에서는 "접수됐다"가 전부이고, 결과는 7.7로 간다).
     """
@@ -319,7 +323,8 @@ async def extract_and_pool(
     # 중복 판정은 **슬롯 안에서** 한다(dispatch) — 판정과 실행 사이가 벌어지면 같은 요청이 동시에 와서 분석이 두 벌 돈다
     accepted = supervisor.submit(dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S,
                                  settings.CALLBACK_MAX_ATTEMPTS, settings.CALLBACK_BACKOFF_S)
-    if not accepted:   # 큐 가득·종료 중 — 기다리지 않고 거절. Backend 는 Retry-After 뒤 같은 번호로 다시 보낸다(BE 계획 5-1)
+    if not accepted:   # 큐 가득·종료 중 — 기다리지 않고 거절. Backend 는 Retry-After 를 읽지 않고 503 을 재시도 가능 실패로 본다:
+                       # 틱 중단 + 디바운스 재시작 1회, 두 번째면 접음(v0.7 ②③). 그래서 QUEUE_MAX 는 BE 틱당 일반 ⚙100 + 복구 ⚙50 보다 커야 한다
         log.warning("7.6 거절 recipient=%s source_version=%s — 접수 대기열 가득(%d) 또는 종료 중 → 503 Retry-After %ds",
                     body.recipientUserId, body.sourceVersion, settings.QUEUE_MAX, settings.QUEUE_FULL_RETRY_AFTER_S)
         raise _error(503, "SERVICE_UNAVAILABLE", "접수 대기열이 가득 찼습니다.", retry_after=settings.QUEUE_FULL_RETRY_AFTER_S)
