@@ -25,7 +25,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 |---|---|
 | `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · **Backend 생애주기 흉내**(`lifecycle.py` — 디바운스→7.6→202→실패·타임아웃 시 같은 번호 재시도 2회(`Retry-After`·백오프)→FAILED) |
 | `tools/loadtest/` | **부하 시험 하네스** `run.py` — 7.6 동시 N건 · `/health` 지연 · `profile_runs` 시각 · `pg_stat_activity` · 정리 · BE 구동 SQL 3종. 절차는 [tools/loadtest/README.md](tools/loadtest/README.md), 결과는 `docs/부하_시험_결과_2026-09-29.md`(팀 공유용 before/after) · `…_2026-09-28.md`(기준선) |
-| `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버** `drive.py` — 로그인 → 비선호 저장 → 7.6 관찰 → 대분류 제외 검증 → (옵션) AI 다운 시 BE 재시도 관찰. 절차는 `docs/BE_연동_시험_결과_2026-09-27.md` §7 |
+| `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버** `drive.py` — 로그인 → 비선호 저장 → 7.6 관찰 → 대분류 제외 검증 → (옵션) AI 다운 시 BE 재시도 관찰. 절차는 `docs/BE_연동_시험_결과_2026-09-27.md` §7. **`drive_v07.py`** — 10-08 v0.7 반영판 시험(단계별 명령 reset·s1·s2·s34·s5·report, 서버 켜고 끄기는 바깥에서) |
 | `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
 | `tools/catalog/load_catalog.py` | Backend 전달 패키지 → `ai_catalog` 적재 · 회신 반영(`--id-map` · `--metrics`) |
 | `tools/catalog/import_be_ids.py` | Backend 회신 xlsx 2종 → id-map · metrics jsonl (이름으로 매칭, 1:1 보장). 결과는 `tools/catalog/returned/날짜/` |
@@ -41,6 +41,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | [docs/FE_연동_시험_시나리오.md](docs/FE_연동_시험_시나리오.md) | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
 | [docs/BE_연동_시험_가이드.md](docs/BE_연동_시험_가이드.md) | **BE 실물 연동을 혼자 돌리는 절차** — DB·AI·BE 켜기 순서, 초기화 SQL, 자동 드라이버·수동 한 바퀴·콜백 오류 응답·장애 재현(AI 꺼짐·7.7 불통), 확인 SQL, 10-06 정상값 |
 | [docs/BE_연동_시험_결과_2026-09-27.md](docs/BE_연동_시험_결과_2026-09-27.md) | **BE `develop` 실물 연동 시험** — 7.6·202·대분류 제외 정상, 7.7은 PR3 전이라 401, AI 다운 시 새 번호 반복·PENDING 고착 실측. §7 재현 절차 |
+| [docs/BE_연동_시험_결과_2026-10-08.md](docs/BE_연동_시험_결과_2026-10-08.md) | **BE `develop` v0.7 반영판 실물 시험(10-08)** — AI 꺼짐·콜백 불통·PENDING 중 재변경·7.6 401 다섯 시나리오 통과, D1·D2 해소. `/health` 두 필드가 BE 계약, 같은 번호 재전송 실측 |
 | [docs/FE_연동_시험_결과_2026-09-25.md](docs/FE_연동_시험_결과_2026-09-25.md) | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
 | [docs/부하_시험_결과_2026-09-29.md](docs/부하_시험_결과_2026-09-29.md) | **부하 시험 재측정 보고(팀 공유용)** — 무엇을 어디서 어떻게 왜 바꿨나(Supervisor 워커+상한 큐 · DB 왕복 34→8 · 슬롯 env) + 시나리오 9종 before/after: 느린 콜백에서 `/health` 실패 15 → 0, 굶는 동안 접수 34.5초 → 6.5ms, 300건은 큐 200에서 503, BE 실물 p50 17.5 → 6.8ms. 하네스 keep-alive 한계와 `--no-keepalive` |
 | [docs/부하_시험_결과_2026-09-28.md](docs/부하_시험_결과_2026-09-28.md) | **부하 시험 기준선과 after** — 동시 100·300 · 슬롯 1·4 · 느린 콜백(500·timeout)에서 `/health` 150초·접수 34.5초 굶음 재현(§4) → 왕복 34→8(§10·§11) → Supervisor 수정 뒤 `/health` 최대 57ms·추가 접수 13ms(§12) · BE 실물 200건. 하네스 [tools/loadtest/README.md](tools/loadtest/README.md) |
