@@ -75,6 +75,8 @@ def _trim(png: Path) -> None:
         from PIL import Image, ImageChops
     except ImportError:
         return
+    # 직접 찍은 로컬 캡처라 압축 폭탄 검사가 필요 없다. 창 높이를 줄 수 × 120px 로 넉넉히 잡아 2배율이면 PIL 기본 상한(약 1.79억 px)을 넘는다(10-11 ERD)
+    Image.MAX_IMAGE_PIXELS = None
     im = Image.open(png).convert("RGB")
     bg = Image.new("RGB", im.size, (255, 255, 255))
     box = ImageChops.difference(im, bg).getbbox()

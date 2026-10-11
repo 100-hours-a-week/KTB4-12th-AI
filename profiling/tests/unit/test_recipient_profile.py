@@ -123,10 +123,25 @@ def test_review_hash_is_stable_and_normalizes_text() -> None:
     assert rp.review_hash(Review(product_id=1, rating=5)) == rp.review_hash(Review(product_id=1, rating=5, review_text="  "))   # 없음 = 공백
 
 
-def test_to_review_records_keeps_first_per_product_and_blank_text_is_none() -> None:
+def test_to_review_records_keeps_first_per_product_without_text() -> None:
+    """상품당 앞의 것(최신)만 · 글은 행에 없고 해시에만 들어간다(10-11 결정 B — 원문 저장 안 함)."""
     rows = rp.to_review_records(_reviews((7, 5, " "), (8, 2, "별로"), (7, 1, "두 번째")))
-    assert [(r.product_id, r.rating, r.review_text, r.position) for r in rows] == [(7, 5, None, 0), (8, 2, "별로", 1)]
+    assert [(r.product_id, r.rating, r.position) for r in rows] == [(7, 5, 0), (8, 2, 1)]
     assert rows[0].review_hash == rp.review_hash(Review(product_id=7, rating=5))
+    assert rows[1].review_hash == rp.review_hash(Review(product_id=8, rating=2, review_text="별로"))
+    assert "review_text" not in rp.ReviewRecord.model_fields                   # 원문 칸 자체가 없다
+
+
+def test_review_record_position_capped_at_nine() -> None:
+    """자리는 0~9 — 7.6 상한 10개, DB CHECK(0005)와 같다."""
+    with pytest.raises(ValueError):
+        rp.ReviewRecord(product_id=1, rating=5, review_hash="a" * 64, position=10)
+
+
+def test_preference_hash_normalizes_and_blank_is_none() -> None:
+    a = rp.preference_hash("향수  좋아해요 ")
+    assert len(a) == 64 and a == rp.preference_hash("향수 좋아해요") and a != rp.preference_hash("향수 싫어요")
+    assert rp.preference_hash(None) is None and rp.preference_hash("   ") is None
 
 
 def test_from_outcome_carries_preference_reviews_and_scores() -> None:
@@ -134,14 +149,15 @@ def test_from_outcome_carries_preference_reviews_and_scores() -> None:
                         reviews=_reviews((1, 5, "좋다"), (3, 1)))
     scores = [rp.CategoryScore(category_id=11, n=1, score_sum=2), rp.CategoryScore(category_id=12, n=1, score_sum=-2)]
     row = rp.from_outcome(rq, _outcome(rq, disliked=()), category_scores=scores)
-    assert row.gift_preference == "향수 좋아해요" and row.category_scores == scores
-    assert [(r.product_id, r.rating, r.review_text, r.position) for r in row.reviews] == [(1, 5, "좋다", 0), (3, 1, None, 1)]
+    assert row.gift_preference_hash == rp.preference_hash("향수 좋아해요") and row.category_scores == scores
+    assert [(r.product_id, r.rating, r.position) for r in row.reviews] == [(1, 5, 0), (3, 1, 1)]
+    assert "향수 좋아해요" not in row.model_dump_json() and "좋다" not in row.model_dump_json()   # 원문이 행 어디에도 없다
 
 
 def test_from_outcome_blank_preference_is_none_and_defaults_empty() -> None:
     rq = ProfileRequest(recipient_user_id=1, source_version=1, gift_preference="  ", disliked_categories=[], reviews=[])
     row = rp.from_outcome(rq, _outcome(rq, disliked=()))
-    assert row.gift_preference is None and row.category_scores == [] and row.reviews == []
+    assert row.gift_preference_hash is None and row.category_scores == [] and row.reviews == []
 
 
 @pytest.mark.skip(reason="v3 — merge_explicit_dislikes 채운 뒤 활성화")

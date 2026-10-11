@@ -14,6 +14,7 @@ from profiling.types import (
     ProfileRequest,
     Review,
     RunStatus,
+    preference_hash,
 )
 
 CV = UUID(int=7)   # 시험용 카탈로그 버전 ID
@@ -323,7 +324,8 @@ def test_profile_with_reviews_applies_bias_and_stores_scores(caplog) -> None:
     assert out.validation.preferred_tags == []                                  # 글·취향 → 태그는 하네스 뒤
     row = rstore.get(9073)
     assert row.category_scores == [CategoryScore(category_id=11, n=1, score_sum=2)]
-    assert row.gift_preference == "휴대용" and [r.product_id for r in row.reviews] == [2]
+    assert row.gift_preference_hash == preference_hash("휴대용") and [r.product_id for r in row.reviews] == [2]
+    assert "좋아요" not in row.model_dump_json()                                 # 원문은 저장하지 않는다(10-11 결정 B)
     assert any("scores=1" in r.message and pipeline.POOL_RULE_V2 in r.message for r in caplog.records)
     assert not any("좋아요" in r.message for r in caplog.records)               # 리뷰 원문은 로그에 남지 않는다
 

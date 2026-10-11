@@ -4,7 +4,7 @@
 두 세계의 변환은 pipeline.to_internal()(7.6 DTO → ProfileRequest)과 backend.to_callback()(ProfileOutcome → 7.7 DTO) 두 곳뿐.
 
 근거 문서: 4단계 2.2(흐름·의사코드), 5단계 1.2(프로필 테이블)·3.2(모델 입력), 6단계 1.2·3.2.
-리뷰 신호(별점 → 카테고리 편향 · 리뷰 행 보관)는 2026-10-07 결정 — 규칙표_별점x글 §3·§4(팀 폴더 일일작업물/첨부/2026-10-07_리뷰_신호_처리).
+리뷰 신호(별점 → 카테고리 편향 · 리뷰 행 보관 — 원문은 빼고 해시만, 10-11 결정 B)는 2026-10-07 결정 — 규칙표_별점x글 §3·§4(팀 폴더 일일작업물/첨부/2026-10-07_리뷰_신호_처리).
 실험 산출물(`extract_3axis.json`, `profiles_3axis_v0.json`)을 그대로 읽을 수 있도록 LLM 출력·판정 로그의 키 이름은
 실험과 같게 두었다(camelCase 키는 alias로 받는다). 판정 문자열 상수는 실험과 동일 — 바꾸면 회귀 비교가 안 된다.
 """
@@ -304,14 +304,24 @@ def review_hash(review: Review) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def preference_hash(text: str | None) -> str | None:
+    """취향 문장의 지문 — sha256(정규화한 글), 64자. 없거나 공백만이면 None. 원문 대신 이것만 저장한다(10-11 결정 B)."""
+    t = normalize_text(text)
+    return hashlib.sha256(t.encode("utf-8")).hexdigest() if t else None
+
+
 class ReviewRecord(BaseModel):
-    """ai_profile.recipient_reviews 한 행(0005) — 수신자 한 사람의 리뷰 ≤10, 상품당 최신 1건. 분석마다 행 전체를 교체한다(스냅샷)."""
+    """ai_profile.recipient_reviews 한 행(0005) — 수신자 한 사람의 리뷰 ≤10, 상품당 최신 1건. 분석마다 행 전체를 교체한다(스냅샷).
+
+    **리뷰 글(원문)은 저장하지 않는다**(10-11 결정 B) — 위키 데이터-컨텍스트 보강 설계: 7.6 입력은 "그 실행에서만 쓰고 저장하지 않습니다".
+    원문은 Backend 가 정본으로 갖고 있다. 캐시 판정은 review_hash 로 충분하다(같으면 저장된 추출 결과 재사용 — extraction 열은 0006).
+    """
 
     product_id: int
     rating: int = Field(ge=1, le=5)
-    review_text: str | None = Field(default=None, description="원문 그대로. 없거나 공백만이면 None")
-    review_hash: str = Field(min_length=64, max_length=64, description="review_hash() — 캐시 키")
-    position: int = Field(ge=0, description="7.6 reviews 배열에서의 자리(0이 가장 최신). 건너뛴 중복이 있으면 번호가 빌 수 있다")
+    review_hash: str = Field(min_length=64, max_length=64, description="review_hash() — 캐시 키 (상품·별점·정규화 글)")
+    position: int = Field(ge=0, le=9, description="7.6 reviews 배열에서의 자리(0이 가장 최신, 7.6 상한 10개 → 0~9 · DB CHECK 와 같음). "
+                                                   "건너뛴 중복이 있으면 번호가 빌 수 있다")
 
 
 def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
@@ -322,8 +332,7 @@ def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
         if r.product_id in seen:
             continue
         seen.add(r.product_id)
-        out.append(ReviewRecord(product_id=r.product_id, rating=r.rating, review_text=r.review_text if normalize_text(r.review_text) else None,
-                                review_hash=review_hash(r), position=pos))
+        out.append(ReviewRecord(product_id=r.product_id, rating=r.rating, review_hash=review_hash(r), position=pos))
     return out
 
 
@@ -348,7 +357,8 @@ class RecipientProfile(BaseModel):
     axes: dict[str, list[ValidatedTag]] = Field(default_factory=lambda: {"likes": [], "key_features": [], "dislikes": []})
     disliked_categories: list[DislikedCategory] = Field(default_factory=list)   # 7.6에서 받은 명시 비선호 — 분석 시점 사본 (테이블 열과 같은 이름)
     recommended_product_ids: list[int] = Field(default_factory=list, max_length=30)
-    gift_preference: str | None = Field(default=None, description="7.6 giftPreference 그대로(취향 문장) — 분석 시점 사본. 없거나 공백이면 None (0005)")
+    gift_preference_hash: str | None = Field(default=None, min_length=64, max_length=64,
+                                             description="7.6 giftPreference 의 지문(preference_hash) — 원문은 저장 안 함(10-11 결정 B). 없거나 공백이면 None (0005)")
     category_scores: list[CategoryScore] = Field(default_factory=list, description="소분류별 별점 누적 — 편향 = score_sum ÷ (n + 2) (0005)")
     reviews: list[ReviewRecord] = Field(default_factory=list, max_length=10, description="이번 분석에 쓴 리뷰 ≤10 — recipient_reviews 자식 행, 스냅샷 교체 (0005)")
     catalog_version_id: UUID | None = None
@@ -365,7 +375,8 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
     - axes: ValidationResult의 3축 원형(v1은 전부 []).
     - disliked_categories: 요청(rq)에서 그대로 — "분석 시점 사본"이라 Backend가 이후 바꿔도 다음 7.6까지 모른다(설계서 §1.7).
     - recommended_product_ids · catalog_version_id: outcome.search에서(콜백과 같은 30개).
-    - gift_preference · reviews: 요청(rq)에서 그대로 — 비선호와 같은 "분석 시점 사본". 리뷰는 to_review_records()로 행(해시·자리)이 된다.
+    - gift_preference_hash · reviews: 요청(rq)에서 — **원문은 남기지 않고 지문만**(10-11 결정 B, 위키 "7.6 입력은 저장하지 않음").
+      리뷰는 to_review_records()로 행(상품·별점·해시·자리)이 된다.
     - category_scores: 호출자가 넘긴다(score_categories — 카탈로그가 필요해 pipeline이 만든다). 안 넘기면 [].
     """
     v = outcome.validation
@@ -380,7 +391,7 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
              else {"likes": [], "key_features": [], "dislikes": []},
         disliked_categories=list(rq.disliked_categories),
         recommended_product_ids=list(s.product_ids) if s else [],
-        gift_preference=rq.gift_preference if normalize_text(rq.gift_preference) else None,
+        gift_preference_hash=preference_hash(rq.gift_preference),
         category_scores=list(category_scores or []),
         reviews=to_review_records(rq.reviews),
         catalog_version_id=s.catalog_version_id if s else None,
