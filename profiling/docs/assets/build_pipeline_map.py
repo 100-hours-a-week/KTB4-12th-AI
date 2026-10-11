@@ -39,7 +39,7 @@ def lines(x, y, rows, dy=18):
         t(x, y + i * dy, s, 'mono')
 
 
-t(40, 44, '파이프라인 지도 — 요청 한 건의 4단계와 연결 (v1, 2026-10-06 코드)', 'title')
+t(40, 44, '파이프라인 지도 — 요청 한 건의 4단계와 연결 (v2 2~4단계, 2026-10-11 코드)', 'title')
 t(40, 68, '파랑 호출 · 빨강 DB 쓰기 · 회색 점선 HTTP · 노랑 점선 v3 자리(미구현)', 'small')
 
 # ───────────────────── 조립 ─────────────────────
@@ -55,7 +55,7 @@ SH = 150
 STAGES = [
     ('1 접수', 'intake.py', ['POST 7.6  extract-and-pool', '검증 400 · 토큰 401 · 카탈로그 없음 503', 'supervisor.submit()  가득이면 503', '→ 202 PENDING']),
     ('2 큐 · 워커', 'supervisor.py', ['submit() → queue → _worker()', 'dispatch(): run_lock() → decide()', 'analyze · resend · skip']),
-    ('3 처리', 'pipeline.py', ['profile()', 'save(RUNNING) → catalog.active()', 'build_pool()  재고·비선호 제외 · 조회수↓ 30', 'save(결과) → recipient_store.upsert()']),
+    ('3 처리', 'pipeline.py', ['profile()', 'category_scores()  리뷰 별점 → 소분류 편향', 'build_pool()  인기 + 편향 · 비선호 제외|감점', 'save(결과) → recipient_store.upsert()']),
     ('4 콜백 · 기록', 'intake.py · backend.py', ['send_profile_callback()', 'POST 7.7 → 200 DELIVERED · 409 SUPERSEDED', '4xx FAILED · 5xx 즉시 3회', 'store.save(마지막 상태)']),
 ]
 for x, (name, mod, rows) in zip(XS, STAGES):
@@ -65,7 +65,7 @@ for x, (name, mod, rows) in zip(XS, STAGES):
     lines(x + 14, TOP + 58, rows)
 # v3 자리 (3 처리 상자 안)
 box(XS[2] + 14, TOP + SH - 30, CW - 28, 22, 'v3', 3)
-t(XS[2] + 22, TOP + SH - 14, 'v3 자리 — ProfileModel · Search (미구현)', 'sub')
+t(XS[2] + 22, TOP + SH - 14, 'v3 자리 — 태그 추출(LLM) · Search (미구현)', 'sub')
 
 # 단계 사이 화살표
 for i, label in enumerate(['rq', 'fn', 'outcome']):
@@ -87,7 +87,7 @@ for x in XS:                                           # 단계 → 포트
 AY = 480
 ADAPTERS = [('DbCatalogReader / FileCatalogReader', 'catalog.py', 'active()'),
             ('DbProfileRunStore', 'stores.py', 'save() · get_run() · run_lock()'),
-            ('DbRecipientProfileStore', 'stores.py', 'upsert() · get()'),
+            ('DbRecipientProfileStore', 'stores.py', 'upsert()  프로필+리뷰 한 문장 · get()'),
             ('HttpBackendPort', 'backend.py', 'send_profile_callback()')]
 for x, (name, mod, fn) in zip(XS, ADAPTERS):
     box(x, AY, CW, 66, 'box')
@@ -100,7 +100,7 @@ for x, (name, mod, fn) in zip(XS, ADAPTERS):
 EY = 600
 OUTER = [('PostgreSQL  ai_catalog', 'db', '상품 4,231 · 활성 버전 1개', 'write'),
          ('PostgreSQL  ai_profile.profile_runs', 'db', '(수신자, 번호) UNIQUE · 콜백 본문 보관', 'write'),
-         ('PostgreSQL  ai_profile.recipient_profiles', 'db', '수신자 1명 = 1행 · 태그 보관', 'write'),
+         ('PostgreSQL  recipient_profiles · reviews', 'db', '수신자 1명 = 1행 + 리뷰 ≤10 · 원문 없음', 'write'),
          ('Backend  develop :8080 · 가짜 :8081', 'ext', '7.7 수신 — 200 · 409 · 400', 'grey')]
 for x, (name, cls_, sub, arrow) in zip(XS, OUTER):
     box(x, EY, CW, 64, cls_)

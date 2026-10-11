@@ -10,7 +10,7 @@
 .impl{fill:none;stroke:#3b6fb6;stroke-width:1.3;stroke-dasharray:6 4;marker-end:url(#a)}
 .box{fill:#fff;stroke:#bcc5cd;stroke-width:1.3}.stage{fill:#fff;stroke:#3b6fb6;stroke-width:1.6}.band{fill:#eef3fa;stroke:#9db0d2;stroke-width:1.2}
 .db{fill:#fff7f2;stroke:#e0a080;stroke-width:1.4}.ext{fill:#f7f8fa;stroke:#bcc5cd;stroke-width:1.2}.v3{fill:#fffbe6;stroke:#e6d98a;stroke-width:1;stroke-dasharray:4 3}</style></defs><rect width="1700" height="760" fill="white"/>
-<text x="40" y="44" class="title">파이프라인 지도 — 요청 한 건의 4단계와 연결 (v1, 2026-10-06 코드)</text>
+<text x="40" y="44" class="title">파이프라인 지도 — 요청 한 건의 4단계와 연결 (v2 2~4단계, 2026-10-11 코드)</text>
 <text x="40" y="68" class="small">파랑 호출 · 빨강 DB 쓰기 · 회색 점선 HTTP · 노랑 점선 v3 자리(미구현)</text>
 <rect x="40" y="86" width="1620" height="44" rx="4" class="band"/>
 <text x="56" y="114" class="monob">main.py lifespan()</text>
@@ -32,8 +32,8 @@
 <text x="884" y="208" class="h">3 처리</text>
 <text x="1231" y="208" class="sub" text-anchor="end">pipeline.py</text>
 <text x="884" y="238" class="mono">profile()</text>
-<text x="884" y="256" class="mono">save(RUNNING) → catalog.active()</text>
-<text x="884" y="274" class="mono">build_pool()  재고·비선호 제외 · 조회수↓ 30</text>
+<text x="884" y="256" class="mono">category_scores()  리뷰 별점 → 소분류 편향</text>
+<text x="884" y="274" class="mono">build_pool()  인기 + 편향 · 비선호 제외|감점</text>
 <text x="884" y="292" class="mono">save(결과) → recipient_store.upsert()</text>
 <rect x="1285" y="180" width="375" height="150" rx="4" class="stage"/>
 <text x="1299" y="208" class="h">4 콜백 · 기록</text>
@@ -43,7 +43,7 @@
 <text x="1299" y="274" class="mono">4xx FAILED · 5xx 즉시 3회</text>
 <text x="1299" y="292" class="mono">store.save(마지막 상태)</text>
 <rect x="884" y="300" width="347" height="22" rx="3" class="v3"/>
-<text x="892" y="316" class="sub">v3 자리 — ProfileModel · Search (미구현)</text>
+<text x="892" y="316" class="sub">v3 자리 — 태그 추출(LLM) · Search (미구현)</text>
 <path d="M415 220 H453" class="call"/>
 <text x="435.0" y="170" class="sub" text-anchor="middle">rq</text>
 <path d="M830 220 H868" class="call"/>
@@ -73,7 +73,7 @@
 <rect x="870" y="480" width="375" height="66" rx="4" class="box"/>
 <text x="884" y="507" class="h2">DbRecipientProfileStore</text>
 <text x="1231" y="507" class="sub" text-anchor="end">stores.py</text>
-<text x="884" y="530" class="mono">upsert() · get()</text>
+<text x="884" y="530" class="mono">upsert()  프로필+리뷰 한 문장 · get()</text>
 <path d="M1057.5 478 V436" class="impl"/>
 <rect x="1285" y="480" width="375" height="66" rx="4" class="box"/>
 <text x="1299" y="507" class="h2">HttpBackendPort</text>
@@ -89,8 +89,8 @@
 <text x="469" y="650" class="mono">(수신자, 번호) UNIQUE · 콜백 본문 보관</text>
 <path d="M642.5 546 V598" class="write"/>
 <rect x="870" y="600" width="375" height="64" rx="4" class="db"/>
-<text x="884" y="627" class="h2">PostgreSQL  ai_profile.recipient_profiles</text>
-<text x="884" y="650" class="mono">수신자 1명 = 1행 · 태그 보관</text>
+<text x="884" y="627" class="h2">PostgreSQL  recipient_profiles · reviews</text>
+<text x="884" y="650" class="mono">수신자 1명 = 1행 + 리뷰 ≤10 · 원문 없음</text>
 <path d="M1057.5 546 V598" class="write"/>
 <rect x="1285" y="600" width="375" height="64" rx="4" class="ext"/>
 <text x="1299" y="627" class="h2">Backend  develop :8080 · 가짜 :8081</text>
