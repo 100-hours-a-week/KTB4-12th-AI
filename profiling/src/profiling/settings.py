@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     DISLIKE_MODE: Literal["exclude", "penalty"] = Field(
         default="exclude",
         description="비선호 카테고리 처리 — exclude: 풀에서 뺀다(v1 하드 규칙, 다시 쓸 수 있게 남김) · "
-                    "penalty: 빼지 않고 순서에서 감점(v2, 설계 DR-005). pipeline.DislikeMode · DISLIKE_PENALTY 참고",
+                    "penalty: 빼지 않고 순서에서 감점(v2, 설계 DR-005). pipeline.DislikeMode · DISLIKED_CATEGORY_SCORE 참고",
     )
 
     # ---- 실행 (3단계 구현 상세 §12.1 개발 시험 시작값)

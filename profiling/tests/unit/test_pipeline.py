@@ -8,7 +8,13 @@ import pytest
 from profiling import pipeline
 from profiling.ports import NoActiveCatalog
 from profiling.schemas import ProductRecord, ProfileExtractRequest
-from profiling.types import DislikedCategory, ProfileRequest, Review, RunStatus
+from profiling.types import (
+    CategoryScore,
+    DislikedCategory,
+    ProfileRequest,
+    Review,
+    RunStatus,
+)
 
 CV = UUID(int=7)   # 시험용 카탈로그 버전 ID
 
@@ -173,14 +179,14 @@ def test_pool_default_mode_is_exclude() -> None:
 
 
 def test_pool_penalty_keeps_disliked_but_ranks_lower() -> None:
-    """감점은 빼지 않고 뒤로 민다. 점수 = 조회수 ÷ 최대 × 2 − 1.0(DISLIKE_PENALTY).
-    뷰티 100회(비선호) → 2.0 − 1.0 = 1.0 · 패션 60회 → 1.2 · 패션 10회 → 0.2  ⇒ [2, 1, 3]"""
-    assert pipeline.DISLIKE_PENALTY == 1.0                                       # 아래 수치는 이 값 기준
+    """감점은 빼지 않고 뒤로 민다. 점수 = 조회수 ÷ 최대 × 2 + (비선호면 −2.0, DISLIKED_CATEGORY_SCORE).
+    뷰티 100회(비선호) → 2.0 − 2.0 = 0.0 · 패션 60회 → 1.2 · 패션 10회 → 0.2  ⇒ [2, 3, 1] — 조회수 최대여도 비선호는 맨 뒤"""
+    assert pipeline.DISLIKED_CATEGORY_SCORE == -2.0                              # 아래 수치는 이 값 기준
     products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=100),
                 _product(2, 21, "여성의류", parent_id=2, parent_name="패션", views=60),
                 _product(3, 22, "가방·지갑", parent_id=2, parent_name="패션", views=10)]
     rq = _rq(disliked=[(1, "뷰티")])
-    assert pipeline.build_pool(rq, products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 1, 3]
+    assert pipeline.build_pool(rq, products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 3, 1]
     assert pipeline.build_pool(rq, products, 30, CV).product_ids == [2, 3]      # 같은 입력, 제외 모드
 
 
@@ -201,7 +207,7 @@ def test_pool_penalty_never_empties_on_dislikes() -> None:
 
 
 def test_pool_penalty_all_zero_views_puts_disliked_last() -> None:
-    """조회수가 전부 0이면(패키지 카탈로그) 인기 점수가 모두 0 — 비선호만 −1.0 이라 맨 뒤로, 나머지는 productId 순."""
+    """조회수가 전부 0이면(패키지 카탈로그) 인기 점수가 모두 0 — 비선호만 −2.0 이라 맨 뒤로, 나머지는 productId 순."""
     products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티"), _product(2, 21, "여성의류", parent_id=2, parent_name="패션"),
                 _product(3, 12, "메이크업", parent_id=1, parent_name="뷰티"), _product(4, 22, "가방·지갑", parent_id=2, parent_name="패션")]
     assert pipeline.build_pool(_rq(disliked=[(1, "뷰티")]), products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 4, 1, 3]
@@ -209,9 +215,44 @@ def test_pool_penalty_all_zero_views_puts_disliked_last() -> None:
 
 def test_pool_penalty_matches_leaf_and_name_like_exclude() -> None:
     """비선호 판정 규칙(소분류 id · 이름 보조)은 두 모드가 같다 — 처리만 다르다."""
-    products = [_product(1, 11, "스킨케어", views=9), _product(2, 21, "여성의류", views=6)]   # 1: 2.0 − 1.0 = 1.0 · 2: 1.33
+    products = [_product(1, 11, "스킨케어", views=9), _product(2, 21, "여성의류", views=6)]   # 1: 2.0 − 2.0 = 0.0 · 2: 1.33
     assert pipeline.build_pool(_rq(disliked=[(999, "스킨케어")]), products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 1]
     assert pipeline.build_pool(_rq(), products, 30, CV, dislike_mode=PENALTY).product_ids == [1, 2]   # 비선호가 없으면 원래 순서
+
+
+# ---------------------------------------------------------------- build_pool — 리뷰 별점 편향 (v2 2단계 · 가이드 10-11 보강)
+# 점수 = 조회수 ÷ 최대 × 2 + BIAS_WEIGHT(1.0) × 편향 (+ PENALTY 비선호면 −2.0). 편향 = score_sum ÷ (n + 2)
+
+FOUR = [_product(1, 11, "스킨케어", views=100), _product(2, 11, "스킨케어", views=10),
+        _product(3, 12, "메이크업", views=80), _product(4, 12, "메이크업", views=60)]
+
+
+def test_pool_bias_moves_reviewed_category_forward_but_mixes() -> None:
+    """메이크업(12) 5점 1건 → 편향 +0.67. 1: 2.0 · 2: 0.2 · 3: 1.6 + 0.67 = 2.27 · 4: 1.2 + 0.67 = 1.87 ⇒ [3, 1, 4, 2].
+    조회수 최대인 스킨케어(1)가 여전히 2위 — 편향이 순서를 '섞을' 뿐 소분류가 풀을 독차지하지 않는다. EXCLUDE(기본)도 편향을 쓴다."""
+    assert pipeline.BIAS_WEIGHT == 1.0                                          # 아래 수치는 이 값 기준
+    scores = [CategoryScore(category_id=12, n=1, score_sum=2)]
+    assert pipeline.build_pool(_rq(), FOUR, 30, CV).product_ids == [1, 3, 4, 2]                    # 리뷰 없음 = 조회수순
+    assert pipeline.build_pool(_rq(), FOUR, 30, CV, scores=scores).product_ids == [3, 1, 4, 2]     # EXCLUDE + 편향
+    assert pipeline.build_pool(_rq(), FOUR, 30, CV, scores=scores, dislike_mode=PENALTY).product_ids == [3, 1, 4, 2]   # 비선호 없으면 두 모드 같음
+
+
+def test_pool_low_rating_pushes_back_not_excluded() -> None:
+    """스킨케어(11) 1점 2건 → 편향 −4 ÷ 4 = −1.0. 1: 1.0 · 2: −0.8 · 3: 1.6 · 4: 1.2 ⇒ [3, 4, 1, 2] — 뒤로 갈 뿐 빠지지 않는다(규칙표 §5)."""
+    scores = [CategoryScore(category_id=11, n=2, score_sum=-4)]
+    assert pipeline.build_pool(_rq(), FOUR, 30, CV, scores=scores).product_ids == [3, 4, 1, 2]
+
+
+def test_pool_penalty_disliked_category_adds_review_bias() -> None:
+    """직접 고른 비선호는 −2.0 에서 출발하고 리뷰 편향을 그 위에 더한다(결정 D, 10-11).
+    뷰티(1) 비선호 · 스킨케어(11) 5점 1건(+0.67). 1(스킨케어): 2.0 − 2.0 + 0.67 = 0.67 · 2(메이크업, 리뷰 없음): 2.0 − 2.0 = 0 · 3(패션): 0.4
+    ⇒ [1, 3, 2]. 같은 비선호 대분류라도 리뷰 없는 소분류(메이크업)엔 편향이 번지지 않는다. EXCLUDE 에선 뷰티 전체가 빠진다."""
+    products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=50),
+                _product(2, 12, "메이크업", parent_id=1, parent_name="뷰티", views=50),
+                _product(3, 21, "여성의류", parent_id=2, parent_name="패션", views=10)]
+    rq, scores = _rq(disliked=[(1, "뷰티")]), [CategoryScore(category_id=11, n=1, score_sum=2)]
+    assert pipeline.build_pool(rq, products, 30, CV, scores=scores, dislike_mode=PENALTY).product_ids == [1, 3, 2]
+    assert pipeline.build_pool(rq, products, 30, CV, scores=scores).product_ids == [3]
 
 
 # ---------------------------------------------------------------- profile()
@@ -265,9 +306,62 @@ def test_profile_no_catalog_is_failed_not_exception() -> None:
     assert store.get(9073).status is RunStatus.FAILED                          # FAILED도 기록
 
 
-def test_profile_with_reviews_still_v1_path() -> None:
-    out = pipeline.profile(_rq(pref="휴대용", reviews=[Review(product_id=1, rating=5)]), catalog=FakeCatalog(PRODUCTS), store=FakeStore(), recipient_store=FakeRecipientStore())
-    assert out.status is RunStatus.RESULT_READY and out.validation.preferred_tags == []   # 모델 단계 미구현 → v1 경로
+BIAS_PRODUCTS = [_product(1, 11, "스킨케어", views=10), _product(2, 11, "스킨케어", views=0),
+                 _product(3, 21, "여성의류", views=2), _product(4, 21, "여성의류", views=0)]
+
+
+def test_profile_with_reviews_applies_bias_and_stores_scores(caplog) -> None:
+    """리뷰 별점이 풀 순서에 들어가고(2단계) 점수·취향·리뷰가 프로필 행에 실린다. 태그(모델)는 아직 없다.
+    상품 2(스킨케어) 5점 → 스킨케어 편향 +0.67. 리뷰 없으면 [1, 3, 2, 4](2.0 · 0.4 · 0 · 0) → 있으면 2가 0.67로 3(0.4)을 앞지른다."""
+    rstore = FakeRecipientStore()
+    rq = _rq(pref="휴대용", reviews=[Review(product_id=2, rating=5, review_text="좋아요")])
+    assert pipeline.profile(_rq(), catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(),
+                            recipient_store=FakeRecipientStore()).search.product_ids == [1, 3, 2, 4]
+    with caplog.at_level("INFO", logger="profiling.pipeline"):
+        out = pipeline.profile(rq, catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(), recipient_store=rstore)
+    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [1, 2, 3, 4]
+    assert out.validation.preferred_tags == []                                  # 글·취향 → 태그는 하네스 뒤
+    row = rstore.get(9073)
+    assert row.category_scores == [CategoryScore(category_id=11, n=1, score_sum=2)]
+    assert row.gift_preference == "휴대용" and [r.product_id for r in row.reviews] == [2]
+    assert any("scores=1" in r.message and pipeline.POOL_RULE_V2 in r.message for r in caplog.records)
+    assert not any("좋아요" in r.message for r in caplog.records)               # 리뷰 원문은 로그에 남지 않는다
+
+
+def test_profile_reviews_not_in_catalog_warn_with_provisional_hint(caplog) -> None:
+    """임시 번호 카탈로그(BE id-map 전)면 BE 번호인 리뷰가 하나도 안 맞는다 — 편향 0, 결과는 리뷰 없을 때와 같고 경고에 원인이 찍힌다(보강 C)."""
+    class ProvisionalCatalog(FakeCatalog):
+        provisional_ids = True
+
+    rq = _rq(reviews=[Review(product_id=999, rating=5)])
+    with caplog.at_level("WARNING", logger="profiling.pipeline"):
+        out = pipeline.profile(rq, catalog=ProvisionalCatalog(BIAS_PRODUCTS), store=FakeStore(), recipient_store=FakeRecipientStore())
+    assert out.search.product_ids == [1, 3, 2, 4]
+    assert any("0/1" in r.message and "임시 번호" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="profiling.pipeline"):
+        pipeline.profile(rq, catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(), recipient_store=FakeRecipientStore())
+    assert any("0/1" in r.message for r in caplog.records) and not any("임시 번호" in r.message for r in caplog.records)
+
+
+def test_profile_finds_category_from_active_snapshot_not_by_id() -> None:
+    """소분류는 active() 로 받은 products 에서 찾는다 — by_id 는 요청 도중 다른 카탈로그 버전을 줄 수 있다(보강 B)."""
+    class NoByIdCatalog(FakeCatalog):
+        def by_id(self, product_id):
+            raise AssertionError("by_id 를 쓰면 안 된다")
+
+    rstore = FakeRecipientStore()
+    out = pipeline.profile(_rq(reviews=[Review(product_id=2, rating=5)]), catalog=NoByIdCatalog(BIAS_PRODUCTS), store=FakeStore(),
+                           recipient_store=rstore)
+    assert out.status is RunStatus.RESULT_READY and rstore.get(9073).category_scores[0].category_id == 11
+
+
+def test_profile_same_input_same_pool_with_bias() -> None:
+    """편향이 소수여도 같은 입력이면 같은 결과(결정 a — 임의성 없음)."""
+    products = [_product(i, 100 + i % 4, f"c{i % 4}", views=(i * 13) % 17) for i in range(1, 61)]
+    rq = _rq(reviews=[Review(product_id=1, rating=5), Review(product_id=2, rating=2), Review(product_id=7, rating=4)])
+    run = lambda: pipeline.profile(rq, catalog=FakeCatalog(products), store=FakeStore(), recipient_store=FakeRecipientStore()).search.product_ids
+    assert run() == run()
 
 
 def test_profile_store_failure_is_failed() -> None:
