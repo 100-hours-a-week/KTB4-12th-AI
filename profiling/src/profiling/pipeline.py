@@ -4,6 +4,7 @@
 그래서 단위 테스트는 ports 모양의 가짜(dict 하나짜리 클래스)를 넣어 DB 없이 돈다.
 
 v1(지금): 취향 문장 None · 리뷰 [] → 추출·검증을 건너뛰고, 비선호 카테고리를 뺀 상품 풀 30개를 만든다.
+입력 세 칸이 전부 비면(비선호 0 · 취향 없음 · 리뷰 0) 추천 0개를 돌려준다 — has_no_input(), 10-09 결정 C.
 v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.analyze()(모델) → 검증기 → Search 호출이 들어온다. 나머지 흐름은 그대로.
 
 흐름 (한 건):
@@ -78,6 +79,16 @@ def input_hash(rq: ProfileRequest) -> str:
 # ---------------------------------------------------------------------------
 # 2) 판단 — 모델(LLM)이 필요한 요청인가 (결정 c)
 # ---------------------------------------------------------------------------
+
+
+def has_no_input(rq: ProfileRequest) -> bool:
+    """입력 세 칸이 전부 비었나 — 비선호 0 · 취향 문장 없음(공백만도 없음) · 리뷰 0.
+
+    10-09 결정(C): 이때 추천을 **0개**로 돌려준다. Backend 는 0행을 저장하고 상품 목록을 인기순으로 대체한다(빈 콜백은 BE 가 정상 완료로 처리).
+    가입 직후에는 Backend 가 요청을 보내지 않으므로, 이 요청은 "기존 사용자가 전부 지웠다"는 신호다 — AI 사본(비선호 · 취향 · 리뷰)은 빈 값으로 덮인다.
+    입력이 없는데 인기순 30개를 "AI 추천"으로 내보내던 것(v1)은 그만둔다 — 추천할 근거가 없으면 추천하지 않는다.
+    """
+    return not rq.disliked_categories and not (rq.gift_preference or "").strip() and not rq.reviews
 
 
 def needs_model(rq: ProfileRequest) -> bool:
@@ -173,12 +184,16 @@ def profile(
             log=[],
         )
 
-        # 3) 풀 30개
-        search = build_pool(rq, products, pool_size, catalog_version_id)
-        if not search.product_ids:
-            # 0개도 성공이다 — 빈 배열을 7.7로 보낸다. Backend는 저장된 추천이 없으면 인기순으로 대체한다(BE PR4 fallback).
-            # 침묵(FAILED)하면 Backend 는 maximum-window(⚙6h) 뒤 복구 전송 때까지 기다리므로 보내는 쪽이 빠르다. BE 확인 요청 8번.
-            log.warning("profile recipient=%s source_version=%s 풀 0개(비선호·재고로 전부 제외) — 빈 배열 콜백, Backend가 인기순 대체", rid, sv)
+        # 3) 풀 30개 — 입력이 전부 비면 추천 0개 (10-09 결정 C). 0개 콜백은 성공이다: Backend 는 0행을 저장하고 인기순으로 대체한다.
+        if has_no_input(rq):
+            search = SearchResult(product_ids=[], query_text="", catalog_version_id=catalog_version_id)
+            log.info("profile recipient=%s source_version=%s 입력 없음(비선호 0 · 취향 없음 · 리뷰 0) → 추천 0개 콜백, Backend 가 인기순 대체", rid, sv)
+        else:
+            search = build_pool(rq, products, pool_size, catalog_version_id)
+            if not search.product_ids:
+                # 0개도 성공이다 — 빈 배열을 7.7로 보낸다. Backend는 저장된 추천이 없으면 인기순으로 대체한다(BE PR4 fallback).
+                # 침묵(FAILED)하면 Backend 는 maximum-window(⚙6h) 뒤 복구 전송 때까지 기다리므로 보내는 쪽이 빠르다. BE 확인 요청 8번.
+                log.warning("profile recipient=%s source_version=%s 풀 0개(비선호·재고로 전부 제외) — 빈 배열 콜백, Backend가 인기순 대체", rid, sv)
 
         # 4) 결과
         outcome = ProfileOutcome(

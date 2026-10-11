@@ -155,7 +155,8 @@ def test_app_boots_on_db_catalog(engine, cleanup, monkeypatch) -> None:
 
             app.state.backend = RecordingBackend()
             res = client.post("/api/internal/v1/ai/profile/extract-and-pool",
-                              json={"recipientUserId": RID, "sourceVersion": 9, "dislikedCategories": [],
+                              json={"recipientUserId": RID, "sourceVersion": 9,
+                                    "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품"}],   # 입력이 있어야 30개 (전부 비면 0개 — 결정 C)
                                     "giftPreference": None, "reviews": []})
             assert res.status_code == 202
             assert _until(lambda: _delivered(app.state.store, RID))
@@ -186,8 +187,8 @@ def test_same_version_resend_does_not_reanalyze(engine, cleanup) -> None:
         return httpx.Response(200, json={"message": "ok", "data": {"recipientUserId": RID, "sourceVersion": 21,
                                                                   "profileStatus": "COMPLETED"}})
 
-    body = {"recipientUserId": RID, "sourceVersion": 21, "dislikedCategories": [],
-            "giftPreference": None, "reviews": []}
+    body = {"recipientUserId": RID, "sourceVersion": 21, "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품"}],
+            "giftPreference": None, "reviews": []}                                   # 입력이 있어야 30개 (전부 비면 0개 — 결정 C)
     with TestClient(app) as client:
         app.state.backend = HttpBackendPort("http://backend.test", "t", 5.0, transport=httpx.MockTransport(handler))
         assert client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body).status_code == 202

@@ -98,9 +98,10 @@ class ReviewDto(BaseModel):
     reviewText: str | None = Field(default=None, description="리뷰 본문. 글이 없으면 null (별점 필수·글 선택)")
 
 
-## 프로파일 추출 요청 — v1은 recipientUserId·sourceVersion·dislikedCategories 세 필드.
-## giftPreference·reviews는 v3 입력이라 선택(없으면 null·[])으로 둔다 — 계약 원문은 "키 생략 불가"지만 v1 BE가 안 쓰는 키를 요구하지 않기 위한 결정(09-22).
-## 보내면 그대로 받는다(v3 대비).
+## 프로파일 추출 요청 — 값이 꼭 있어야 하는 건 recipientUserId·sourceVersion 둘뿐이지만, 입력 세 칸은 **키를 반드시 보내고 값은 비어도 된다**([]·null·[]).
+## 키가 빠지면 Backend 쪽 결함으로 보고 400 — 분석하지 않는다(10-09 결정: 빈 값을 "일부러" 보냈다는 것이 드러나게). 세 칸이 전부 비어도 접수한다(인기순 30개).
+## **전환 2단계(10-09):** 1단계(지금) dislikedCategories 키 필수. giftPreference·reviews 는 지금 Backend 가 세 필드만 보내므로 생략을 허용한다.
+##   2단계(Backend V2 배포와 같은 시점) 두 칸도 키 필수로 올린다 — 아래 두 줄의 default 를 지우고 test_schemas 의 콜드 스타트 시험을 뒤집는다.
 class ProfileExtractRequest(BaseModel):
     model_config = _ALLOW
 
@@ -108,9 +109,9 @@ class ProfileExtractRequest(BaseModel):
     sourceVersion: int = Field(ge=0, description="호출 시점의 최신 값. 등록 데이터가 없으면 0")
     dislikedCategories: list[DislikedCategoryDto] = Field(
         max_length=5,
-        description="없으면 []; 필드 생략 불가. 최대 5 — BE PreferencePolicy.MAX_SELECTABLE_COUNT 와 같은 값(09-27 결정), 6개 이상은 400")
-    giftPreference: str | None = Field(default=None, description="취향 자유 텍스트(v3). v1은 보내지 않음 → null")
-    reviews: list[ReviewDto] = Field(default_factory=list, max_length=10, description="작성일 최신순 최대 10개(v3). v1은 보내지 않음 → []")
+        description="비선호 대분류. 키 필수, 값은 [] 가능 — 키가 빠지면 400(10-09). 최대 5 — BE PreferencePolicy.MAX_SELECTABLE_COUNT 와 같은 값(09-27 결정), 6개 이상은 400")
+    giftPreference: str | None = Field(default=None, description="취향 자유 텍스트. 없으면 null. 키 생략은 Backend V2 배포 전까지만 허용(전환 2단계에서 필수로)")
+    reviews: list[ReviewDto] = Field(default_factory=list, max_length=10, description="작성일 최신순 최대 10개(상품당 최신 1건). 없으면 []. 키 생략은 Backend V2 배포 전까지만 허용(전환 2단계에서 필수로). 11개 이상은 400(자르지 않음, 10-09 D5)")
 
 
 def unknown_fields(body: ProfileExtractRequest) -> dict[str, list[str]]:

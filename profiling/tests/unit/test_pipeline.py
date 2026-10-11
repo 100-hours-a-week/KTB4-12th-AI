@@ -95,6 +95,30 @@ def test_needs_model(pref, reviews, expected) -> None:
     assert pipeline.needs_model(_rq(pref=pref, reviews=reviews)) is expected
 
 
+# ---------------------------------------------------------------- has_no_input · 입력 없음 → 추천 0개 (10-09 결정 C)
+
+
+@pytest.mark.parametrize("pref,disliked,reviews,expected", [
+    (None, (), (), True),                                            # 전부 빈 값
+    ("  ", (), (), True),                                            # 공백만인 취향 문장도 "없음"
+    (None, ((1, "뷰티"),), (), False),                               # 비선호만 있어도 입력 있음
+    ("휴대용", (), (), False),
+    (None, (), (Review(product_id=1, rating=3),), False),
+])
+def test_has_no_input(pref, disliked, reviews, expected) -> None:
+    assert pipeline.has_no_input(_rq(disliked=disliked, pref=pref, reviews=reviews)) is expected
+
+
+def test_profile_all_empty_input_sends_zero_recommendations() -> None:
+    """기존 사용자가 비선호·취향·리뷰를 전부 지우면 BE 가 빈 요청을 보낸다 → AI 는 추천 0개(빈 배열 콜백), 사본은 빈 값으로 덮인다.
+    BE 는 0행을 저장하고 상품 목록을 인기순으로 대체한다(10-09 결정 C). 인기순 30개를 'AI 추천'으로 내보내지 않는다."""
+    store, rstore = FakeStore(), FakeRecipientStore()
+    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=rstore)
+    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [] and out.search.catalog_version_id == CV
+    assert store.history == [RunStatus.RUNNING, RunStatus.RESULT_READY]          # 콜백 본문(빈 배열)까지 기록됨
+    assert rstore.get(9073).disliked_categories == [] and rstore.get(9073).recommended_product_ids == []
+
+
 # ---------------------------------------------------------------- build_pool
 
 
