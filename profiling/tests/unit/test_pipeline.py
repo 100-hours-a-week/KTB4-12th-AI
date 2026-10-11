@@ -159,6 +159,61 @@ def test_pool_size_cap() -> None:
     assert len(pipeline.build_pool(_rq(), PRODUCTS, 5, CV).product_ids) == 5
 
 
+# ---------------------------------------------------------------- build_pool — 비선호 감점(PENALTY, v2) · 10-11 결정
+
+PENALTY = pipeline.DislikeMode.PENALTY
+
+
+def test_pool_default_mode_is_exclude() -> None:
+    """기본값은 v1 하드 규칙(제외) — 설정을 바꾸기 전까지 배포 동작이 그대로다."""
+    products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=9), _product(2, 21, "여성의류", parent_id=2, parent_name="패션")]
+    rq = _rq(disliked=[(1, "뷰티")])
+    assert pipeline.build_pool(rq, products, 30, CV).product_ids == [2]
+    assert pipeline.build_pool(rq, products, 30, CV, dislike_mode=pipeline.DislikeMode.EXCLUDE).product_ids == [2]
+
+
+def test_pool_penalty_keeps_disliked_but_ranks_lower() -> None:
+    """감점은 빼지 않고 뒤로 민다. 점수 = 조회수 ÷ 최대 × 2 − 1.0(DISLIKE_PENALTY).
+    뷰티 100회(비선호) → 2.0 − 1.0 = 1.0 · 패션 60회 → 1.2 · 패션 10회 → 0.2  ⇒ [2, 1, 3]"""
+    assert pipeline.DISLIKE_PENALTY == 1.0                                       # 아래 수치는 이 값 기준
+    products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=100),
+                _product(2, 21, "여성의류", parent_id=2, parent_name="패션", views=60),
+                _product(3, 22, "가방·지갑", parent_id=2, parent_name="패션", views=10)]
+    rq = _rq(disliked=[(1, "뷰티")])
+    assert pipeline.build_pool(rq, products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 1, 3]
+    assert pipeline.build_pool(rq, products, 30, CV).product_ids == [2, 3]      # 같은 입력, 제외 모드
+
+
+def test_pool_penalty_without_dislikes_equals_exclude() -> None:
+    """비선호가 없으면 두 모드의 결과가 같다 — 인기 점수가 조회수 순서를 그대로 따른다(회귀 안전)."""
+    products = [_product(i, 100 + i % 3, f"c{i % 3}", views=(i * 37) % 11) for i in range(1, 41)]
+    assert pipeline.build_pool(_rq(), products, 30, CV, dislike_mode=PENALTY).product_ids == pipeline.build_pool(_rq(), products, 30, CV).product_ids
+
+
+def test_pool_penalty_never_empties_on_dislikes() -> None:
+    """모든 대분류를 비선호로 넣어도(악성·장난 입력) 풀이 비지 않는다 — 감점끼리는 조회수 순서. 제외 모드는 0개."""
+    products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=5),
+                _product(2, 21, "여성의류", parent_id=2, parent_name="패션", views=9),
+                _product(3, 22, "가방·지갑", parent_id=2, parent_name="패션", views=1, availability="unavailable")]
+    rq = _rq(disliked=[(1, "뷰티"), (2, "패션")])
+    assert pipeline.build_pool(rq, products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 1]   # 재고 없음은 여전히 제외
+    assert pipeline.build_pool(rq, products, 30, CV).product_ids == []
+
+
+def test_pool_penalty_all_zero_views_puts_disliked_last() -> None:
+    """조회수가 전부 0이면(패키지 카탈로그) 인기 점수가 모두 0 — 비선호만 −1.0 이라 맨 뒤로, 나머지는 productId 순."""
+    products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티"), _product(2, 21, "여성의류", parent_id=2, parent_name="패션"),
+                _product(3, 12, "메이크업", parent_id=1, parent_name="뷰티"), _product(4, 22, "가방·지갑", parent_id=2, parent_name="패션")]
+    assert pipeline.build_pool(_rq(disliked=[(1, "뷰티")]), products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 4, 1, 3]
+
+
+def test_pool_penalty_matches_leaf_and_name_like_exclude() -> None:
+    """비선호 판정 규칙(소분류 id · 이름 보조)은 두 모드가 같다 — 처리만 다르다."""
+    products = [_product(1, 11, "스킨케어", views=9), _product(2, 21, "여성의류", views=6)]   # 1: 2.0 − 1.0 = 1.0 · 2: 1.33
+    assert pipeline.build_pool(_rq(disliked=[(999, "스킨케어")]), products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 1]
+    assert pipeline.build_pool(_rq(), products, 30, CV, dislike_mode=PENALTY).product_ids == [1, 2]   # 비선호가 없으면 원래 순서
+
+
 # ---------------------------------------------------------------- profile()
 
 
@@ -183,6 +238,17 @@ def test_profile_empty_pool_is_result_ready_with_empty_list(caplog) -> None:
     assert out.status is RunStatus.RESULT_READY and out.search.product_ids == []
     assert callback_body(out).recommendedProductIds == []                       # 본문도 빈 배열 (스키마가 허용)
     assert any("풀 0개" in rec.message for rec in caplog.records)
+
+
+def test_profile_penalty_mode_keeps_disliked_and_logs_rule(caplog) -> None:
+    """profile() 이 dislike_mode 를 build_pool 에 넘긴다 — 감점 모드에선 비선호 상품만 있어도 풀이 찬다. 규칙 라벨이 로그에 남는다."""
+    only_beauty = [_product(1, 100, "뷰티", views=5), _product(2, 100, "뷰티", views=3)]
+    with caplog.at_level("INFO", logger="profiling.pipeline"):
+        out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(only_beauty), store=FakeStore(),
+                               recipient_store=FakeRecipientStore(), pool_size=30, dislike_mode=PENALTY)
+    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [1, 2]
+    assert out.validation.disliked_tags == ["뷰티"]                               # 태그는 모드와 무관
+    assert any(pipeline.POOL_RULE_V2_PENALTY in rec.message for rec in caplog.records)
 
 
 def test_profile_overwrites_same_recipient() -> None:

@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     # ---- 계약 상한 (문서 1 §7.7). 7.6 의 비선호 5·리뷰 10 은 schemas.py 의 max_length 가 정본 — 설정으로 두지 않는다(09-29, 아무 데서도 안 읽었다)
     POOL_SIZE: int = Field(default=30, ge=1, le=30, description="7.7 recommendedProductIds 개수 상한")
 
+    # ---- 업무 규칙 스위치 (10-11 결정). v1 = exclude, v2(BE V2 배포 — giftPreference·reviews) 부터 penalty 로 바꾼다
+    DISLIKE_MODE: Literal["exclude", "penalty"] = Field(
+        default="exclude",
+        description="비선호 카테고리 처리 — exclude: 풀에서 뺀다(v1 하드 규칙, 다시 쓸 수 있게 남김) · "
+                    "penalty: 빼지 않고 순서에서 감점(v2, 설계 DR-005). pipeline.DislikeMode · DISLIKE_PENALTY 참고",
+    )
+
     # ---- 실행 (3단계 구현 상세 §12.1 개발 시험 시작값)
     PROFILING_SLOTS: int = Field(
         default=1, ge=1,

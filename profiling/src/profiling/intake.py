@@ -120,6 +120,7 @@ async def require_service_token(
 def run_and_callback(
     rq: ProfileRequest, catalog: CatalogReader, store: ProfileRunStore, backend: BackendPort,
     pool_size: int, recipient_store: RecipientProfileStore, *, max_attempts: int = 3, backoff_s: float = 0.5,
+    dislike_mode: str = pipeline.DislikeMode.EXCLUDE,
 ) -> None:
     """pipeline.profile() → 결과가 RESULT_READY일 때만 7.7 콜백 → 콜백 결과를 실행 기록에 저장.
 
@@ -131,7 +132,8 @@ def run_and_callback(
     """
     rid = rq.recipient_user_id
     try:
-        outcome = pipeline.profile(rq, catalog=catalog, store=store, recipient_store=recipient_store, pool_size=pool_size)
+        outcome = pipeline.profile(rq, catalog=catalog, store=store, recipient_store=recipient_store, pool_size=pool_size,
+                                   dislike_mode=pipeline.DislikeMode(dislike_mode))
     except Exception:  # 백그라운드에서는 무엇이든 잡아 기록한다
         log.exception("profile 실패 recipient=%s source_version=%s", rid, rq.source_version)
         return
@@ -248,7 +250,7 @@ def _existing_run(store: ProfileRunStore, rq: ProfileRequest) -> ProfileOutcome 
 def dispatch(
     rq: ProfileRequest, catalog: CatalogReader, store: ProfileRunStore, backend: BackendPort,
     pool_size: int, recipient_store: RecipientProfileStore, stale_after_s: int,
-    callback_max_attempts: int = 3, callback_backoff_s: float = 0.5,
+    callback_max_attempts: int = 3, callback_backoff_s: float = 0.5, *, dislike_mode: str = pipeline.DislikeMode.EXCLUDE,
 ) -> None:
     """**잠금 → 판정 → 실행**을 한 덩어리로. Supervisor 워커 스레드(슬롯) 하나에서 끝까지 돈다.
 
@@ -266,7 +268,7 @@ def dispatch(
         log.info("7.6 중복 판정 recipient=%s source_version=%s → %s (%s)", rid, sv, action, why)
         if action == ANALYZE:
             run_and_callback(rq, catalog, store, backend, pool_size, recipient_store,
-                             max_attempts=callback_max_attempts, backoff_s=callback_backoff_s)
+                             max_attempts=callback_max_attempts, backoff_s=callback_backoff_s, dislike_mode=dislike_mode)
         elif action == RESEND and existing is not None:
             if existing.status is RunStatus.SUPERSEDED:   # 정상 흐름에서는 나오기 어렵다 — Backend 가 더 새 버전을 이미 저장했다는 뜻
                 log.warning("7.7 재전송 대상이 SUPERSEDED recipient=%s source_version=%s — Backend 가 다시 409 를 줄 수 있다", rid, sv)
@@ -318,7 +320,7 @@ async def extract_and_pool(
 
     # 중복 판정은 **슬롯 안에서** 한다(dispatch) — 판정과 실행 사이가 벌어지면 같은 요청이 동시에 와서 분석이 두 벌 돈다
     accepted = supervisor.submit(dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S,
-                                 settings.CALLBACK_MAX_ATTEMPTS, settings.CALLBACK_BACKOFF_S)
+                                 settings.CALLBACK_MAX_ATTEMPTS, settings.CALLBACK_BACKOFF_S, dislike_mode=settings.DISLIKE_MODE)
     if not accepted:   # 큐 가득·종료 중 — 기다리지 않고 거절. Backend 는 Retry-After 뒤 같은 번호로 다시 보낸다(BE 계획 5-1)
         log.warning("7.6 거절 recipient=%s source_version=%s — 접수 대기열 가득(%d) 또는 종료 중 → 503 Retry-After %ds",
                     body.recipientUserId, body.sourceVersion, settings.QUEUE_MAX, settings.QUEUE_FULL_RETRY_AFTER_S)

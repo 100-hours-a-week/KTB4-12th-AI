@@ -84,7 +84,8 @@ _ALLOW = ConfigDict(extra="allow")
 class DislikedCategoryDto(BaseModel):
     model_config = _ALLOW
 
-    categoryId: int = Field(gt=0, description="안전한 양의 정수; 제외 판정 키. BE는 대분류(root) id 1~10만 보낸다(09-27) — AI는 그 하위 소분류 전체를 제외")
+    categoryId: int = Field(gt=0, description="안전한 양의 정수; 비선호 판정 키(위키 7.6: 감점 대상 판정 키). BE는 대분류(root) id 1~10만 보낸다(09-27) — "
+                                         "AI는 그 하위 소분류 전체를 비선호로 본다. v1은 제외, v2는 감점(settings.DISLIKE_MODE)")
     categoryName: str = Field(description="LLM이 의미를 이해하는 용도")
 
 
@@ -177,7 +178,8 @@ class ProductRecord(BaseModel):
     parentCategoryId: int | None = Field(
         default=None, gt=0,
         description="대분류 Backend id(categories.id, 1~10). 7.9 export에는 없고 DB 카탈로그가 categories 부모 조인으로 채운다. "
-                    "비선호는 대분류로 오므로(09-27 BE 결정: PreferenceSaveService 가 root만 허용) 제외 판정에 쓴다. 파일 카탈로그는 없으면 None")
+                    "비선호는 대분류로 오므로(09-27 BE 결정: PreferenceSaveService 가 root만 허용) 비선호 판정(v1 제외 · v2 감점)에 쓴다. "
+                    "파일 카탈로그는 없으면 None")
     parentCategoryName: str | None = Field(default=None, description="대분류 이름 — 이름 보조 판정용")
     price: int = Field(ge=0, description="현재 가격. export 시점의 값이며 결제 근거가 아님")
     availability: Availability = Field(

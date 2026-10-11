@@ -11,7 +11,7 @@ v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.anal
                             0) store.save(RUNNING)         실행 기록 시작 — profile_runs 한 행 (input_hash 포함). 저장 못 하면 FAILED·콜백 없음
                             1) catalog.active()            활성 카탈로그 (없으면 NoActiveCatalog — api가 접수 단계에서 이미 걸렀지만 여기서도 FAILED로 기록)
                             2) validation 만들기           v1: 비선호 이름만 disliked_tags에, 나머지 빈 값
-                            3) build_pool()                비선호 제외 · 재고 없음(unavailable)만 제외 · 조회수순 pool_size개  (결정 a)
+                            3) build_pool()                비선호 제외(v1) 또는 감점(v2, DislikeMode) · 재고 없음(unavailable)만 제외 · 조회수순 pool_size개  (결정 a)
                             4) ProfileOutcome(RESULT_READY)
                             5) store.save(outcome)         실행 기록 갱신 — callback_payload·hash가 여기서 DB에 먼저 커밋된다 (§16.4)
                             6) recipient_store.upsert()    수신자 프로필 (recipient_profiles) — 낮은 버전이면 DB가 무시
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from enum import StrEnum
 from uuid import UUID
 
 from profiling.ports import (
@@ -48,6 +49,24 @@ log = logging.getLogger(__name__)
 # 관측 라벨 — 어떤 규칙으로 만든 결과인지 저장해 두면 나중에 결과를 비교·회귀할 때 "언제 규칙이 바뀌었나"를 알 수 있다
 VALIDATOR_VERSION_V1 = "v1-skip"      # 검증기 없이 비선호만 반영
 POOL_RULE_V1 = "v1-view-count"        # 풀 정렬 규칙: 조회수 내림차순, 동점 productId 오름차순 (정렬 키는 아직 논의 중 — 09-23)
+POOL_RULE_V2_PENALTY = "v2-views-dislike-penalty"   # 인기(0~2) − 비선호 감점, 동점 productId 오름차순
+
+
+class DislikeMode(StrEnum):
+    """비선호 카테고리를 풀에서 어떻게 다루나 (10-11 결정).
+
+    v1 은 EXCLUDE(하드 — 풀에서 뺀다), v2 부터 PENALTY(소프트 — 순서에서 감점, 설계 DR-005 · 위키 데이터-컨텍스트 §2.3).
+    EXCLUDE 는 다시 쓸 수 있게 지우지 않고 남긴다. 고르는 곳은 설정 하나(settings.DISLIKE_MODE).
+    PENALTY 를 쓰는 이유: 비선호를 잔뜩 넣는 입력(악성·장난)이 와도 풀이 비지 않는다 — 한 사람의 입력이 결과를 0개로 만들 수 없다.
+    """
+
+    EXCLUDE = "exclude"
+    PENALTY = "penalty"
+
+
+# PENALTY 모드의 감점 크기 — 인기 점수(0~2) 눈금. 1.0 = 조회수 최대 상품이 비선호면 조회수 절반인 상품과 같은 자리.
+# 값은 미결(벤치로 정함). 설계서 §2.3 의 0.2 는 코사인 유사도 눈금이라 여기 그대로 쓰지 않는다.
+DISLIKE_PENALTY = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -93,13 +112,19 @@ def needs_model(rq: ProfileRequest) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int, catalog_version_id: UUID) -> SearchResult:
-    """비선호 카테고리를 뺀 상품을 **조회수 내림차순**으로 pool_size개.
+def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int, catalog_version_id: UUID, *,
+               dislike_mode: DislikeMode = DislikeMode.EXCLUDE) -> SearchResult:
+    """비선호 카테고리를 빼거나(EXCLUDE, v1) 뒤로 민(PENALTY, v2) 상품을 **조회수 내림차순**으로 pool_size개.
 
     비선호는 **대분류**로 온다(09-27 BE 결정 — 사용자 친화성. BE `PreferenceSaveService`는 root 카테고리만 저장, 최대 5).
-    그래서 상품의 대분류(`parentCategoryId`·`parentCategoryName`)가 비선호에 있으면 **그 하위 소분류 전체**를 제외한다.
-    소분류 id·이름이 오는 경우도 그대로 제외한다(파일 카탈로그·옛 시험과의 호환). 대분류 정보가 없는 상품(파일 카탈로그)은
+    그래서 상품의 대분류(`parentCategoryId`·`parentCategoryName`)가 비선호에 있으면 **그 하위 소분류 전체**가 비선호다.
+    소분류 id·이름이 오는 경우도 그대로 비선호로 본다(파일 카탈로그·옛 시험과의 호환). 대분류 정보가 없는 상품(파일 카탈로그)은
     소분류 판정만 받는다.
+
+    비선호 처리(dislike_mode, 10-11 결정):
+      EXCLUDE  풀에서 뺀다 — v1 동작 그대로. 다시 쓸 수 있게 남겨 둔 하드 규칙
+      PENALTY  빼지 않고 점수에서 DISLIKE_PENALTY 를 뺀다. 점수 = 인기(조회수 ÷ 최대 조회수 × 2, 0~2) − 감점.
+               비선호가 아닌 상품끼리의 순서는 EXCLUDE 와 같다(인기 점수가 조회수 순서를 그대로 따름) — 비선호가 없으면 결과도 같다
 
     재고(availability, 3값): **unavailable(재고 없음)만 뺀다.** unknown(재고 정보가 없는 상품)은 풀에 남긴다 — 09-23 Backend 합의.
     실제 재고를 아는 쪽은 Backend이므로 최종 판단을 Backend가 한다. 우리는 unknown을 available로 바꿔 쓰지 않고(검색기와 같은 규칙)
@@ -120,12 +145,19 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
                 or (p.parentCategoryId is not None and p.parentCategoryId in disliked_ids)
                 or (p.parentCategoryName is not None and p.parentCategoryName in disliked_names))
 
-    candidates = [
-        p for p in products
-        if p.availability != "unavailable"          # unknown은 남긴다 — 재고 판단은 Backend 몫
-        and not disliked(p)
-    ]
-    candidates.sort(key=lambda p: (-p.viewCount, p.productId))
+    candidates = [p for p in products if p.availability != "unavailable"]   # unknown은 남긴다 — 재고 판단은 Backend 몫
+
+    if dislike_mode is DislikeMode.EXCLUDE:
+        candidates = [p for p in candidates if not disliked(p)]
+        candidates.sort(key=lambda p: (-p.viewCount, p.productId))
+    else:
+        max_views = max((p.viewCount for p in candidates), default=0)
+
+        def score(p: ProductRecord) -> float:
+            popularity = 2.0 * p.viewCount / max_views if max_views else 0.0
+            return popularity - (DISLIKE_PENALTY if disliked(p) else 0.0)
+
+        candidates.sort(key=lambda p: (-score(p), p.productId))
     picked = [p.productId for p in candidates[:pool_size]]
     return SearchResult(product_ids=picked, query_text="", catalog_version_id=catalog_version_id)
 
@@ -137,7 +169,7 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
 
 def profile(
     rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStore,
-    recipient_store: RecipientProfileStore, pool_size: int = 30,
+    recipient_store: RecipientProfileStore, pool_size: int = 30, dislike_mode: DislikeMode = DislikeMode.EXCLUDE,
 ) -> ProfileOutcome:
     """7.6 요청 한 건 → ProfileOutcome (저장까지). 예외를 밖으로 내지 않고 FAILED로 돌려준다.
 
@@ -174,11 +206,13 @@ def profile(
         )
 
         # 3) 풀 30개
-        search = build_pool(rq, products, pool_size, catalog_version_id)
+        search = build_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode)
         if not search.product_ids:
             # 0개도 성공이다 — 빈 배열을 7.7로 보낸다. Backend는 저장된 추천이 없으면 인기순으로 대체한다(BE PR4 fallback).
             # 침묵(FAILED)하면 Backend 타임아웃 10분 × 재시도 뒤에야 인기순이 되므로 보내는 쪽이 빠르다. BE 확인 요청 8번.
-            log.warning("profile recipient=%s source_version=%s 풀 0개(비선호·재고로 전부 제외) — 빈 배열 콜백, Backend가 인기순 대체", rid, sv)
+            # PENALTY 모드에서는 비선호로 0개가 될 수 없다 — 남는 원인은 재고(전량 unavailable)나 빈 카탈로그뿐
+            why = "비선호·재고로 전부 제외" if dislike_mode is DislikeMode.EXCLUDE else "재고 없음·빈 카탈로그"
+            log.warning("profile recipient=%s source_version=%s 풀 0개(%s) — 빈 배열 콜백, Backend가 인기순 대체", rid, sv, why)
 
         # 4) 결과
         outcome = ProfileOutcome(
@@ -206,7 +240,8 @@ def profile(
         return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {type(e).__name__}: {e}")
 
     log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d catalog_version=%s rule=%s",
-             rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), catalog_version_id, POOL_RULE_V1)
+             rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), catalog_version_id,
+             POOL_RULE_V1 if dislike_mode is DislikeMode.EXCLUDE else POOL_RULE_V2_PENALTY)
     return outcome
 
 

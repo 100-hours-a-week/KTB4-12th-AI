@@ -200,6 +200,31 @@ def test_lookup_failure_does_not_block_intake(monkeypatch) -> None:
     assert done == ["analyze"]
 
 
+def test_dislike_mode_flows_from_settings_to_pipeline(monkeypatch) -> None:
+    """설정 DISLIKE_MODE 가 접수 → 슬롯(dispatch) → run_and_callback → pipeline.profile 까지 그대로 간다 (10-11 스위치)."""
+    seen = {}
+    real_run = intake.run_and_callback
+
+    def spy_run(*a, **k):
+        seen["run"] = k.get("dislike_mode")
+        real_run(*a, **k)
+
+    def spy_profile(rq, **k):
+        seen["profile"] = k.get("dislike_mode")
+        raise RuntimeError("여기서 멈춘다 — 전달만 본다")      # run_and_callback 이 잡아 로그로 남긴다
+
+    monkeypatch.setattr(intake, "run_and_callback", spy_run)
+    monkeypatch.setattr(pipeline, "profile", spy_profile)
+    sup = FakeSupervisor()
+    asyncio.run(intake.extract_and_pool(
+        body=_body(), catalog=FakeCatalog(), store=FakeStore(None), recipient_store=object(),
+        backend=FakeBackend(), supervisor=sup, settings=Settings(_env_file=None, DISLIKE_MODE="penalty"),
+        io_limiter=anyio.CapacityLimiter(1),
+    ))
+    sup.run()
+    assert seen == {"run": "penalty", "profile": pipeline.DislikeMode.PENALTY}
+
+
 def test_resend_records_callback_failure() -> None:
     """재전송이 실패해도 그 결과가 기록된다 (RESULT_READY로 남아 다음 재전송 대상)."""
     class Unreachable(FakeBackend):

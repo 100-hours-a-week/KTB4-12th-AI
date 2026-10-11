@@ -241,7 +241,8 @@ class ProfileOutcome(BaseModel):
 # 리뷰 신호 — 별점 → 카테고리 편향, 리뷰 한 건의 보관 형 (규칙표_별점x글 §3·§4, 2026-10-07 결정)
 #   별점은 "그 카테고리를 얼마나 좋아하나"의 지표(카테고리 층). 글은 상세 태그(태그 층 — LLM, 하네스 뒤에 붙는다).
 #   점수 = 별점 − 3 (−2~+2) · 카테고리 편향 = 내가 매긴 상품들의 점수 합 ÷ (n + 2). "+2"가 0점 두 개로 시작(가상 3점 2개).
-#   편향은 풀의 **순서만** 조정한다 — 제외는 비선호 카테고리(직접 선택)뿐. 리뷰 없는 카테고리 = 0(중립). 1~2점 상품도 제외하지 않는다.
+#   편향은 풀의 **순서만** 조정한다. 리뷰 없는 카테고리 = 0(중립). 1~2점 상품도 제외하지 않는다.
+#   직접 선택한 비선호 카테고리는 v1 제외 · v2 감점(10-11 결정, pipeline.DislikeMode — 제외 규칙은 스위치로 남김).
 # ---------------------------------------------------------------------------
 
 NEUTRAL_RATING = 3     # 이 별점이 0점. 1·2점은 음수, 4·5점은 양수
@@ -274,7 +275,19 @@ def score_categories(reviews: list[Review], category_by_product: Mapping[int, in
     규칙: 카탈로그에 없는 상품은 건너뛴다 · 같은 상품이 두 번 오면 앞의 것만(BE 가 작성일 최신순으로 보낸다) ·
     결과는 category_id 오름차순(같은 입력이면 같은 JSON). 시험: tests/unit/test_recipient_profile.py::test_score_categories_*
     """
-    raise NotImplementedError   # 1단계 손 작업(10-08): 위 규칙대로 채우고 시험 3개를 통과시킨다
+    acc: dict[int, CategoryScore] = {}
+    seen: set[int] = set()
+    for r in reviews:
+        if r.product_id in seen:
+            continue
+        seen.add(r.product_id)
+        category_id = category_by_product.get(r.product_id)
+        if category_id is None:
+            continue
+        c = acc.setdefault(category_id, CategoryScore(category_id=category_id, n=0, score_sum=0))
+        c.n += 1
+        c.score_sum += rating_score(r.rating)
+    return [acc[k] for k in sorted(acc)]
 
 
 def normalize_text(text: str | None) -> str:

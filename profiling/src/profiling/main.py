@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
     app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS, queue_max=settings.QUEUE_MAX)   # 3단계 §12.1 시작값 슬롯 1
     app.state.supervisor.start()
     app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S)
-    log.info("profiling 시작 backend=%s pool_size=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE)
+    log.info("profiling 시작 backend=%s pool_size=%s dislike_mode=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE, settings.DISLIKE_MODE)
 
     yield
 
