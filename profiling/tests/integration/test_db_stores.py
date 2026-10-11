@@ -20,13 +20,18 @@ from profiling.settings import get_settings
 from profiling.stores import DbProfileRunStore, DbRecipientProfileStore
 from profiling.types import (
     CallbackResult,
+    CategoryScore,
     DislikedCategory,
     ErrorCode,
     ProfileOutcome,
     ProfileRequest,
     RecipientProfile,
+    Review,
+    ReviewRecord,
     RunStatus,
     SearchResult,
+    preference_hash,
+    review_hash,
 )
 
 RID = 990_001
@@ -49,7 +54,7 @@ def engine():
 def stores(engine):
     runs, profiles = DbProfileRunStore(engine), DbRecipientProfileStore(engine)
     yield runs, profiles
-    for rid in (RID, RID + 1, RID + 2):        # 정리 — 시험용 수신자만
+    for rid in range(RID, RID + 6):           # 정리 — 시험용 수신자만 (리뷰 자식 행은 CASCADE 로 함께)
         runs.delete_recipient(rid)
         profiles.delete(rid)
 
@@ -141,6 +146,108 @@ def test_profile_store_upsert_get_delete_and_version_guard(stores) -> None:
     assert profiles.delete(RID) is True and profiles.get(RID) is None and profiles.delete(RID) is False
 
 
+# ---------------------------------------------------------------- 프로필 + 리뷰 한 문장 저장 (0005 · v2 4단계 · CTE)
+
+
+def _rec(pid: int, rating: int, pos: int, text: str | None = None) -> ReviewRecord:
+    return ReviewRecord(product_id=pid, rating=rating, position=pos,
+                        review_hash=review_hash(Review(product_id=pid, rating=rating, review_text=text)))
+
+
+def _prof(sv: int, reviews: list[ReviewRecord], *, rid: int = RID + 3, scores=(), pref: str | None = None) -> RecipientProfile:
+    return RecipientProfile(recipient_user_id=rid, source_version=sv, reviews=reviews, category_scores=list(scores),
+                            gift_preference_hash=preference_hash(pref))
+
+
+def _review_rows(engine, rid: int) -> list[tuple]:
+    with engine.connect() as c:
+        return [tuple(r) for r in c.execute(sa.text(
+            "select product_id, rating, position, review_hash from ai_profile.recipient_reviews where recipient_user_id=:rid order by position"),
+            {"rid": rid}).all()]
+
+
+def test_profile_store_first_save_writes_both_tables_and_get_restores(stores, engine) -> None:
+    """프로필이 없던 수신자 — 부모와 자식을 한 문장에서 만든다(FK 는 문장 끝에 검사). get() 이 리뷰 순서 · 점수 · 지문을 되살린다."""
+    _, profiles = stores
+    scores = [CategoryScore(category_id=11, n=1, score_sum=2)]
+    p = _prof(1, [_rec(7, 5, 0, "좋아요"), _rec(8, 2, 1)], scores=scores, pref="향수 좋아해요")
+    profiles.upsert(p)
+    got = profiles.get(RID + 3)
+    assert got.reviews == p.reviews and got.category_scores == scores
+    assert got.gift_preference_hash == preference_hash("향수 좋아해요")
+    assert [r[:3] for r in _review_rows(engine, RID + 3)] == [(7, 5, 0), (8, 2, 1)]
+
+
+def test_profile_store_replaces_review_snapshot(stores, engine) -> None:
+    """v1 리뷰 7·8 → v2 리뷰 8(별점 바뀜)·9: 7은 지워지고 8은 갱신, 9는 새로 (스냅샷 교체). 삭제·upsert 대상이 겹치지 않는다."""
+    _, profiles = stores
+    profiles.upsert(_prof(1, [_rec(7, 5, 0), _rec(8, 2, 1)]))
+    profiles.upsert(_prof(2, [_rec(8, 4, 0), _rec(9, 3, 1)]))
+    rows = _review_rows(engine, RID + 3)
+    assert [r[:3] for r in rows] == [(8, 4, 0), (9, 3, 1)]
+    assert rows[0][3] == review_hash(Review(product_id=8, rating=4))       # 별점이 바뀌면 지문도 바뀐다
+
+
+def test_profile_store_empty_reviews_clears_children(stores, engine) -> None:
+    _, profiles = stores
+    profiles.upsert(_prof(1, [_rec(7, 5, 0)]))
+    profiles.upsert(_prof(2, []))                                          # 리뷰를 다 지운 사용자
+    assert _review_rows(engine, RID + 3) == [] and profiles.get(RID + 3).reviews == []
+
+
+def test_profile_store_lower_version_touches_neither_table(stores, engine) -> None:
+    """늦게 도착한 옛 분석(낮은 번호)은 프로필도 리뷰도 건드리지 않는다 — 가드에 막히면 RETURNING 0행 → 자식 문장도 0행."""
+    _, profiles = stores
+    profiles.upsert(_prof(5, [_rec(8, 4, 0)], scores=[CategoryScore(category_id=11, n=1, score_sum=1)]))
+    profiles.upsert(_prof(4, [_rec(7, 1, 0)], scores=[CategoryScore(category_id=99, n=1, score_sum=-2)]))
+    got = profiles.get(RID + 3)
+    assert got.source_version == 5 and [r.product_id for r in got.reviews] == [8] and got.category_scores[0].category_id == 11
+
+
+def test_profile_store_same_version_resend_keeps_values(stores) -> None:
+    """같은 번호 재전송 — 가드가 <= 라 다시 쓰지만 값은 그대로 (시각만 바뀔 수 있어 값으로 비교)."""
+    _, profiles = stores
+    p = _prof(3, [_rec(7, 5, 0), _rec(8, 2, 1)], scores=[CategoryScore(category_id=11, n=2, score_sum=3)], pref="휴대용")
+    profiles.upsert(p)
+    first = profiles.get(RID + 3)
+    profiles.upsert(p)
+    again = profiles.get(RID + 3)
+    assert again.model_dump(exclude={"updated_at"}) == first.model_dump(exclude={"updated_at"})
+
+
+def test_profile_store_is_atomic(stores, engine) -> None:
+    """리뷰 하나를 DB 가 거부하면(CHECK) 문장 전체가 실패 — 프로필도 이전 그대로. pydantic 검증은 model_construct 로 건너뛴다."""
+    _, profiles = stores
+    profiles.upsert(_prof(1, [_rec(7, 5, 0)], pref="처음"))
+    bad = ReviewRecord.model_construct(product_id=8, rating=5, position=10, review_hash="a" * 64)   # 자리 10 — CHECK 0~9 위반
+    with pytest.raises(sa.exc.IntegrityError, match="ck_recipient_reviews_position"):
+        profiles.upsert(_prof(2, [_rec(9, 4, 0), bad], pref="나중"))
+    got = profiles.get(RID + 3)
+    assert got.source_version == 1 and got.gift_preference_hash == preference_hash("처음") and [r.product_id for r in got.reviews] == [7]
+
+
+def test_profile_store_inside_run_lock_is_one_atomic_statement(stores) -> None:
+    """운영 경로 — upsert 는 run_lock 의 잠금 커넥션(AUTOCOMMIT, 문장마다 커밋)에서 돈다. 그래도 한 문장이라 저장은 통째로,
+    실패도 통째로(프로필 그대로) — 트랜잭션 세 문장이었다면 여기서 프로필만 바뀌고 리뷰가 빠지는 반쪽 저장이 생긴다."""
+    runs, profiles = stores
+    with runs.run_lock(RID + 4, 1) as got:
+        assert got
+        profiles.upsert(_prof(1, [_rec(7, 5, 0)], rid=RID + 4, pref="처음"))
+        bad = ReviewRecord.model_construct(product_id=8, rating=0, position=1, review_hash="b" * 64)   # 별점 0 — CHECK 위반
+        with pytest.raises(sa.exc.IntegrityError, match="ck_recipient_reviews_rating"):
+            profiles.upsert(_prof(2, [_rec(9, 4, 0), bad], rid=RID + 4, pref="나중"))
+        profiles.upsert(_prof(3, [_rec(9, 4, 0)], rid=RID + 4))                                          # 실패 뒤에도 같은 커넥션 사용 가능
+    got = profiles.get(RID + 4)
+    assert got.source_version == 3 and [r.product_id for r in got.reviews] == [9] and got.gift_preference_hash is None
+
+
+def test_profile_store_delete_cascades_reviews(stores, engine) -> None:
+    _, profiles = stores
+    profiles.upsert(_prof(1, [_rec(7, 5, 0), _rec(8, 2, 1)]))
+    assert profiles.delete(RID + 3) is True
+    assert _count(engine, "recipient_reviews", RID + 3) == 0
+
+
 # ---------------------------------------------------------------- pipeline → 두 테이블
 
 
@@ -153,6 +260,23 @@ def test_pipeline_writes_both_tables(stores, engine) -> None:
     assert run.status is RunStatus.RESULT_READY and run.search.product_ids == out.search.product_ids and run.input_hash == out.input_hash
     prof = profiles.get(RID + 1)
     assert prof.source_version == 3 and [c.category_id for c in prof.disliked_categories] == [802] and prof.disliked_tags == ["출산·육아용품"]
+
+
+def test_pipeline_with_reviews_writes_scores_and_review_rows(stores, engine) -> None:
+    """리뷰가 든 요청 한 건 → 실행 기록 · 프로필(점수 · 지문) · 리뷰 행까지 실제 DB 에 들어간다(2·3·4단계 한 줄). 원문은 어디에도 없다."""
+    runs, profiles = stores
+    rq = ProfileRequest(recipient_user_id=RID + 2, source_version=1, gift_preference="육아용품 좋아요", disliked_categories=[],
+                        reviews=[Review(product_id=13006, rating=5, review_text="아기가 좋아해요"), Review(product_id=21416, rating=2)])
+    out = pipeline.profile(rq, catalog=FileCatalogReader(FIXTURE), store=runs, recipient_store=profiles)
+    assert out.status is RunStatus.RESULT_READY
+    prof = profiles.get(RID + 2)
+    assert {(s.category_id, s.n, s.score_sum) for s in prof.category_scores} == {(802, 1, 2), (305, 1, -1)}
+    assert [r.product_id for r in prof.reviews] == [13006, 21416] and prof.gift_preference_hash == preference_hash("육아용품 좋아요")
+    with engine.connect() as c:
+        dumped = c.execute(sa.text(
+            "select row_to_json(p)::text || coalesce((select json_agg(r)::text from ai_profile.recipient_reviews r where r.recipient_user_id = p.recipient_user_id), '')"
+            " from ai_profile.recipient_profiles p where p.recipient_user_id = :rid"), {"rid": RID + 2}).scalar()
+    assert "아기가 좋아해요" not in dumped and "육아용품 좋아요" not in dumped
 
 
 # ---------------------------------------------------------------- 앱 전체 (진짜 DB)

@@ -29,7 +29,7 @@ AI 프로파일링이 **소유한 표**가 무엇이고, **왜 생겼고**, **�
 | 표 | 한 줄 역할 | 왜 생겼나 | 쓰는 코드 | 읽는 코드 |
 |---|---|---|---|---|
 | `ai_profile.recipient_profiles` | 수신자 1명 = 1행. 태그와 비선호 사본 | 09-16 합의(DR-035): 태그는 7.7로 보내지 않고 AI가 보관, Chat이 나중에 읽는다. 저장소가 없어서 `0001`(09-22) | `pipeline.profile()` 6단계 → `stores.DbRecipientProfileStore.upsert()` | 앱 경로에서는 아직 안 읽는다(v3 Chat·검색 힌트 자리). 시험·드라이버가 `get()` |
-| `ai_profile.recipient_reviews` | (수신자, 상품) 1건 = 1행. 리뷰 ≤10의 상품·별점·지문(해시)·자리 — **글 원문 없음** | v2 리뷰 신호(10-07 결정) — 프로필 한 행에 리뷰 ≤10을 담을 수 없어 자식 표. 위키 "7.6 입력은 저장하지 않는다"에 맞춰 원문 대신 해시(10-11 결정 B) → `0005` | 4단계(`stores` 두 표 한 트랜잭션)에서 `upsert()`가 쓴다 — **아직 안 씀**(표만 있음) | 4단계 `get()`. 리뷰 단위 캐시(0006 `extraction`)가 해시로 판정 |
+| `ai_profile.recipient_reviews` | (수신자, 상품) 1건 = 1행. 리뷰 ≤10의 상품·별점·지문(해시)·자리 — **글 원문 없음** | v2 리뷰 신호(10-07 결정) — 프로필 한 행에 리뷰 ≤10을 담을 수 없어 자식 표. 위키 "7.6 입력은 저장하지 않는다"에 맞춰 원문 대신 해시(10-11 결정 B) → `0005` | `pipeline.profile()` 6단계 → `stores.DbRecipientProfileStore.upsert()` — 프로필과 **CTE 한 문장**(10-11) | `DbRecipientProfileStore.get()`(시험·드라이버). 리뷰 단위 캐시(0006 `extraction`)가 해시로 판정할 자리 |
 | `ai_profile.profile_runs` | 요청 (수신자, 버전) 1건 = 1행. 상태·콜백 본문·오류 | 메모리 저장으로는 재시작 후 재전송·중복 판정이 안 됐다([DB_전환_설명 §2](DB_전환_설명.md)) → `0002`(09-22) | `pipeline.profile()`(RUNNING → RESULT_READY / FAILED) · `intake._send_and_record()`(콜백 결과) · `stores.recover_stale_runs()`(기동) | `intake.dispatch()` → `get_run()`(중복 판정) · `/health` → `undelivered_count()` |
 | `ai_catalog.catalog_versions` | 적재 1회 = 1행. 활성은 항상 1개 | 배포 컨테이너에는 카탈로그 파일이 없고, 교체 순간 "버전과 상품"이 한 벌이어야 해서 `0003`(09-23) | `tools/catalog/load_catalog.py` | `catalog.DbCatalogReader.active()`(호출마다 활성 버전 id 폴링) |
 | `ai_catalog.categories` | 대분류 10 · 소분류 57 · Backend 번호 | 같은 `0003`. Backend 번호 자리(09-25 회신으로 채움). 09-27 "비선호는 대분류" 결정으로 부모 조인이 필요해졌다 | `load_catalog.py`(적재 · `--id-map`) | `DbCatalogReader._load()` → `ProductRecord.categoryId/parentCategoryId` |
@@ -293,7 +293,15 @@ select recipient_user_id, source_version, status, attempt, callback_attempts,
 | `position` | smallint | NOT NULL | | 7.6 배열에서의 자리, CHECK 0~9(0 = 최신). 건너뛴 중복이 있으면 번호가 빈다 |
 | `created_at` / `updated_at` | timestamptz | NOT NULL | `now()` | |
 
-**코드가 이 표를 어떻게 쓰나** — **아직 안 쓴다(표만 있음).** 4단계에서 `DbRecipientProfileStore.upsert()`가 프로필 upsert → 안 들어온 상품 삭제 → 리뷰 upsert 를 **한 트랜잭션**으로 하고, 프로필이 버전 가드에 막히면 리뷰도 건드리지 않는다. `get()`이 `position` 순으로 읽어 `RecipientProfile.reviews`를 복원한다. 행 모양은 `types.ReviewRecord`(상품 · 별점 · 해시 · 자리)와 같다.
+**코드가 이 표를 어떻게 쓰나** (10-11, v2 4단계)
+
+| 언제 | 함수 | SQL | 무엇이 바뀌나 |
+|---|---|---|---|
+| 분석이 끝나 콜백 본문을 커밋한 직후 | `pipeline.profile()` 6단계 → `from_outcome()` → `DbRecipientProfileStore.upsert()` | **CTE 한 문장** `_PROFILE_SAVE`: `p` 프로필 upsert(버전 가드 · `RETURNING`) → `d` 이번에 안 온 상품의 리뷰 삭제 → `u` 리뷰 upsert(`unnest` 배열 넷) | 리뷰 스냅샷 교체. 가드에 막히면 `p`가 0행이라 리뷰도 그대로. 리뷰 하나라도 CHECK 에 걸리면 문장 전체 실패 → pipeline 이 실행 기록을 FAILED 로 |
+| 읽기 | `DbRecipientProfileStore.get()` | 프로필 + `left join lateral (json_agg … order by position)` — 왕복 1번 | `RecipientProfile.reviews`(자리 순) · `category_scores` · `gift_preference_hash` 복원 |
+| 지우기 | `DbRecipientProfileStore.delete()` | 프로필 `DELETE` | 리뷰는 FK CASCADE 로 함께 |
+
+**왜 한 문장인가.** `upsert()`는 `run_lock`의 잠금 커넥션에서 돈다. 그 커넥션은 AUTOCOMMIT 이라 문장마다 따로 커밋된다 — 세 문장으로 나누면 묶이지 않고(반쪽 저장), 묶으려고 풀에서 커넥션을 더 꺼내면 왕복이 5번(BEGIN·3·COMMIT)으로 늘고 슬롯당 커넥션이 2개가 된다. 한 문장이면 그대로 원자적이고 왕복 1번이다(09-28 "문장 하나 = 왕복 하나"). `p`가 첫 덩어리라 같은 수신자의 다른 버전이 동시에 와도 프로필 행 잠금에서 줄을 서고, 나중 쪽은 커밋된 최신 버전으로 가드를 다시 판정한다. `d`(안 온 상품)와 `u`(온 상품)는 대상이 겹치지 않는다 — 한 문장에서 같은 행을 두 번 건드리면 PostgreSQL 이 거부하기 때문에 필요한 성질이다. 부모를 이 문장에서 처음 만들어도 자식 FK 는 문장 끝에 검사되어 통과한다. 행 모양은 `types.ReviewRecord`(상품 · 별점 · 해시 · 자리)와 같다.
 
 **직접 보기**
 
@@ -302,7 +310,7 @@ select recipient_user_id, product_id, rating, position, left(review_hash, 8) as 
   from ai_profile.recipient_reviews order by 1, position;
 ```
 
-**시험**: `tests/integration/test_db_recipient_profiles.py::test_recipient_reviews_schema`(열·주석·PK·FK CASCADE) · `::test_recipient_reviews_cascade_and_checks`(CHECK 별점·자리 · PK 중복 · FK 부모 없음 · 부모 삭제 시 자식 삭제) · `::test_no_raw_text_columns_stored`(원문 열이 없음). 수신자 번호는 9,000,001부터 — 로컬 DB의 콘솔 시험 데이터와 겹치지 않게.
+**시험**: `tests/integration/test_db_stores.py::test_profile_store_*`(첫 저장 · 스냅샷 교체 · 비우기 · 낮은 번호 무시 · 같은 번호 재전송 · 원자성 · **잠금 커넥션 안에서도 원자적** · 삭제 CASCADE) · `::test_pipeline_with_reviews_writes_scores_and_review_rows`(파이프라인 → 세 표, 원문 없음) · `tests/integration/test_db_recipient_profiles.py::test_recipient_reviews_schema`(열·주석·PK·FK CASCADE) · `::test_recipient_reviews_cascade_and_checks`(CHECK 별점·자리 · PK 중복 · FK 부모 없음 · 부모 삭제 시 자식 삭제) · `::test_no_raw_text_columns_stored`(원문 열이 없음). 수신자 번호는 9,000,001부터 — 로컬 DB의 콘솔 시험 데이터와 겹치지 않게.
 
 ---
 
@@ -574,6 +582,5 @@ FK(외래 키)는 "이 열의 값은 저 표에 반드시 있어야 한다"를 D
 | 임베딩 표 (pgvector) | v2·v3 | `vector` 확장은 `0001`에서 이미 켜 두었다 |
 | `backend_*_id`·`availability`·`view_count` **다시** 채우기 | 다음 Backend 회신 때 | 09-25 회신은 반영 끝(xlsx → `--id-map`·`--metrics`). 7.9 export 자동 경로 `tools/catalog/fetch_export.py`는 아직 안 씀 |
 | `recipient_profiles`를 앱이 읽는 경로 | v3 Chat · 검색 힌트 | 지금은 쓰기만 한다(§2.1) |
-| 리뷰 신호를 앱이 저장하는 경로 | 4단계 — `stores.upsert()` 두 표 한 트랜잭션 | `0005` 표는 있고 쓰기만 남았다 |
 
 마이그레이션 번호는 `0005`까지 썼다. **다음은 `0006`이다** — `0003` 카탈로그 · `0004` 열 주석 정정 · `0005` 리뷰 신호. `0006` 후보: 리뷰별 `extraction` · `prompt_version` · `vocab_version`(LLM 단계, 10-08 결정)과 위 설계서 §1.7 나머지 열.

@@ -2,6 +2,7 @@
 
   DbProfileRunStore        ai_profile.profile_runs        실행 기록 — (수신자, source_version) 한 쌍마다 한 행
   DbRecipientProfileStore  ai_profile.recipient_profiles  프로필 — 수신자당 한 행, 최신 분석이 덮어씀
+                           + ai_profile.recipient_reviews 리뷰 자식 행(0005) — 프로필과 **한 문장**으로 함께 저장
 
 표 구조·UPSERT 규칙·상태 전이는 docs/DB_전환_설명.md, 근거는 3단계 구현 상세 §10.2·§16.4 및 담당파트 설계서 §1.7.
 다른 구현을 끼울 자리는 ports.py(Protocol)이고, 조립은 main.py 한 곳에서만 한다.
@@ -12,6 +13,8 @@
   - 잠금 밖에서는 풀에서 꺼낸다: 쓰기는 `engine.begin()` 트랜잭션 하나, 읽기는 AUTOCOMMIT(BEGIN/ROLLBACK 없음).
   - 잠금 커넥션에서 도는 문장은 각각 자기 트랜잭션이다(문장 단위 원자성). 결과 저장과 프로필 upsert 가 한 트랜잭션은 아니다 —
     upsert 실패 시 pipeline 이 실행 기록을 FAILED 로 되돌리는 보상이 그 역할을 한다(DB_전환_설명 §6).
+  - 프로필 + 리뷰 두 표는 **CTE 한 문장**(_PROFILE_SAVE)으로 쓴다(10-11) — 잠금 커넥션(AUTOCOMMIT)에서도 한 문장이라 원자적이고
+    왕복 1번, 풀에서 커넥션을 더 꺼내지 않는다(슬롯당 커넥션 1개 유지). 트랜잭션 세 문장(BEGIN·3·COMMIT)이면 왕복 5번 + 커넥션 1개 더.
 """
 
 from __future__ import annotations
@@ -29,10 +32,12 @@ from sqlalchemy.engine import Engine
 
 from profiling.backend import callback_body
 from profiling.types import (
+    CategoryScore,
     DislikedCategory,
     ErrorCode,
     ProfileOutcome,
     RecipientProfile,
+    ReviewRecord,
     RunStatus,
     SearchResult,
 )
@@ -278,21 +283,63 @@ class DbProfileRunStore:
 # ===========================================================================
 
 PROFILES_TABLE = "ai_profile.recipient_profiles"
+REVIEWS_TABLE = "ai_profile.recipient_reviews"
 
-_PROFILE_UPSERT = sa.text(f"""
-    insert into {PROFILES_TABLE} (recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories)
-    values (:rid, :sv, cast(:preferred as jsonb), cast(:disliked as jsonb), cast(:categories as jsonb))
-    on conflict (recipient_user_id) do update set
-        source_version      = excluded.source_version,
-        preferred_tags      = excluded.preferred_tags,
-        disliked_tags       = excluded.disliked_tags,
-        disliked_categories = excluded.disliked_categories,
-        updated_at          = now()
-    where {PROFILES_TABLE}.source_version <= excluded.source_version""")
+# 프로필 + 리뷰 스냅샷을 한 문장으로 (0005 · v2 4단계). 덩어리 셋:
+#   p  프로필 upsert. 버전 가드(기존 <= 새)에 막히면 RETURNING 이 0행 → 아래 d·u 가 p 를 조건으로 걸어 아무것도 하지 않는다
+#      (옛 분석이 새 분석의 리뷰를 덮지 않게). **p 가 첫 덩어리**라 같은 수신자의 다른 버전이 동시에 와도 프로필 행 잠금에서 줄을 선다
+#   d  이번에 안 온 상품의 리뷰 삭제. pids 가 빈 배열이면 전부 삭제(<> all('{}') 는 참)
+#   u  이번에 온 리뷰 upsert (incoming = 배열 넷을 unnest 한 행들). d 와 u 의 대상은 겹치지 않는다(안 온 상품 / 온 상품) —
+#      한 문장에서 같은 행을 두 번 건드리면 PostgreSQL 이 거부하므로 이 성질이 필요하다
+# 부모를 이 문장에서 처음 만들어도 자식 FK 는 문장 끝에 검사되어 통과한다. 리뷰 하나라도 CHECK 에 걸리면 문장 전체가 실패한다(원자성).
+# 결과: p 의 행 수(1 = 저장, 0 = 가드에 막힘).
+_PROFILE_SAVE = sa.text(f"""
+    with incoming as (
+        select * from unnest(cast(:pids as bigint[]), cast(:ratings as smallint[]), cast(:hashes as text[]), cast(:positions as smallint[]))
+            as t(product_id, rating, review_hash, position)
+    ),
+    p as (
+        insert into {PROFILES_TABLE} (recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories,
+                                      gift_preference_hash, category_scores)
+        values (:rid, :sv, cast(:preferred as jsonb), cast(:disliked as jsonb), cast(:categories as jsonb),
+                :pref_hash, cast(:scores as jsonb))
+        on conflict (recipient_user_id) do update set
+            source_version       = excluded.source_version,
+            preferred_tags       = excluded.preferred_tags,
+            disliked_tags        = excluded.disliked_tags,
+            disliked_categories  = excluded.disliked_categories,
+            gift_preference_hash = excluded.gift_preference_hash,
+            category_scores      = excluded.category_scores,
+            updated_at           = now()
+        where {PROFILES_TABLE}.source_version <= excluded.source_version
+        returning recipient_user_id
+    ),
+    d as (
+        delete from {REVIEWS_TABLE} r using p
+        where r.recipient_user_id = p.recipient_user_id and r.product_id <> all(cast(:pids as bigint[]))
+    ),
+    u as (
+        insert into {REVIEWS_TABLE} (recipient_user_id, product_id, rating, review_hash, position)
+        select p.recipient_user_id, i.product_id, i.rating, i.review_hash, i.position from p cross join incoming i
+        on conflict (recipient_user_id, product_id) do update set
+            rating      = excluded.rating,
+            review_hash = excluded.review_hash,
+            position    = excluded.position,
+            updated_at  = now()
+    )
+    select count(*) from p""")
 
+# 프로필 + 리뷰를 한 번에 읽는다(왕복 1). 리뷰는 자리 순서로 json 배열에 담는다 — 없으면 []
 _PROFILE_GET = sa.text(f"""
-    select recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories, updated_at
-    from {PROFILES_TABLE} where recipient_user_id = :rid""")
+    select p.recipient_user_id, p.source_version, p.preferred_tags, p.disliked_tags, p.disliked_categories,
+           p.gift_preference_hash, p.category_scores, p.updated_at, coalesce(r.reviews, '[]'::json) as reviews
+    from {PROFILES_TABLE} p
+    left join lateral (
+        select json_agg(json_build_object('product_id', product_id, 'rating', rating, 'review_hash', review_hash, 'position', position)
+                        order by position) as reviews
+        from {REVIEWS_TABLE} where recipient_user_id = p.recipient_user_id
+    ) r on true
+    where p.recipient_user_id = :rid""")
 
 
 class DbRecipientProfileStore:
@@ -304,18 +351,27 @@ class DbRecipientProfileStore:
     # ---- ports.RecipientProfileStore --------------------------------------------
 
     def upsert(self, profile: RecipientProfile) -> None:
+        """프로필 + 리뷰 스냅샷을 한 문장으로(_PROFILE_SAVE). 버전 가드에 막히면 두 표 모두 그대로 — 경고 로그만(예외 아님).
+        리뷰 하나라도 DB 제약에 걸리면 문장 전체가 실패해 예외가 난다 → pipeline 이 실행 기록을 FAILED 로 되돌린다."""
+        rv = profile.reviews
         params = {
             "rid": profile.recipient_user_id, "sv": profile.source_version,
             "preferred": json.dumps(profile.preferred_tags, ensure_ascii=False),
             "disliked": json.dumps(profile.disliked_tags, ensure_ascii=False),
             "categories": json.dumps([c.model_dump() for c in profile.disliked_categories], ensure_ascii=False),
+            "pref_hash": profile.gift_preference_hash,
+            "scores": json.dumps([c.model_dump() for c in profile.category_scores]),
+            "pids": [r.product_id for r in rv], "ratings": [r.rating for r in rv],
+            "hashes": [r.review_hash for r in rv], "positions": [r.position for r in rv],
         }
-        written = _one(self._engine, _PROFILE_UPSERT, params, lambda r: r.rowcount, write=True)
-        if written == 0:   # WHERE에 걸림 = 기존 행이 더 새 버전 (순서 역전)
-            log.warning("recipient_profiles recipient=%s source_version=%s 는 기존 행보다 낮아 무시", profile.recipient_user_id, profile.source_version)
+        written = _one(self._engine, _PROFILE_SAVE, params, lambda r: r.scalar_one(), write=True)   # count(*) 는 늘 한 행
+        if written == 0:   # 가드에 걸림 = 기존 행이 더 새 버전 (순서 역전). 리뷰도 건드리지 않았다
+            log.warning("recipient_profiles recipient=%s source_version=%s 는 기존 행보다 낮아 무시(리뷰 포함)",
+                        profile.recipient_user_id, profile.source_version)
         else:
-            log.debug("recipient_profiles recipient=%s source_version=%s 저장 (disliked_categories=%d)",
-                      profile.recipient_user_id, profile.source_version, len(profile.disliked_categories))
+            log.debug("recipient_profiles recipient=%s source_version=%s 저장 (disliked_categories=%d scores=%d reviews=%d)",
+                      profile.recipient_user_id, profile.source_version, len(profile.disliked_categories),
+                      len(profile.category_scores), len(rv))
 
     def get(self, recipient_user_id: int) -> RecipientProfile | None:
         row = _one(self._engine, _PROFILE_GET, {"rid": recipient_user_id}, lambda r: r.mappings().first(), write=False)
@@ -325,9 +381,13 @@ class DbRecipientProfileStore:
             recipient_user_id=row["recipient_user_id"], source_version=row["source_version"],
             preferred_tags=list(row["preferred_tags"]), disliked_tags=list(row["disliked_tags"]),
             disliked_categories=[DislikedCategory(**c) for c in row["disliked_categories"]],
+            gift_preference_hash=row["gift_preference_hash"],
+            category_scores=[CategoryScore(**c) for c in row["category_scores"]],
+            reviews=[ReviewRecord(**r) for r in row["reviews"]],
             updated_at=row["updated_at"],
         )
 
     def delete(self, recipient_user_id: int) -> bool:
+        """프로필 삭제 — 리뷰 자식 행은 FK ON DELETE CASCADE 로 함께 사라진다(0005)."""
         with self._engine.begin() as conn:
             return conn.execute(sa.text(f"delete from {PROFILES_TABLE} where recipient_user_id = :rid"), {"rid": recipient_user_id}).rowcount > 0
