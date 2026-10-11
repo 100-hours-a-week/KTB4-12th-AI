@@ -4,12 +4,16 @@
 두 세계의 변환은 pipeline.to_internal()(7.6 DTO → ProfileRequest)과 backend.to_callback()(ProfileOutcome → 7.7 DTO) 두 곳뿐.
 
 근거 문서: 4단계 2.2(흐름·의사코드), 5단계 1.2(프로필 테이블)·3.2(모델 입력), 6단계 1.2·3.2.
+리뷰 신호(별점 → 카테고리 편향 · 리뷰 행 보관)는 2026-10-07 결정 — 규칙표_별점x글 §3·§4(팀 폴더 일일작업물/첨부/2026-10-07_리뷰_신호_처리).
 실험 산출물(`extract_3axis.json`, `profiles_3axis_v0.json`)을 그대로 읽을 수 있도록 LLM 출력·판정 로그의 키 이름은
 실험과 같게 두었다(camelCase 키는 alias로 받는다). 판정 문자열 상수는 실험과 동일 — 바꾸면 회귀 비교가 안 된다.
 """
 
 from __future__ import annotations
 
+import hashlib
+import re
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -234,6 +238,83 @@ class ProfileOutcome(BaseModel):
                                         # 접수 단계 중복 판정이 "이 RUNNING이 아직 살아 있나"를 이 값으로 본다
 
 # ---------------------------------------------------------------------------
+# 리뷰 신호 — 별점 → 카테고리 편향, 리뷰 한 건의 보관 형 (규칙표_별점x글 §3·§4, 2026-10-07 결정)
+#   별점은 "그 카테고리를 얼마나 좋아하나"의 지표(카테고리 층). 글은 상세 태그(태그 층 — LLM, 하네스 뒤에 붙는다).
+#   점수 = 별점 − 3 (−2~+2) · 카테고리 편향 = 내가 매긴 상품들의 점수 합 ÷ (n + 2). "+2"가 0점 두 개로 시작(가상 3점 2개).
+#   편향은 풀의 **순서만** 조정한다 — 제외는 비선호 카테고리(직접 선택)뿐. 리뷰 없는 카테고리 = 0(중립). 1~2점 상품도 제외하지 않는다.
+# ---------------------------------------------------------------------------
+
+NEUTRAL_RATING = 3     # 이 별점이 0점. 1·2점은 음수, 4·5점은 양수
+PRIOR_REVIEWS = 2      # 편향 분모에 더하는 "0점 리뷰" 수. 리뷰 1건이 곧바로 ±2가 되지 않게 한다 (1점 하나 → −2 ÷ 3 = −0.67)
+
+_WS = re.compile(r"\s+")
+
+
+def rating_score(rating: int) -> int:
+    """별점 1~5 → 점수 −2~+2. 3점이 0."""
+    return rating - NEUTRAL_RATING
+
+
+class CategoryScore(BaseModel):
+    """소분류 하나의 누적 — recipient_profiles.category_scores 의 원소(0005). 편향은 저장하지 않고 읽을 때 계산한다."""
+
+    category_id: int
+    n: int = Field(ge=0, description="내가 별점을 매긴 상품 수 (같은 상품은 최신 1건)")
+    score_sum: int = Field(description="점수(별점 − 3)의 합")
+
+    @property
+    def bias(self) -> float:
+        """점수 합 ÷ (n + 2). 범위 −2~+2, 0이 중립. n = 0이면 0."""
+        return self.score_sum / (self.n + PRIOR_REVIEWS)
+
+
+def score_categories(reviews: list[Review], category_by_product: Mapping[int, int]) -> list[CategoryScore]:
+    """리뷰 목록 → 소분류별 누적(CategoryScore). category_by_product 는 상품 번호 → 소분류 번호 (pipeline 이 카탈로그 by_id 로 만든다).
+
+    규칙: 카탈로그에 없는 상품은 건너뛴다 · 같은 상품이 두 번 오면 앞의 것만(BE 가 작성일 최신순으로 보낸다) ·
+    결과는 category_id 오름차순(같은 입력이면 같은 JSON). 시험: tests/unit/test_recipient_profile.py::test_score_categories_*
+    """
+    raise NotImplementedError   # 1단계 손 작업(10-08): 위 규칙대로 채우고 시험 3개를 통과시킨다
+
+
+def normalize_text(text: str | None) -> str:
+    """글 없음(None)·빈 글·공백만은 모두 "" — 7.6 은 글이 없으면 null 로 보내야 하지만 "" 나 공백으로 와도 같게 본다. 안쪽 공백은 한 칸으로."""
+    return _WS.sub(" ", (text or "").strip())
+
+
+def review_hash(review: Review) -> str:
+    """리뷰 한 건의 캐시 키 — sha256(product_id · rating · 정규화한 글), 64자. 저장된 행과 같으면 글을 다시 읽을(LLM) 필요가 없다.
+
+    별점을 넣는 이유: 별점이 바뀐 리뷰는 "다른 리뷰"다(10-07 결정 — 리뷰 단위 hash(productId, rating, 정규화 글)).
+    """
+    raw = f"{review.product_id}\n{review.rating}\n{normalize_text(review.review_text)}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+class ReviewRecord(BaseModel):
+    """ai_profile.recipient_reviews 한 행(0005) — 수신자 한 사람의 리뷰 ≤10, 상품당 최신 1건. 분석마다 행 전체를 교체한다(스냅샷)."""
+
+    product_id: int
+    rating: int = Field(ge=1, le=5)
+    review_text: str | None = Field(default=None, description="원문 그대로. 없거나 공백만이면 None")
+    review_hash: str = Field(min_length=64, max_length=64, description="review_hash() — 캐시 키")
+    position: int = Field(ge=0, description="7.6 reviews 배열에서의 자리(0이 가장 최신). 건너뛴 중복이 있으면 번호가 빌 수 있다")
+
+
+def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
+    """7.6 리뷰 목록 → 보관 행. 같은 상품이 두 번 오면 앞의 것(최신)만 — BE 가 걸러 보내지만 PK(수신자, 상품) 위반을 코드에서 먼저 막는다."""
+    out: list[ReviewRecord] = []
+    seen: set[int] = set()
+    for pos, r in enumerate(reviews):
+        if r.product_id in seen:
+            continue
+        seen.add(r.product_id)
+        out.append(ReviewRecord(product_id=r.product_id, rating=r.rating, review_text=r.review_text if normalize_text(r.review_text) else None,
+                                review_hash=review_hash(r), position=pos))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 수신자 프로필 — ai_profile.recipient_profiles 한 행과 그 갱신 규칙
 # (담당파트 상세설계서 §1.7: 태그는 AI가 보관, 한 사람당 한 행, 최신 분석이 덮어씀)
 # 열 구성과 v3 계획은 docs/코드_안내서.md
@@ -254,19 +335,25 @@ class RecipientProfile(BaseModel):
     axes: dict[str, list[ValidatedTag]] = Field(default_factory=lambda: {"likes": [], "key_features": [], "dislikes": []})
     disliked_categories: list[DislikedCategory] = Field(default_factory=list)   # 7.6에서 받은 명시 비선호 — 분석 시점 사본 (테이블 열과 같은 이름)
     recommended_product_ids: list[int] = Field(default_factory=list, max_length=30)
+    gift_preference: str | None = Field(default=None, description="7.6 giftPreference 그대로(취향 문장) — 분석 시점 사본. 없거나 공백이면 None (0005)")
+    category_scores: list[CategoryScore] = Field(default_factory=list, description="소분류별 별점 누적 — 편향 = score_sum ÷ (n + 2) (0005)")
+    reviews: list[ReviewRecord] = Field(default_factory=list, max_length=10, description="이번 분석에 쓴 리뷰 ≤10 — recipient_reviews 자식 행, 스냅샷 교체 (0005)")
     catalog_version_id: UUID | None = None
     prompt_version: str | None = None
     validator_version: str | None = None
     updated_at: datetime | None = None
 
 
-def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: str | None = None) -> RecipientProfile:
+def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: str | None = None, *,
+                 category_scores: list[CategoryScore] | None = None) -> RecipientProfile:
     """ProfileOutcome(+요청) → RecipientProfile 한 행. pipeline.profile()이 RESULT_READY 저장 직후 부른다.
 
     - preferred/disliked 태그: outcome.validation의 2필드를 상한(12·8)으로 자른다. v1은 disliked = 비선호 카테고리 이름뿐.
     - axes: ValidationResult의 3축 원형(v1은 전부 []).
     - disliked_categories: 요청(rq)에서 그대로 — "분석 시점 사본"이라 Backend가 이후 바꿔도 다음 7.6까지 모른다(설계서 §1.7).
     - recommended_product_ids · catalog_version_id: outcome.search에서(콜백과 같은 30개).
+    - gift_preference · reviews: 요청(rq)에서 그대로 — 비선호와 같은 "분석 시점 사본". 리뷰는 to_review_records()로 행(해시·자리)이 된다.
+    - category_scores: 호출자가 넘긴다(score_categories — 카탈로그가 필요해 pipeline이 만든다). 안 넘기면 [].
     """
     v = outcome.validation
     s = outcome.search
@@ -280,6 +367,9 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
              else {"likes": [], "key_features": [], "dislikes": []},
         disliked_categories=list(rq.disliked_categories),
         recommended_product_ids=list(s.product_ids) if s else [],
+        gift_preference=rq.gift_preference if normalize_text(rq.gift_preference) else None,
+        category_scores=list(category_scores or []),
+        reviews=to_review_records(rq.reviews),
         catalog_version_id=s.catalog_version_id if s else None,
         prompt_version=outcome.prompt_version,
         validator_version=outcome.validator_version,

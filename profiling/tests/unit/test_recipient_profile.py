@@ -1,6 +1,7 @@
 """profile/recipient_profile — 태그 보관·갱신 규칙.
 
 채운 것: from_outcome · should_replace · cap_tags (09-22, DB 연결에 필요).
+리뷰 신호(10-08, 규칙표_별점x글 §3·§4): rating_score · CategoryScore.bias · score_categories · review_hash · to_review_records · from_outcome 의 취향·리뷰·점수.
 남은 것(v3, skip): merge_explicit_dislikes · to_search_hint.
 """
 
@@ -13,6 +14,7 @@ from profiling.types import (
     DislikedCategory,
     ProfileOutcome,
     ProfileRequest,
+    Review,
     RunStatus,
     SearchResult,
     ValidationResult,
@@ -61,6 +63,85 @@ def test_should_replace_by_source_version() -> None:
 def test_cap_tags() -> None:
     assert rp.cap_tags([], 1) == []
     assert rp.cap_tags(["a", " a ", "", "b", "c"], 2) == ["a", "b"]              # 공백 정리·중복 제거·상한
+
+
+# ---------------------------------------------------------------- 리뷰 신호 — 별점 → 카테고리 편향 (규칙표 §3)
+
+
+@pytest.mark.parametrize("rating,score", [(1, -2), (2, -1), (3, 0), (4, 1), (5, 2)])
+def test_rating_score(rating, score) -> None:
+    assert rp.rating_score(rating) == score
+
+
+@pytest.mark.parametrize("ratings,bias", [
+    ((), 0.0),                 # 리뷰 없음 → 0 ÷ 2
+    ((1,), -2 / 3),            # 1점 하나 → −0.67
+    ((5,), 2 / 3),             # 5점 하나 → +0.67
+    ((5, 1), 0.0),             # 상쇄
+    ((5, 5), 1.0),
+    ((1, 1), -1.0),
+    ((5, 5, 1), 0.4),          # 2 ÷ 5
+    ((1, 1, 1), -1.2),         # −6 ÷ 5
+])
+def test_category_bias_table(ratings, bias) -> None:
+    """규칙표 §3 결과표 8행 그대로 — 편향 = 점수 합 ÷ (n + 2)."""
+    cs = rp.CategoryScore(category_id=11, n=len(ratings), score_sum=sum(rp.rating_score(r) for r in ratings))
+    assert cs.bias == pytest.approx(bias)
+
+
+def _reviews(*items) -> list[Review]:
+    """(product_id, rating[, text]) 튜플들 → Review 목록. 글이 없으면 None."""
+    return [Review(product_id=p, rating=r, review_text=(t[0] if t else None)) for p, r, *t in items]
+
+
+CATEGORY_OF = {1: 11, 2: 11, 3: 12, 4: 12}      # 상품 → 소분류. 5는 카탈로그에 없음
+
+
+def test_score_categories_groups_by_category_and_sorts() -> None:
+    out = rp.score_categories(_reviews((3, 1), (1, 5), (4, 3), (2, 5)), CATEGORY_OF)
+    assert [(c.category_id, c.n, c.score_sum) for c in out] == [(11, 2, 4), (12, 2, -2)]     # id 오름차순 · 3점은 0점으로 n만 늘림
+    assert [round(c.bias, 2) for c in out] == [1.0, -0.5]                                     # 4 ÷ (2+2) · −2 ÷ (2+2)
+
+
+def test_score_categories_skips_unknown_product_and_duplicate() -> None:
+    out = rp.score_categories(_reviews((5, 1), (1, 4), (1, 1)), CATEGORY_OF)                 # 5: 카탈로그 없음 · 상품 1 두 번: 앞(최신)만
+    assert [(c.category_id, c.n, c.score_sum) for c in out] == [(11, 1, 1)]
+
+
+def test_score_categories_empty() -> None:
+    assert rp.score_categories([], CATEGORY_OF) == []
+
+
+# ---------------------------------------------------------------- 리뷰 행 · 해시 (규칙표 §4 · 저장 설계)
+
+
+def test_review_hash_is_stable_and_normalizes_text() -> None:
+    a = rp.review_hash(Review(product_id=1, rating=5, review_text="향이  좋아요 "))
+    assert len(a) == 64 and a == rp.review_hash(Review(product_id=1, rating=5, review_text="향이 좋아요"))        # 공백만 다름 → 같음
+    assert a != rp.review_hash(Review(product_id=1, rating=4, review_text="향이 좋아요"))                           # 별점 다름 → 다른 리뷰
+    assert a != rp.review_hash(Review(product_id=2, rating=5, review_text="향이 좋아요"))                           # 상품 다름
+    assert rp.review_hash(Review(product_id=1, rating=5)) == rp.review_hash(Review(product_id=1, rating=5, review_text="  "))   # 없음 = 공백
+
+
+def test_to_review_records_keeps_first_per_product_and_blank_text_is_none() -> None:
+    rows = rp.to_review_records(_reviews((7, 5, " "), (8, 2, "별로"), (7, 1, "두 번째")))
+    assert [(r.product_id, r.rating, r.review_text, r.position) for r in rows] == [(7, 5, None, 0), (8, 2, "별로", 1)]
+    assert rows[0].review_hash == rp.review_hash(Review(product_id=7, rating=5))
+
+
+def test_from_outcome_carries_preference_reviews_and_scores() -> None:
+    rq = ProfileRequest(recipient_user_id=9073, source_version=3, gift_preference="향수 좋아해요", disliked_categories=[],
+                        reviews=_reviews((1, 5, "좋다"), (3, 1)))
+    scores = [rp.CategoryScore(category_id=11, n=1, score_sum=2), rp.CategoryScore(category_id=12, n=1, score_sum=-2)]
+    row = rp.from_outcome(rq, _outcome(rq, disliked=()), category_scores=scores)
+    assert row.gift_preference == "향수 좋아해요" and row.category_scores == scores
+    assert [(r.product_id, r.rating, r.review_text, r.position) for r in row.reviews] == [(1, 5, "좋다", 0), (3, 1, None, 1)]
+
+
+def test_from_outcome_blank_preference_is_none_and_defaults_empty() -> None:
+    rq = ProfileRequest(recipient_user_id=1, source_version=1, gift_preference="  ", disliked_categories=[], reviews=[])
+    row = rp.from_outcome(rq, _outcome(rq, disliked=()))
+    assert row.gift_preference is None and row.category_scores == [] and row.reviews == []
 
 
 @pytest.mark.skip(reason="v3 — merge_explicit_dislikes 채운 뒤 활성화")
