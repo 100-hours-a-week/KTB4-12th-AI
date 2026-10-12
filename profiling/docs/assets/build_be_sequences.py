@@ -5,6 +5,8 @@ python3 build_be_sequences.py [이름…]  (Chrome 헤드리스 + mermaid CDN. �
   시퀀스_전체.md              → docs/assets/seq/<이름>.png
   DB_ERD.md                   → docs/assets/erd/<이름>.png
   부하_시험_결과_2026-09-29.md → docs/assets/loadtest/<이름>.png
+  시나리오_검증_결과_2026-10-12.md → docs/assets/scenario/<이름>.png
+  임베딩_*_2026-10-12.md → docs/assets/embed/<이름>.png
   docs/issues/*/README.md     → 그 폴더/assets/<이름>.png
   docs/학습_가이드/*.md        → docs/학습_가이드/assets/<이름>.png
 문서의 mermaid를 고치면 이 스크립트를 다시 돌린다 — 그림과 본문이 한 소스."""
@@ -30,7 +32,10 @@ def targets() -> list[tuple[Path, Path]]:
     out: list[tuple[Path, Path]] = []
     for doc in sorted(DOCS_DIR.glob("BE_연동_필드표_v*.md")):
         out.append((doc, HERE / "be-seq" / doc.stem.rsplit("_", 1)[-1]))   # v1 · v2 · v3
-    for name, folder in (("시퀀스_전체.md", "seq"), ("DB_ERD.md", "erd"), ("부하_시험_결과_2026-09-29.md", "loadtest")):
+    for name, folder in (("시퀀스_전체.md", "seq"), ("DB_ERD.md", "erd"), ("부하_시험_결과_2026-09-29.md", "loadtest"),
+                         ("시나리오_검증_결과_2026-10-12.md", "scenario"),
+                         ("임베딩_추천_설계안_2026-10-12.md", "embed"), ("임베딩_비교_실험_방법_2026-10-12.md", "embed"),
+                         ("임베딩_비교_실험_결과_2026-10-12.md", "embed")):
         doc = DOCS_DIR / name
         if doc.exists():
             out.append((doc, HERE / folder))

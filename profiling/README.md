@@ -24,6 +24,9 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | 폴더 · 파일 | 내용 |
 |---|---|
 | `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · **Backend 생애주기 흉내**(`lifecycle.py` — 디바운스→7.6→202→실패·타임아웃 시 같은 번호 재시도 2회(`Retry-After`·백오프)→FAILED) |
+| `tools/scenario_callback30/` | **프로파일링 코어 30개 상품 콜백 검증** `run.py` — 가상 수신자 엑셀(`scenarios.xlsx`, 10명) → 앱 전체(7.6 → 점수 → 30개 → 진짜 7.7 요청) → 화면 + `out/` 엑셀·JSON(점수 내역 · 30개 · 콜백 원문 · 검사). 절차는 [tools/scenario_callback30/README.md](tools/scenario_callback30/README.md) |
+| `tools/embed_compare/` | **임베딩 비교 실험** `run.py` — 같은 시나리오(+ '태그' 시트)로 지금 점수식(S0)과 임베딩 네 방식(A · B · C · **D 비선호를 빼고 검색**)의 30개를 나란히. product-search 상품 벡터 · Node 질의 임베딩(로컬, 유료 API 없음). 절차는 [tools/embed_compare/README.md](tools/embed_compare/README.md) |
+| `tools/bench/` | **시간 백분위** `percentiles.py` — 저장 3방식 1,000회 · 앱만 7.6 200건(GC 기본 / `gc.freeze()` / 끔, 모드마다 새 프로세스) · 30개 콜백 하네스 10회 · 임베딩 질의 · D 순위 · 로컬 LLM 추출 기록 → p75 · p90 · p95 · p99 (`docs/assets/report/percentiles.json`). 서버 · LLM 호출 없음 |
 | `tools/loadtest/` | **부하 시험 하네스** `run.py` — 7.6 동시 N건 · `/health` 지연 · `profile_runs` 시각 · `pg_stat_activity` · 정리 · BE 구동 SQL 3종. 절차는 [tools/loadtest/README.md](tools/loadtest/README.md), 결과는 `docs/부하_시험_결과_2026-09-29.md`(팀 공유용 before/after) · `…_2026-09-28.md`(기준선) |
 | `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버** `drive.py` — 로그인 → 비선호 저장 → 7.6 관찰 → 대분류 제외 검증 → (옵션) AI 다운 시 BE 재시도 관찰. 절차는 `docs/BE_연동_시험_결과_2026-09-27.md` §7 |
 | `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
@@ -49,6 +52,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | [docs/DB_전환_설명.md](docs/DB_전환_설명.md) | 메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림) |
 | [docs/BE_전달_2026-09-27.md](docs/BE_전달_2026-09-27.md) | **BE 담당자 전달본** — 이 한 장으로 연동 구현 가능 (필드·상태·재전송·트랜잭션·확인 요청) |
 | [docs/BE_연동_필드표.md](docs/BE_연동_필드표.md) | BE 전달본 색인 — v1(7.6 세 필드 · 7.7 · `profileStatus` 생애주기 · 시퀀스 5장) · v2(7.9 export) · v3(취향·리뷰) |
+| [docs/프로파일링_코어_시험_결과보고서_2026-10-12.md](docs/프로파일링_코어_시험_결과보고서_2026-10-12.md) | **시험 결과 보고서(10-12)** — 자동 시험 269 · 30개 콜백 검증 300/300 · 성능 · 독차지 원인 · 임베딩 대안(S0 vs A~D) 비교와 확정안(λ 0.7 · 소분류 ≤ 10) · 태그 추출 모델 비교(claude-opus-5-5 · gemma4:12b · qwen3.5:9b) · 시간 백분위(p75~p99) · GC 꼬리 지연 해결(gc.freeze) · **이상 결과 27건과 원인** · 타당성 위협 (그래프 11장) |
 | [docs/파이프라인_지도/](docs/파이프라인_지도/README.md) | 날짜별 갱신 기록 — 그림 스냅샷 · 단계별 함수 · 바뀐 것 · **다음 해야 할 일(인수인계)**. 규칙은 그 폴더 README |
 | [docs/문서_목록.md](docs/문서_목록.md) | **문서 검토 트리 + 최신성** — README 에서 링크로 닿는 순서(스크립트가 만듦)와 문서마다 코드와 맞는지 |
 | [docs/issues/](docs/issues/README.md) | 발견한 문제 기록 — 발견 시각별 폴더(문서 + 그림). 이슈·트러블슈팅으로 그대로 옮긴다 |
