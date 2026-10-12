@@ -6,6 +6,7 @@
 
 | 폴더 | 무엇 | 심각도 | 상태 |
 |---|---|---|---|
+| [2026-10-12_0815_gc-tail-latency](2026-10-12_0815_gc-tail-latency/) | 순위 계산 중 세대 2 GC 로 서버 처리 꼬리 지연 — p95 13 → 36ms(앱만) · 67ms(하네스). `gc.freeze()` 반영 → p95 9.9ms | 🟡 | 해결 · 미커밋 |
 | [2026-09-30_1325_fake-console-catalog](2026-09-30_1325_fake-console-catalog/) | 가짜 Backend 재고 필드 2건 — 콘솔 상품 목록 API 500(`available` KeyError) · 7.9 응답이 계약의 `available` 불리언이 아니라 `availability` 3값 | 🟡🟡 | A 해결·미커밋 · B 열림 |
 | [2026-09-28_1424_slots-env-name](2026-09-28_1424_slots-env-name/) | 슬롯 수 환경변수 이름 — 문서는 `PROFILING_SLOTS`, 코드는 `PROFILING_PROFILING_SLOTS`만 읽음 | 🟡 | 해결 · `da0ccd7` |
 | [2026-09-27_1633_advisory-lock](2026-09-27_1633_advisory-lock/) | `run_lock` 3건 — 트랜잭션을 열어둔 채 작업 · 잠금 키 32비트 절단 · 문서-동작 불일치 | 🔴🟡🟡 | 해결 · `d50b1b8` |

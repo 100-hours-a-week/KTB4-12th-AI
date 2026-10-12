@@ -250,3 +250,17 @@ def test_poll_failure_is_not_cached_and_recovery_is_immediate(engine, active) ->
         with engine.begin() as c:
             c.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = true where id = :v"), {"v": version_id})
     assert cat.active()[0] == version_id and calls[0] == 4            # 시계 그대로인데 회복
+
+
+def test_catalog_is_frozen_out_of_gc_and_reload_does_not_pile_up(engine, active) -> None:
+    """적재 뒤 카탈로그가 GC 영구 세대로 간다(gc.freeze — 세대 2 수집이 다시 훑지 않게, 이슈 gc-tail-latency).
+    다시 적재해도 옛 카탈로그가 영구 세대에 쌓이지 않는다(unfreeze → collect → freeze)."""
+    import gc
+
+    cat = DbCatalogReader(engine)
+    _, products = cat.active()
+    first = gc.get_freeze_count()
+    assert first >= len(products) == active[2]
+    del products
+    cat._load()                                           # 같은 버전을 한 번 더 읽어 카탈로그를 통째로 바꿈
+    assert gc.get_freeze_count() < first + len(cat) // 2  # 옛 4천여 개가 남았다면 두 배 가까이 늘었을 것

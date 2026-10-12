@@ -28,6 +28,7 @@ DB adapter로 바꿀 때 유지할 계약(ports.CatalogReader): active() → (ca
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import re
@@ -195,6 +196,23 @@ _ACTIVE_PRODUCTS = sa.text(f"""
 ## 부모(대분류)를 같이 읽는 이유: 비선호가 대분류 id·이름으로 오고(09-27 BE 결정) 풀에서 그 하위 소분류 전체를 제외해야 한다.
 ## 부모의 Backend 번호가 아직 없으면 None 으로 둔다(임시 번호를 만들지 않는다 — 대분류는 회신 없이 쓸 일이 없다).
 
+def _freeze_long_lived() -> None:
+    """카탈로그처럼 프로세스 내내 사는 객체를 GC 영구 세대로 옮긴다(gc.freeze) — 세대 2 수집이 그것들을 다시 훑지 않게.
+
+    왜: 요청마다 `rank_products`가 `ScoredProduct` 4,231개를 만들어 세대 2 수집이 주기적으로 일어나는데, 그때마다 상주 카탈로그
+    `ProductRecord` 4,231개까지 훑어 요청 5~6% 가 25~100ms 를 더 썼다. 앱만 7.6 200건 실측: 서버 처리 p95 33.9 → 14.5ms
+    (GC 를 끈 대조 12.2ms). 이슈 docs/issues/2026-10-12_0815_gc-tail-latency.
+    순서: unfreeze → collect → freeze. 카탈로그가 바뀌면 옛 객체가 영구 세대에 남아 새지 않도록 먼저 풀고, 전체 수집으로 옛 순환
+    쓰레기를 치운 뒤 다시 얼린다(교체는 드물어 전체 수집 비용은 그때 한 번). 그 순간 진행 중이던 요청의 임시 객체도 함께 얼지만
+    참조가 끝나면 참조 카운트로 그대로 해제된다 — 해제되지 않는 건 이미 쓰레기였던 순환뿐이고 다음 교체 때 치워진다.
+    gc 는 프로세스 전역이다. 프로세스(uvicorn 워커)마다 따로 돈다.
+    """
+    gc.unfreeze()
+    gc.collect()
+    gc.freeze()
+    log.info("gc.freeze — 영구 세대 객체 %d개(카탈로그 포함)", gc.get_freeze_count())
+
+
 _SOURCE_PRODUCT_ID = re.compile(r"^[A-Z_]+:(\d+)$")        # KAKAO_GIFT:10002797
 _SOURCE_CATEGORY_ID = re.compile(r"^CAT-(\d+)-(\d+)$")     # CAT-01-02
 
@@ -322,6 +340,8 @@ class DbCatalogReader:
             log.warning("%s 임시 상품 번호 사용 중 — 상품 %d/%d · 카테고리 %d건이 Backend 번호가 아니다. "
                         "7.7로 내보내면 Backend에 없는 번호가 된다. load_catalog.py --id-map 으로 회신을 채우세요",
                         ErrorCode.CONTRACT_7_9_SCHEMA, provisional_p, len(products), provisional_c)
+        del rows                                        # DB 행 4천 개를 아래 freeze 에 끌고 들어가지 않게
+        _freeze_long_lived()
 
     # ---- 편의 ---------------------------------------------------------------
 
