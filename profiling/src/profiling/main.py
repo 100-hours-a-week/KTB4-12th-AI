@@ -69,6 +69,10 @@ async def lifespan(app: FastAPI):
         app.state.catalog = _NoCatalog(str(e))
     app.state.store = DbProfileRunStore(app.state.engine)
 
+    if settings.TAGGER != "none":
+        from profiling import tagging
+
+        log.info("태그 프롬프트 %s file=%s", tagging.PROMPT_VERSION, tagging.PROMPT_FILE)
     # 태그 추출기 · 임베딩 — 설정으로 켤 때만(기본 꺼짐). 만들다 실패하면 끈 채로 뜬다: 태그 없이 D 가 돈다(요청은 실패하지 않음)
     app.state.tagger = app.state.embedding = None
     if settings.TAGGER == "ollama":

@@ -89,6 +89,11 @@ class Settings(BaseSettings):
         default=None,
         description="TAGGER=openrouter 일 때 API 키 — profiling/.env(gitignore)에만 둔다. 로그 · 응답에 찍히지 않게 SecretStr",
     )
+    TAG_PROMPT_FILE: str | None = Field(
+        default=None,
+        description="태그 추출 시스템 프롬프트 파일 — 없으면 src/profiling/prompts/tag4_system.md. 상대 경로는 실행 위치(profiling/) 기준. "
+                    "바꾸면 PROMPT_VERSION(해시)이 바뀐다",
+    )
     OPENROUTER_URL: str = Field(default="https://openrouter.ai/api/v1", description="OpenRouter API 주소(OpenAI 호환 /chat/completions)")
     OLLAMA_URL: str = Field(default="http://localhost:11434", description="TAGGER=ollama 일 때 Ollama 주소")
     TAGGER_MODEL: str = Field(default="gemma4:12b", description="태그 추출 모델 — ollama: gemma4:12b(정밀) · qwen3.5:9b(빠름), openrouter: 제공자/모델 이름(OpenRouter 모델 목록의 id)")

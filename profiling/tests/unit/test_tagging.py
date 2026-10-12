@@ -163,3 +163,22 @@ def test_parse_report_and_drop_reason_key() -> None:
     assert tagging.parse_report('{"tags": 3}') == ([], "no_tags_list")
     assert tagging.parse_report('{"tags": [{"a": 1}, 2]}') == ([{"a": 1}], "skipped_items")
     assert tagging.drop_reason_key("근거가 별점 1~3점 리뷰뿐(r1=2)") == "근거가 별점 1~3점 리뷰뿐"
+
+
+def test_system_prompt_comes_from_file_and_version_tracks_content(tmp_path) -> None:
+    """프롬프트 파일(10-13) — 기본 파일은 2fc950d4 그대로, 다른 파일이면 글이 바뀌고 해시도 바뀐다, 빈 파일은 거부."""
+    import hashlib
+    import json as _json
+
+    import pytest
+
+    assert tagging.DEFAULT_PROMPT_FILE.exists() and tagging.load_system(tagging.DEFAULT_PROMPT_FILE) == tagging.SYSTEM
+    assert tagging.PROMPT_VERSION == "tag4-2fc950d4"
+    alt = tmp_path / "alt.md"
+    alt.write_text(tagging.SYSTEM + "\n8. 욕설 · 개인정보는 태그로 만들지 않는다.\n", encoding="utf-8")
+    text = tagging.load_system(alt)
+    assert text.endswith("만들지 않는다.") and text != tagging.SYSTEM
+    assert hashlib.sha256((text + _json.dumps(tagging.SCHEMA)).encode()).hexdigest()[:8] != "2fc950d4"
+    (tmp_path / "empty.md").write_text("\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        tagging.load_system(tmp_path / "empty.md")

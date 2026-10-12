@@ -164,6 +164,7 @@ def main() -> int:
     ap.add_argument("--models", default="gemma4:12b,qwen3.5:9b")
     ap.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
     ap.add_argument("--openrouter", action="store_true", help="Ollama 대신 OpenRouter(유료) — --models 에 OpenRouter 모델 id(예 anthropic/claude-haiku-5.5)")
+    ap.add_argument("--label", default="", help="기록 · 시트에 붙일 꼬리표 — 프롬프트 판끼리 비교할 때(예 v2 → 'gemma4:12b@v2'). 비면 모델 이름 그대로")
     ap.add_argument("--repeat", type=int, default=1, help="--openrouter 일 때 사람마다 반복 횟수(시간 분포 · 안정성)")
     ap.add_argument("--from-json", type=Path, help="Ollama 대신 원출력 파일(같은 프롬프트에 대한 다른 모델의 답)을 검증해 시트에 넣음")
     a = ap.parse_args()
@@ -184,8 +185,10 @@ def main() -> int:
     for model in (m.strip() for m in a.models.split(",") if m.strip()):
         print(f"\n=== 태그 추출 — {model}")
         res = extract_openrouter(model, users, info, a.repeat) if a.openrouter else extract(model, users, info)
-        write_sheet(a.scenarios, model, res)
-        log = DEFAULT_OUT / f"태그추출_{re.sub(r'[^\w.-]', '_', model)}_{datetime.now().astimezone():%Y%m%d_%H%M%S}.json"
+        name = f"{model}@{a.label}" if a.label else model          # 같은 모델 · 다른 프롬프트 판을 따로 남긴다
+        res["model"], res["prompt_version"], res["prompt_file"] = name, tagging.PROMPT_VERSION, str(tagging.PROMPT_FILE)
+        write_sheet(a.scenarios, name, res)
+        log = DEFAULT_OUT / f"태그추출_{re.sub(r'[^\w.-]', '_', name)}_{datetime.now().astimezone():%Y%m%d_%H%M%S}.json"
         log.write_text(json.dumps(res, ensure_ascii=False, indent=1))
         secs = sorted(u["seconds"] for u in res["users"].values())
         print(f"  → 사람당 p90 {secs[int(0.9 * (len(secs) - 1))]:.1f}s · 최대 {secs[-1]:.1f}s · 태그 {sum(len(u['tags']) for u in res['users'].values())} · "
