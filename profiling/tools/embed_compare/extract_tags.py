@@ -75,6 +75,51 @@ def extract(model: str, users, info) -> dict[str, Any]:
     return out
 
 
+def extract_openrouter(model: str, users, info, repeat: int = 1) -> dict[str, Any]:
+    """외부 API(OpenRouter) — 코어 어댑터 OpenRouterTagExtractor 로 같은 SYSTEM · 스키마 · temperature 0 · seed 42. **유료.**
+    repeat 번 반복해 시간 분포와 안정성(반복마다 같은 태그인가)을 본다. 태그 · 원출력은 첫 회 기준. 키는 profiling/.env."""
+    from profiling.llm import OpenRouterTagExtractor
+    from profiling.ports import TagExtractError
+    from profiling.settings import get_settings
+
+    st = get_settings()
+    if st.OPENROUTER_API_KEY is None or not st.OPENROUTER_API_KEY.get_secret_value().strip():
+        raise SystemExit("PROFILING_OPENROUTER_API_KEY 없음 — profiling/.env 에 넣기")
+    tagger = OpenRouterTagExtractor(st.OPENROUTER_URL, st.OPENROUTER_API_KEY.get_secret_value(), model, timeout_s=st.TAGGER_TIMEOUT_S, seed=SEED)
+    out = {"model": model, "digest": "openrouter", "seed": SEED, "repeat": repeat,
+           "prompt_sha256": hashlib.sha256((SYSTEM + json.dumps(SCHEMA)).encode()).hexdigest(), "users": {}}
+    try:
+        for u in users:
+            prompt, ratings = user_prompt(u, info)
+            runs = []
+            for _ in range(repeat):
+                try:
+                    reply = tagger.extract(SYSTEM, prompt, SCHEMA)
+                except TagExtractError as e:
+                    runs.append({"error": e.kind, "usage": e.usage._asdict() if e.usage else None})
+                    continue
+                keep, drop = validate(tagging.parse(reply.text), ratings, bool(u.preference))
+                runs.append({"raw": reply.text, "keep": keep, "drop": drop, "usage": reply.usage._asdict() if reply.usage else None})
+            ok = [r for r in runs if "error" not in r]
+            first = ok[0] if ok else {"raw": "", "keep": [], "drop": []}
+            sets = [sorted((t["axis"], t["tag"]) for t in r["keep"]) for r in ok]
+            us = [r["usage"] for r in ok if r.get("usage")]
+            out["users"][u.no] = {
+                "seconds": round(us[0]["total_ms"] / 1000, 3) if us else None,
+                "seconds_all": [round(x["total_ms"] / 1000, 3) for x in us],
+                "eval_tokens": us[0]["output_tokens"] if us else None,
+                "input_tokens": [x["input_tokens"] for x in us], "output_tokens": [x["output_tokens"] for x in us],
+                "cost_usd": [x["cost_usd"] for x in us], "errors": [r["error"] for r in runs if "error" in r],
+                "stable": len({json.dumps(x, ensure_ascii=False) for x in sets}) <= 1,
+                "prompt": prompt, "raw": first["raw"], "tags": first["keep"], "dropped": first["drop"]}
+            d = out["users"][u.no]
+            print(f"  {model} {u.no} {d['seconds_all']}s · 태그 {len(d['tags'])} · 버림 {len(d['dropped'])} · 안정 {d['stable']}"
+                  f"{' · 오류 ' + str(d['errors']) if d['errors'] else ''} | " + " · ".join(f"{t['axis']}:{t['tag']}" for t in d["tags"]))
+    finally:
+        tagger.close()
+    return out
+
+
 def from_responses(path: Path, users, info) -> dict[str, Any]:
     """Ollama 밖에서 같은 SYSTEM · user_prompt 로 받은 원출력(JSON)을 같은 검증기로 — 예: claude-opus-5-5 가 대화 안에서 답한 것.
     파일 모양: {"model": 이름, "note": 설명, "responses": {"U01": {"tags": [...]}, ...}}. 시간은 없다(API 호출이 아님)."""
@@ -101,7 +146,9 @@ def write_sheet(path: Path, model: str, res: dict[str, Any]) -> None:
     for r in range(ws.max_row, 1, -1):
         if ws.cell(r, 5).value == model:
             ws.delete_rows(r)
-    how = (f"tools/embed_compare/extract_tags.py · Ollama · temperature 0 · seed {SEED} · 생각 끔 · 프롬프트 {res['prompt_sha256'][:8]} · {datetime.now().astimezone():%m-%d}"
+    how = (f"tools/embed_compare/extract_tags.py · OpenRouter(외부 API) · temperature 0 · seed {SEED} · 반복 {res.get('repeat')} · 프롬프트 {res['prompt_sha256'][:8]} · {datetime.now().astimezone():%m-%d}"
+           if res.get("digest") == "openrouter" else
+           f"tools/embed_compare/extract_tags.py · Ollama · temperature 0 · seed {SEED} · 생각 끔 · 프롬프트 {res['prompt_sha256'][:8]} · {datetime.now().astimezone():%m-%d}"
            if res.get("seed") is not None else f"같은 프롬프트 {res['prompt_sha256'][:8]} · {res.get('note', '')[:80]} · {datetime.now().astimezone():%m-%d}")
     for no, u in res["users"].items():
         for t in u["tags"]:
@@ -116,6 +163,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--models", default="gemma4:12b,qwen3.5:9b")
     ap.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
+    ap.add_argument("--openrouter", action="store_true", help="Ollama 대신 OpenRouter(유료) — --models 에 OpenRouter 모델 id(예 anthropic/claude-haiku-5.5)")
+    ap.add_argument("--repeat", type=int, default=1, help="--openrouter 일 때 사람마다 반복 횟수(시간 분포 · 안정성)")
     ap.add_argument("--from-json", type=Path, help="Ollama 대신 원출력 파일(같은 프롬프트에 대한 다른 모델의 답)을 검증해 시트에 넣음")
     a = ap.parse_args()
     users = load_scenarios(a.scenarios)
@@ -134,7 +183,7 @@ def main() -> int:
         return 0
     for model in (m.strip() for m in a.models.split(",") if m.strip()):
         print(f"\n=== 태그 추출 — {model}")
-        res = extract(model, users, info)
+        res = extract_openrouter(model, users, info, a.repeat) if a.openrouter else extract(model, users, info)
         write_sheet(a.scenarios, model, res)
         log = DEFAULT_OUT / f"태그추출_{re.sub(r'[^\w.-]', '_', model)}_{datetime.now().astimezone():%Y%m%d_%H%M%S}.json"
         log.write_text(json.dumps(res, ensure_ascii=False, indent=1))

@@ -415,7 +415,7 @@ def _usage_fields(u: TokenUsage | None) -> str:
     if u is None:
         return "in_tok=? out_tok=?"
     return (f"in_tok={u.input_tokens} out_tok={u.output_tokens} load_ms={u.load_ms} in_ms={u.input_ms} out_ms={u.output_ms} "
-            f"llm_ms={u.total_ms} stop={u.stop}")
+            f"llm_ms={u.total_ms} stop={u.stop}" + (f" cost_usd={u.cost_usd}" if u.cost_usd is not None else ""))
 
 
 def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: TagExtractor,

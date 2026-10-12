@@ -142,6 +142,7 @@ class TokenUsage(NamedTuple):
     input_ms: float | None = None
     output_ms: float | None = None
     stop: str | None = None
+    cost_usd: float | None = None      # 외부 API 가 알려 준 실제 청구액(OpenRouter usage.cost). 로컬은 None
 
 
 class TagReply(NamedTuple):

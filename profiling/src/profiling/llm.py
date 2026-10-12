@@ -1,4 +1,4 @@
-"""LLM 어댑터 — ports.TagExtractor 구현. 지금은 로컬 Ollama 하나(유료 API 없음).
+"""LLM 어댑터 — ports.TagExtractor 구현. 로컬 Ollama(기본) · 외부 OpenRouter(성능 비교용, 유료 — TAGGER=openrouter).
 
 결정성: temperature 0 · seed 고정 · 생각 모드 끔 · JSON 스키마 강제(Ollama `format`) — 같은 입력이면 같은 태그(10-12 실측: gemma4:12b ·
 qwen3.5:9b 3회 반복 모두 동일). 시간: 사람당 p95 gemma4:12b 21초 · qwen3.5:9b 9초(10-12, Apple 실리콘 로컬) — 7.6 은 비동기라 BE 응답엔
@@ -11,6 +11,7 @@ qwen3.5:9b 3회 반복 모두 동일). 시간: 사람당 p95 gemma4:12b 21초 ·
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 
@@ -70,6 +71,70 @@ class OllamaTagExtractor:
             log.info("태그 추출기 준비 model=%s", self.model)
         except httpx.HTTPError as e:
             log.warning("태그 추출기 미리 올리기 실패 model=%s: %s — 첫 요청이 대신 올린다(그 요청만 느림)", self.model, type(e).__name__)
+
+    def close(self) -> None:
+        self._client.close()
+
+
+def _strip_fence(text: str) -> str:
+    """```json … ``` 로 감싼 답(일부 모델)을 벗긴다. 감싸지 않았으면 그대로."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else ""
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+    return t.strip()
+
+
+class OpenRouterTagExtractor:
+    """외부 LLM(OpenRouter, OpenAI 호환 /chat/completions) — 같은 프롬프트 · 같은 JSON 스키마 · temperature 0 · seed 고정.
+
+    사용량은 응답 usage 에서: prompt_tokens · completion_tokens · cost(OpenRouter 가 계산한 실제 청구액, usage.include).
+    시간은 이쪽에서 잰 왕복(total_ms) — 외부 API 는 적재 · 입력 · 출력 시간을 따로 주지 않는다.
+    키는 헤더에만 싣고 로그 · 예외 메시지 · repr 에 남기지 않는다. 실패는 TagExtractError(kind): timeout · connect ·
+    http_401(키) · http_402(크레딧) · http_429(한도) · http_5xx · bad_response · truncated.
+    """
+
+    def __init__(self, base_url: str, api_key: str, model: str, *, timeout_s: float = 120.0, seed: int = 42,
+                 transport: httpx.BaseTransport | None = None) -> None:
+        self.model = model
+        self._seed = seed
+        self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_s, transport=transport,
+                                    headers={"Authorization": f"Bearer {api_key}", "X-Title": "ktb4-profiling-tag-bench"})
+
+    def __repr__(self) -> str:
+        return f"OpenRouterTagExtractor(model={self.model!r})"
+
+    def extract(self, system: str, prompt: str, schema: dict) -> TagReply:
+        t0 = time.perf_counter()
+        try:
+            r = self._client.post("/chat/completions", json={
+                "model": self.model, "temperature": 0, "seed": self._seed,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                "response_format": {"type": "json_schema", "json_schema": {"name": "tags", "strict": False, "schema": schema}},
+                "usage": {"include": True},
+            })
+        except httpx.TimeoutException as e:
+            raise TagExtractError("timeout", f"model={self.model} {type(e).__name__}") from e
+        except httpx.TransportError as e:
+            raise TagExtractError("connect", f"model={self.model} {type(e).__name__}") from e
+        wall_ms = round((time.perf_counter() - t0) * 1000, 1)
+        if r.status_code >= 400:   # 본문은 제공자의 오류 문구(키 · 원문 없음)
+            raise TagExtractError(f"http_{r.status_code}", f"model={self.model} {r.text[:200]}")
+        try:
+            body = r.json()
+            choice = body["choices"][0]
+            text = choice["message"]["content"] or ""
+        except (ValueError, KeyError, TypeError, IndexError) as e:
+            raise TagExtractError("bad_response", f"model={self.model} {type(e).__name__}") from e
+        u = body.get("usage") or {}
+        usage = TokenUsage(input_tokens=u.get("prompt_tokens"), output_tokens=u.get("completion_tokens"), total_ms=wall_ms,
+                           stop=choice.get("finish_reason"), cost_usd=u.get("cost"))
+        if usage.stop == "length":
+            raise TagExtractError("truncated", f"model={self.model} output_tokens={usage.output_tokens}", usage)
+        log.debug("openrouter model=%s in_tok=%s out_tok=%s total_ms=%s cost=%s stop=%s", self.model, usage.input_tokens,
+                  usage.output_tokens, usage.total_ms, usage.cost_usd, usage.stop)
+        return TagReply(_strip_fence(text), usage)
 
     def close(self) -> None:
         self._client.close()

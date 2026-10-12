@@ -297,7 +297,8 @@ def usage_summary(results) -> dict[str, Any] | None:
             "input_p50": pct(ins, .5), "input_p95": pct(ins, .95), "input_max": pct(ins, 1),
             "output_p50": pct(outs, .5), "output_p95": pct(outs, .95), "output_max": pct(outs, 1),
             "llm_ms_p50": pct([u.total_ms for u in us], .5), "llm_ms_p95": pct([u.total_ms for u in us], .95),
-            "load_ms_max": pct([u.load_ms for u in us], 1), "stops": dict(Counter(u.stop for u in us))}
+            "load_ms_max": pct([u.load_ms for u in us], 1), "stops": dict(Counter(u.stop for u in us)),
+            "cost_usd": round(sum(u.cost_usd for u in us if u.cost_usd is not None), 6) if any(u.cost_usd is not None for u in us) else None}
 
 
 def _wait_run(engine: sa.Engine, rid: int, timeout: float = 15.0) -> dict[str, Any] | None:
@@ -631,10 +632,10 @@ def write_files(results, checks_by, out_dir: Path, scenarios: Path) -> tuple[Pat
             " | ".join(f"#{x['productId']} {x['rating']}점" for x in u.reviews)] for u in {r["user"].no: r["user"] for r in results}.values()]
     sheet("입력", ["사용자", "별칭", "페르소나", "비선호", "취향 문장", f"리뷰 (원본: {scenarios.name})"], inp, [7, 16, 40, 30, 36, 60])
     trows = [[r["user"].no, r["user"].alias, r["mode"], r["config"]["model"], len(r["user"].reviews), "y" if r["user"].preference else "n",
-              *(r["usage"] or [None] * 7)] for r in results if r["config"]["tagger"] != "none"]
+              *(r["usage"] or [None] * 8)] for r in results if r["config"]["tagger"] != "none"]
     if trows:
         sheet("토큰", ["사용자", "별칭", "모드", "모델", "리뷰 수", "취향 문장", "입력 토큰", "출력 토큰", "LLM 전체(ms)", "적재(ms)", "입력 처리(ms)",
-                     "출력 생성(ms)", "멈춘 이유"], trows, [7, 16, 9, 14, 7, 8, 9, 9, 11, 9, 11, 11, 9])
+                     "출력 생성(ms)", "멈춘 이유", "비용(USD)"], trows, [7, 16, 9, 14, 7, 8, 9, 9, 11, 9, 11, 11, 9, 10])
     wb.save(xlsx)
 
     js.write_text(json.dumps([{
@@ -728,7 +729,7 @@ def run(scenarios: Path = DEFAULT_SCENARIOS, out_dir: Path = DEFAULT_OUT, modes:
         if (us := usage_summary(results)):
             print(f"LLM 사용량 — 호출 {us['calls']}회 · 입력 {us['input_tokens']:,} · 출력 {us['output_tokens']:,} 토큰 "
                   f"(사람당 입력 p50 {us['input_p50']} · p95 {us['input_p95']} · 출력 p50 {us['output_p50']} · p95 {us['output_p95']}) · "
-                  f"LLM p95 {us['llm_ms_p95']}ms · 멈춤 {us['stops']}")
+                  f"LLM p95 {us['llm_ms_p95']}ms · 멈춤 {us['stops']}" + (f" · 비용 ${us['cost_usd']}" if us["cost_usd"] is not None else ""))
         print(f"결과 파일: {xlsx}\n          {js}")
     return {"ok": ok, "xlsx": xlsx, "json": js, "results": results, "checks": checks_by}
 
@@ -740,7 +741,8 @@ def main() -> int:
     ap.add_argument("--modes", default=",".join(MODES), help="exclude,penalty 중 쉼표로")
     ap.add_argument("--keep", action="store_true", help="실행 뒤 시험 수신자 행을 지우지 않음(DB 로 직접 보기)")
     ap.add_argument("--top", type=int, default=5, help="화면에 보일 상위 상품 수")
-    ap.add_argument("--tagger", choices=("none", "ollama"), default="none", help="태그 추출(LLM) — ollama 면 로컬 Ollama 로 실제 호출")
+    ap.add_argument("--tagger", choices=("none", "ollama", "openrouter"), default="none",
+                    help="태그 추출(LLM) — ollama: 로컬 Ollama · openrouter: 외부 API(유료, profiling/.env 의 PROFILING_OPENROUTER_API_KEY)")
     ap.add_argument("--tagger-model", default="gemma4:12b")
     ap.add_argument("--embedding-dir", default=None, help="product-search 폴더 — 주면 D 의 임베딩 단계가 켜진다")
     ap.add_argument("--save-golden", action="store_true", help="태그 끔 · D 결과로 기준 파일(golden_d.json)을 새로 쓴다 — 의도된 변경 뒤에만")

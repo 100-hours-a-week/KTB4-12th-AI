@@ -76,6 +76,14 @@ async def lifespan(app: FastAPI):
         app.state.tagger = OllamaTagExtractor(settings.OLLAMA_URL, settings.TAGGER_MODEL, timeout_s=settings.TAGGER_TIMEOUT_S)
         app.state.tagger.warm_up()
         log.info("태그 추출기 ollama model=%s url=%s", settings.TAGGER_MODEL, settings.OLLAMA_URL)
+    elif settings.TAGGER == "openrouter":
+        if settings.OPENROUTER_API_KEY is None or not settings.OPENROUTER_API_KEY.get_secret_value().strip():
+            log.error("TAGGER=openrouter 인데 PROFILING_OPENROUTER_API_KEY 가 없음 — 태그 추출기 끈 채로 진행")
+        else:
+            from profiling.llm import OpenRouterTagExtractor
+            app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, settings.OPENROUTER_API_KEY.get_secret_value(),
+                                                      settings.TAGGER_MODEL, timeout_s=settings.TAGGER_TIMEOUT_S)
+            log.info("태그 추출기 openrouter model=%s url=%s", settings.TAGGER_MODEL, settings.OPENROUTER_URL)   # 키는 남기지 않음
     if settings.EMBEDDING_DIR:
         try:
             from profiling.embedding import ProductSearchEmbedding

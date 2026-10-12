@@ -13,7 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -80,12 +80,18 @@ class Settings(BaseSettings):
     )
 
     # ---- 태그 추출(LLM) · 임베딩 (10-12, 기본 꺼짐 — 켜면 D 의 임베딩 단계가 돈다)
-    TAGGER: Literal["none", "ollama"] = Field(
+    TAGGER: Literal["none", "ollama", "openrouter"] = Field(
         default="none",
-        description="태그 추출기 — none: 끔(태그 없이 D) · ollama: 로컬 Ollama(OLLAMA_URL · TAGGER_MODEL). 실패하면 태그 없이 진행",
+        description="태그 추출기 — none: 끔(태그 없이 D) · ollama: 로컬 Ollama(OLLAMA_URL · TAGGER_MODEL) · "
+                    "openrouter: 외부 API(OPENROUTER_API_KEY · TAGGER_MODEL 예 anthropic/…). 실패하면 태그 없이 진행",
     )
+    OPENROUTER_API_KEY: SecretStr | None = Field(
+        default=None,
+        description="TAGGER=openrouter 일 때 API 키 — profiling/.env(gitignore)에만 둔다. 로그 · 응답에 찍히지 않게 SecretStr",
+    )
+    OPENROUTER_URL: str = Field(default="https://openrouter.ai/api/v1", description="OpenRouter API 주소(OpenAI 호환 /chat/completions)")
     OLLAMA_URL: str = Field(default="http://localhost:11434", description="TAGGER=ollama 일 때 Ollama 주소")
-    TAGGER_MODEL: str = Field(default="gemma4:12b", description="TAGGER=ollama 일 때 모델(10-12 비교: gemma4:12b 정밀 · qwen3.5:9b 빠름)")
+    TAGGER_MODEL: str = Field(default="gemma4:12b", description="태그 추출 모델 — ollama: gemma4:12b(정밀) · qwen3.5:9b(빠름), openrouter: 제공자/모델 이름(OpenRouter 모델 목록의 id)")
     TAGGER_TIMEOUT_S: float = Field(default=120.0, gt=0, description="LLM 호출 한 번의 시간 상한(초)")
     EMBEDDING_DIR: str | None = Field(
         default=None,
