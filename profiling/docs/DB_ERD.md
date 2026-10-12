@@ -1,4 +1,4 @@
-# AI DB 표 구조 (ERD) — 2026-09-28
+# AI DB 표 구조 (ERD) — 2026-09-28 (10-12 갱신)
 
 AI 프로파일링이 **소유한 표**가 무엇이고, **왜 생겼고**, **어떤 코드가 언제 읽고 쓰는지**를 처음 보는 사람 기준으로 적은 문서다. 정본은 `alembic/versions/`의 마이그레이션 다섯 개이고, 여기 나오는 열 이름·제약은 그것과 같다. 코드가 요청 한 건을 처리하며 DB에 무엇을 남기는지는 [DB_전환_설명.md §3](DB_전환_설명.md)에, HTTP까지 포함한 전체 순서는 [시퀀스_전체.md](시퀀스_전체.md)에 있다.
 
@@ -9,22 +9,24 @@ AI 프로파일링이 **소유한 표**가 무엇이고, **왜 생겼고**, **�
 | DB | PostgreSQL 16 + pgvector (`pgvector/pgvector:pg16`) · 데이터베이스 `ai_chat` · 계정 `ai_user` · 로컬은 compose 컨테이너 `profiling-ai-db`(5432) · 시각은 UTC |
 | 스키마 | `ai_profile`(프로파일링 3표) · `ai_catalog`(카탈로그 3표) · `public.alembic_version`(마이그레이션 장부 1행) |
 | 마이그레이션 | `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog 3표 · `0004` profile_runs 열 주석 정정(동작 변경 없음) · `0005` 리뷰 신호(recipient_profiles 열 둘 · recipient_reviews — **원문 없이 해시만**, 10-11) — `uv run alembic upgrade head` |
-| 행 수 | 2026-09-25 확인: 상품 4,231(Backend 번호·재고·조회수 전건 채움) · 카테고리 67(대분류 10·소분류 57) · 활성 카탈로그 버전 1. `ai_profile` 두 표는 비어 있다(09-27 옛 파일-카탈로그 시험 행 14건 삭제, [문서_목록 §4 ⑤](문서_목록.md)) |
+| 행 수 | 2026-09-25 확인: 상품 4,231(Backend 번호·재고·조회수 전건 채움) · 카테고리 67(대분류 10·소분류 57) · 활성 카탈로그 버전 1. `ai_profile` 두 표는 비어 있다(09-27 옛 파일-카탈로그 시험 행 14건 삭제, [문서_목록 §4 ⑤](문서_목록.md)). **10-12:** `ai_profile` 세 표 모두 0행 — 콘솔 실물 자료(수신자 1)도 사라짐(§8 번호대 표), 시험 도구는 자기 번호대만 쓰고 지운다 |
+| 10-12 갱신 | 스키마 변경은 없다(마이그레이션 그대로 `0005`). 바뀐 것은 **쓰는 방식** — ① 태그 추출기를 켜면 `preferred_tags` 에 LLM 태그가 들어간다(축 · 프롬프트판은 아직 저장 안 됨 → `0006`) ② 앱이 `products.product_kind` 를 읽는다(태그 추출 프롬프트) ③ 30개는 D 로 고르고 **리뷰한 상품은 뺀다**(`recipient_reviews` 상품) ④ 임베딩 어댑터가 기동 때 `products` 번호 대응을 읽는다 ⑤ 시험 도구별 수신자 번호대(§8) — 공유 로컬 DB 에서 서로 지우지 않게 |
 | 절 | 0 3분 요약 · 1 한눈에 · 2 `ai_profile` · 3 `ai_catalog` · 4 코드 ↔ 표 · 5 관계(FK와 FK 아닌 것) · 6 키·인덱스·제약 · 7 바깥 ID 대응 · 8 자주 헷갈리는 것 · 9 팀원 검색기 · 10 아직 없는 것 |
 
 그림은 `docs/assets/erd/`. 이 문서의 mermaid를 고치면 `python3 docs/assets/build_be_sequences.py`를 다시 돌린다 — 그림과 본문이 한 소스다.
 
 ---
 
-## 0. 3분 요약 — 표가 왜 다섯 개인가
+## 0. 3분 요약 — 표가 왜 일곱 개인가
 
-이 서비스가 하는 일은 하나다. **Backend가 수신자의 비선호 카테고리를 보내면(7.6), 카탈로그에서 상품 30개를 골라 돌려준다(7.7).** 이 일을 하려면 세 가지를 기억해야 한다.
+이 서비스가 하는 일은 하나다. **Backend가 수신자의 비선호 카테고리 · 리뷰 · 취향 문장을 보내면(7.6), 카탈로그에서 상품 30개를 골라 돌려준다(7.7).** 이 일을 하려면 네 가지를 기억해야 한다.
 
 1. **어떤 상품이 있나** — 카탈로그. Backend가 준 상품 4,231건과 카테고리 67개. → `ai_catalog` 3표
 2. **어떤 요청을 어디까지 처리했나** — 실행 기록. 같은 요청이 두 번 오면 다시 분석하지 말아야 하고, 콜백을 못 보냈으면 나중에 같은 내용을 다시 보내야 한다. → `ai_profile.profile_runs`
-3. **이 수신자에 대해 무엇을 알아냈나** — 수신자 프로필. 태그와 비선호 사본. Backend에는 상품 번호만 보내고 태그는 AI가 갖는다. → `ai_profile.recipient_profiles`
+3. **이 수신자에 대해 무엇을 알아냈나** — 수신자 프로필. 태그와 비선호 사본 · 소분류 별점 누적 · 취향 문장 지문. Backend에는 상품 번호만 보내고 태그는 AI가 갖는다. → `ai_profile.recipient_profiles`
+4. **이 수신자가 어떤 상품에 몇 점을 줬나** — 리뷰 신호(상품 · 별점 · 지문 · 자리, **글 원문 없음**). 리뷰 단위로 "이미 분석했나"를 판정하고, 리뷰한 상품은 추천에서 뺀다(10-12). → `ai_profile.recipient_reviews`(`0005`)
 
-여기에 alembic이 자동으로 만드는 장부 `public.alembic_version`(지금 어느 마이그레이션까지 적용됐나, 1행)이 더해져 다섯이다.
+`ai_catalog` 3표 + `ai_profile` 3표에 alembic이 자동으로 만드는 장부 `public.alembic_version`(지금 어느 마이그레이션까지 적용됐나, 1행)이 더해져 일곱이다(09-28 판은 리뷰 표가 없어 다섯이었다).
 
 | 표 | 한 줄 역할 | 왜 생겼나 | 쓰는 코드 | 읽는 코드 |
 |---|---|---|---|---|
@@ -168,7 +170,7 @@ erDiagram
 |---|---|---|---|---|
 | `recipient_user_id` | bigint **PK** | — | 없음(시퀀스 없음) | 수신자 사용자 ID. **Backend 정본 번호를 그대로** 쓴다 — 우리가 번호를 만들지 않는다 |
 | `source_version` | bigint | NOT NULL | | 이 행을 만든 7.6 `sourceVersion`. Backend가 비선호를 바꿀 때마다 올리는 번호. 낮은 버전이 늦게 와도 덮지 않는다 |
-| `preferred_tags` | jsonb | NOT NULL | `'[]'` | 선호 태그 `string[]` (≤12). v1은 항상 `[]` |
+| `preferred_tags` | jsonb | NOT NULL | `'[]'` | 선호 태그 `string[]` (≤12). 태그 추출기 꺼짐(`TAGGER=none`, 기본)이면 `[]`. 켜면(`ollama`) LLM 이 뽑고 검증기를 통과한 4축 태그의 **글자만**(예: `["카카오프렌즈 춘식이", "산리오 한교동"]`) — 축 · 프롬프트판은 아직 저장 안 함(`0006`) |
 | `disliked_tags` | jsonb | NOT NULL | `'[]'` | 비선호 태그 `string[]` (≤8). v1은 7.6이 준 카테고리 **이름** |
 | `disliked_categories` | jsonb | NOT NULL | `'[]'` | 7.6 명시 비선호 `[{category_id, category_name}]` — 분석 시점 사본. 키는 snake_case |
 | `created_at` / `updated_at` | timestamptz | NOT NULL | `now()` | DB가 채운다 |
@@ -188,6 +190,8 @@ erDiagram
 | 지우기 | `DbRecipientProfileStore.delete()` | `DELETE` | 시험 정리·사용자 삭제 요청용. `drive.py`가 끝에 부른다 |
 
 v1에서 실제로 들어가는 값 — `preferred_tags = []`, `disliked_tags = 7.6이 준 카테고리 이름들`, `disliked_categories = 7.6 본문의 비선호 목록 그대로`. 셋 다 `types.from_outcome()`이 채운다.
+
+**10-12 — 태그 추출기를 켜면**(`PROFILING_TAGGER=ollama`): `preferred_tags` 에 태그 글자가 들어간다(`pipeline._extract_tags` → `tagging.to_validation` → `from_outcome`). 그런데 **어느 축(카테고리 · IP · 브랜드 · 특징)인지와 어떤 프롬프트 · 모델로 뽑았는지(`prompt_version`, 예 `tag4-2fc950d4@gemma4:12b`)는 이 표에도 `profile_runs` 에도 저장되지 않는다** — 열이 없다(§10 `0006`). 그래서 채팅이 태그 축을 알 수 없고, 하네스는 LLM 원출력을 따로 기록해 같은 검증기로 다시 만들어 대조한다(`tools/scenario_callback30` `_SpyTagger`).
 
 **직접 보기**
 
@@ -389,7 +393,7 @@ Backend 회신 xlsx 2종 (09-25)
 
 **재적재해도 덮지 않는 열이 셋 있다** — `backend_product_id` · `availability` · `view_count`. 각각 Backend 회신(`--id-map` · `--metrics`)이 채우는 자리이므로, 패키지를 다시 넣어도 UPSERT가 건드리지 않는다(`test_load_keeps_backend_id_and_availability`).
 
-**앱이 실제로 쓰는 열은 몇 개 안 된다.** `_load()`가 읽는 것은 `backend_product_id`(7.7로 나가는 번호) · `name` · `brand` · `description` · 소분류·대분류의 번호와 이름 · `unit_price` · `availability`(`unavailable`만 제외) · `view_count`(정렬) · `updated_at`. 나머지 열은 v3·export를 위한 보관이다.
+**앱이 실제로 쓰는 열은 몇 개 안 된다.** `_load()`가 읽는 것은 `backend_product_id`(7.7로 나가는 번호) · `name` · `brand` · `description` · **`product_kind`**(10-12 — 태그 추출 프롬프트의 "종류", `ProductRecord.productKind`) · 소분류·대분류의 번호와 이름 · `unit_price` · `availability`(`unavailable`만 제외) · `view_count`(정렬) · `updated_at`. 나머지 열은 v3·export를 위한 보관이다. 읽은 뒤 `gc.freeze()` 로 상주 카탈로그를 GC 영구 세대로 옮긴다(10-12, DB 동작은 아니고 메모리 — 이슈 gc-tail-latency).
 
 **코드가 이 세 표를 어떻게 쓰나**
 
@@ -400,7 +404,8 @@ Backend 회신 xlsx 2종 (09-25)
 | 재고·조회수 반영 | `load_catalog.py --metrics` (`apply_metrics`) | `UPDATE products SET availability, view_count …` | `products` |
 | 앱 기동 · `/health` · 7.6 접수 · 분석 1단계 | `catalog.DbCatalogReader.active()` → `_active_version()` | `SELECT id, package_id FROM catalog_versions WHERE is_active` (마지막 폴링 뒤 1초 안이면 생략) | `catalog_versions` |
 | 활성 버전이 바뀌었을 때만 | `DbCatalogReader._load()` | 버전 + 상품 + 소분류 + 대분류를 **한 문장**으로 조인(`_ACTIVE_PRODUCTS`) | 셋 다 |
-| 상품 30개 고르기 | `pipeline.build_pool()` | — (메모리 캐시) | — |
+| 상품 30개 고르기 | `pipeline.make_pool()` → `selection.select_pool()`(D — 비선호 · **리뷰한 상품** 제외 · 한 소분류 ≤ 10 · 같은 모델 하나 · MMR) | — (메모리 캐시) | — |
+| 임베딩을 켤 때 기동 1회(`EMBEDDING_DIR`) | `embedding.ProductSearchEmbedding()` | `SELECT source_product_id, backend_product_id FROM products WHERE backend_product_id IS NOT NULL` — 검색기 벡터(파일)를 BE 번호에 잇는다 | `products` |
 | 회신 대조 | `tools/catalog/fetch_export.py --compare-db` | `SELECT`(옛 팀원 표 `ai_search.products`, §9) | — |
 
 **직접 보기**
@@ -420,18 +425,19 @@ select availability, count(*), count(backend_product_id) as with_backend_id, cou
 
 **행렬로 보기** — 행은 코드(부르는 순서), 열은 표, 칸은 무엇을 하는지. 빈 칸은 안 건드린다는 뜻이다.
 
-| 코드 | `profile_runs` | `recipient_profiles` | `catalog_versions` | `categories` | `products` | `alembic_version` |
-|---|---|---|---|---|---|---|
-| `main.lifespan` (기동) | UPDATE 300초 넘은 RUNNING → FAILED | | 활성 id SELECT + 전체 로드 | 로드 | 로드 | SELECT — 없으면 기동 실패 |
-| `main.health` (`/health`) | COUNT RESULT_READY | | 활성 id SELECT(1초 TTL) | | | SELECT |
-| `intake.extract_and_pool` (7.6 접수) | | | 활성 id SELECT(1초 TTL) — 없으면 503 | | | |
-| `intake.dispatch` (슬롯 안) | advisory lock(AUTOCOMMIT) · SELECT 한 행 → decide | | | | | |
-| `pipeline.profile` (분석) | UPSERT RUNNING → RESULT_READY / FAILED | UPSERT — 낮은 버전 무시 | 활성 id SELECT(1초 TTL) — 바뀌었으면 재로드 | (재로드) | (재로드) | |
-| `intake._send_and_record` (7.7 뒤) | UPSERT 최종 상태 · `callback_attempts` | | | | | |
-| `tools/catalog/load_catalog.py` | | | INSERT · `is_active` 교체 | UPSERT · UPDATE(`--id-map`) | UPSERT · UPDATE(`--id-map` · `--metrics`) | |
-| `tools/be_integration/drive.py` (시험) | SELECT · DELETE | DELETE | | | | |
-| `alembic upgrade head` (`ai-migrate`) | DDL | DDL | DDL | DDL | DDL | INSERT / UPDATE |
-| pytest 통합 시험 | 읽기·쓰기·삭제 | 읽기·쓰기·삭제 | `is_active` 잠깐 토글(503 시험) | 읽기 | 읽기 | 읽기 |
+| 코드 | `profile_runs` | `recipient_profiles` | `recipient_reviews` | `catalog_versions` | `categories` | `products` | `alembic_version` |
+|---|---|---|---|---|---|---|---|
+| `main.lifespan` (기동) | UPDATE 300초 넘은 RUNNING → FAILED | | | 활성 id SELECT + 전체 로드 | 로드 | 로드 · (임베딩 켬) 번호 대응 SELECT | SELECT — 없으면 기동 실패 |
+| `main.health` (`/health`) | COUNT RESULT_READY | | | 활성 id SELECT(1초 TTL) | | | SELECT |
+| `intake.extract_and_pool` (7.6 접수) | | | | 활성 id SELECT(1초 TTL) — 없으면 503 | | | |
+| `intake.dispatch` (슬롯 안) | advisory lock(AUTOCOMMIT) · SELECT 한 행 → decide | | | | | | |
+| `pipeline.profile` (분석) | UPSERT RUNNING → RESULT_READY / FAILED | UPSERT — 낮은 버전 무시(CTE 한 문장 p) | 없는 리뷰 DELETE · UPSERT(같은 CTE d · u) | 활성 id SELECT(1초 TTL) — 바뀌었으면 재로드 | (재로드) | (재로드) | |
+| `intake._send_and_record` (7.7 뒤) | UPSERT 최종 상태 · `callback_attempts` | | | | | | |
+| `tools/catalog/load_catalog.py` | | | | INSERT · `is_active` 교체 | UPSERT · UPDATE(`--id-map`) | UPSERT · UPDATE(`--id-map` · `--metrics`) | |
+| `tools/be_integration/drive.py` · `drive_v07.py` (BE 연동 시험) | SELECT · DELETE | DELETE | (CASCADE) | | | | |
+| `tools/scenario_callback30` · `tools/bench` (하네스 · 측정, 10-12) | SELECT · DELETE(자기 번호대) | SELECT · DELETE(자기 번호대) | SELECT · (CASCADE) | 활성 id SELECT | 로드 | 로드 · 번호 대응 SELECT | |
+| `alembic upgrade head` (`ai-migrate`) | DDL | DDL | DDL | DDL | DDL | DDL | INSERT / UPDATE |
+| pytest 통합 시험 | 읽기·쓰기·삭제 | 읽기·쓰기·삭제 | 읽기·쓰기·삭제 | `is_active` 잠깐 토글(503 시험) | 읽기 | 읽기 | 읽기 |
 
 굵은 규칙 셋 — **앱은 `ai_catalog`를 읽기만 한다**(쓰는 것은 `load_catalog.py`뿐), **`ai_profile`은 앱만 쓴다**(도구는 시험 정리뿐), **DDL은 alembic만 한다**. 전부 SQLAlchemy Engine 하나(`main._connect_db`)를 거치고, 카탈로그는 `DbCatalogReader`가 메모리에 캐시해 요청마다 표를 읽지 않는다(활성 id 폴링도 1초에 한 번).
 
@@ -450,12 +456,13 @@ flowchart LR
     direction TB
     T1["load_catalog.py"]
     T3["alembic upgrade head"]
-    T2["be_integration/drive.py"]
+    T2["be_integration · 하네스<br/>drive · scenario_callback30"]
   end
   subgraph db["PostgreSQL ai_chat"]
     direction TB
     R[("profile_runs")]
     P[("recipient_profiles")]
+    RV[("recipient_reviews")]
     V[("catalog_versions")]
     K[("categories")]
     D[("products")]
@@ -467,6 +474,7 @@ flowchart LR
   A2 --> C
   A2 --> R
   A2 --> P
+  A2 --> RV
   C --> V
   C --> K
   C --> D
@@ -475,6 +483,7 @@ flowchart LR
   T1 --> D
   T2 --> R
   T2 --> P
+  T2 --> RV
   T3 --> M
 ```
 
@@ -554,11 +563,24 @@ FK(외래 키)는 "이 열의 값은 저 표에 반드시 있어야 한다"를 D
 
 **통합 시험이 DB를 건드리나?** 그렇다. 같은 `PROFILING_DATABASE_URL`에 직접 쓰고 지운다. 503 시험은 활성 카탈로그를 잠깐 `is_active = false`로 바꿨다 되돌린다. DB에 연결이 안 되면 skip이다. 개발 데이터와 나누고 싶으면 시험 때 `PROFILING_DATABASE_URL`을 다른 DB로 준다.
 
-**표를 바꾸고 싶으면?** `alembic/versions/`에 새 리비전을 만든다(다음 번호는 `0005`). 열 주석 하나도 마이그레이션으로 한다(`0004`가 그 예). 마이그레이션은 되돌릴 수 있게 작은 단위로 쓴다.
+**표를 바꾸고 싶으면?** `alembic/versions/`에 새 리비전을 만든다(다음 번호는 `0006`). 열 주석 하나도 마이그레이션으로 한다(`0004`가 그 예). 마이그레이션은 되돌릴 수 있게 작은 단위로 쓴다.
+
+**리뷰한 상품은 왜 추천에 안 나오나?** 10-12 결정 — 리뷰한 상품 = 이미 받은 선물이라 다시 추천하지 않는다(`pipeline.reviewed_ids` → `select_pool(exclude_ids=)`, S0 도 같음). `recipient_reviews` 의 상품과 그 사람의 7.7 `recommendedProductIds` 는 겹치지 않는다. 그 상품의 별점(`category_scores`)과 태그는 취향 신호로 그대로 쓴다.
+
+**공유 로컬 DB 에서 시험끼리 지우지 않으려면?** 로컬 `profiling-ai-db` 는 v2 브랜치 · 콜백 브랜치 · 시험 도구가 함께 쓴다. 도구마다 수신자 번호대를 나눠 그 범위만 지운다 — 같은 번호대를 쓰는 둘을 **동시에** 돌리면 서로의 행을 지운다(10-12: 하네스와 통합 시험을 동시에 돌려 시험 1개 실패).
+
+| 수신자 번호 | 누가 | 지우는 범위 |
+|---|---|---|
+| 1 · 2 | BE 연동 드라이버(`drive_v07.py reset`) · BE 콘솔 | **1 · 2 를 통째로 지운다** — 콘솔 실물 자료(수신자 1)가 10-12 에 사라진 원인으로 추정 |
+| 990,001 ~ 990,011 | 통합 시험(`test_db_stores` · `test_e2e_app`) | 시험마다 그 번호 |
+| 9,000,001 ~ | 통합 시험(`test_db_recipient_profiles` 리뷰 표) | 그 번호 |
+| 9,100,000 ~ | 로컬 실측 하네스 ①(`e2e_v2.py`, 10-11) | 그 범위 |
+| 9,300,000 ~ 9,319,999 | 30개 콜백 검증 하네스(제외 · 감점 모드) + 그 통합 시험 | 그 범위 |
+| 9,400,000 ~ 9,401,010 | 시간 백분위 측정(`tools/bench/percentiles.py`) | 그 범위 |
 
 **시각은 왜 UTC인가?** 컨테이너가 `TZ=UTC`이고 모든 시각 열은 DB의 `now()`가 채운다. RUNNING 정리·중복 판정의 시간 비교가 전부 DB 시각 기준이라, 앱 서버 시각이 틀려도 영향이 없다.
 
-**지금 상태를 어디서 보나?** `curl :8000/health` — `catalog.active`·`catalog.version`·`catalog.products`(활성 카탈로그), `store.connected`·`store.migration`(지금 `0004`)·`store.undelivered`(RESULT_READY 행 수). 표를 직접 보려면 각 절의 "직접 보기" SQL.
+**지금 상태를 어디서 보나?** `curl :8000/health` — `catalog.active`·`catalog.version`·`catalog.products`(활성 카탈로그), `store.connected`·`store.migration`(지금 `0005`)·`store.undelivered`(RESULT_READY 행 수). 표를 직접 보려면 각 절의 "직접 보기" SQL.
 
 ---
 
@@ -578,9 +600,12 @@ FK(외래 키)는 "이 열의 값은 저 표에 반드시 있어야 한다"를 D
 
 | 무엇 | 언제 | 어디 |
 |---|---|---|
-| `recipient_profiles`에 `profile_run_id`(FK) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` | v3 — 설계서 §1.7의 나머지 열. `RecipientProfile` 객체에는 이미 있고 `upsert()`가 그때 함께 쓴다 | 새 마이그레이션 `0006` |
-| 임베딩 표 (pgvector) | v2·v3 | `vector` 확장은 `0001`에서 이미 켜 두었다 |
+| **`recipient_profiles` 에 4축 태그(`axes`) · `prompt_version` · `validator_version`** | **이제 필요(10-12)** — 태그 추출(LLM)이 코드에 들어왔는데 축과 프롬프트판을 남길 곳이 없다. 채팅이 태그 축을 알려면, 재현 · 프롬프트 판 비교를 하려면 필요. 공유 로컬 DB 를 콜백 브랜치도 써서 순서 협의 필요 | 새 마이그레이션 `0006` |
+| `profile_runs` 에 `prompt_version` · `validator_version` | 위와 함께 — 실행 단위로 "어느 모델 · 프롬프트로 고른 30개인가" | `0006` |
+| `recipient_reviews` 에 리뷰별 `extraction`(추출 결과 캐시) | LLM 단계 — 같은 `review_hash` 면 LLM 을 다시 부르지 않게(10-08 결정) | `0006` |
+| `recipient_profiles`에 `profile_run_id`(FK) · `recommended_product_ids` · `catalog_version_id` | v3 — 설계서 §1.7의 나머지 열. `RecipientProfile` 객체에는 이미 있고 `upsert()`가 그때 함께 쓴다 | `0006` 또는 그 뒤 |
+| 임베딩 표 (pgvector) | 서비스 반영 때 — 지금 상품 벡터는 DB 가 아니라 검색기(product-search)의 **파일**(`data/vectors.f32` · `manifest.json`)이고, 앱은 `EMBEDDING_DIR` 로 읽는다(10-12, 기본 꺼짐). 모델 라이선스(CC BY-NC) 확인 뒤 표로 옮길지 결정 | `vector` 확장은 `0001`에서 이미 켜 두었다 |
 | `backend_*_id`·`availability`·`view_count` **다시** 채우기 | 다음 Backend 회신 때 | 09-25 회신은 반영 끝(xlsx → `--id-map`·`--metrics`). 7.9 export 자동 경로 `tools/catalog/fetch_export.py`는 아직 안 씀 |
 | `recipient_profiles`를 앱이 읽는 경로 | v3 Chat · 검색 힌트 | 지금은 쓰기만 한다(§2.1) |
 
-마이그레이션 번호는 `0005`까지 썼다. **다음은 `0006`이다** — `0003` 카탈로그 · `0004` 열 주석 정정 · `0005` 리뷰 신호. `0006` 후보: 리뷰별 `extraction` · `prompt_version` · `vocab_version`(LLM 단계, 10-08 결정)과 위 설계서 §1.7 나머지 열.
+마이그레이션 번호는 `0005`까지 썼다. **다음은 `0006`이다** — `0003` 카탈로그 · `0004` 열 주석 정정 · `0005` 리뷰 신호. `0006` 후보: 4축 태그 `axes` · `prompt_version` · `validator_version`(프로필 · 실행 기록) · 리뷰별 `extraction` · `vocab_version`(LLM 단계, 10-08 결정 — 10-12 LLM 단계가 코드에 들어와 이제 필요)과 위 설계서 §1.7 나머지 열.
