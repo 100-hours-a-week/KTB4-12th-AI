@@ -36,6 +36,8 @@ from typing import Any, Self
 import numpy as np
 import sqlalchemy as sa
 
+from profiling import selection
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 SEARCH = REPO / "product-search"
@@ -51,11 +53,9 @@ RRF_K = 30            # product-search 와 같은 RRF 상수
 SIM_WEIGHT = 2.0      # 유사도 백분위 × 2 — 인기(백분위 × 2)와 같은 크기
 MMR_LAMBDA = 0.7      # 1 이면 B 와 같고, 낮을수록 서로 다른 상품을 고른다
 NEAR_DUP = 0.95       # 앞서 고른 상품과 코사인이 이 이상이면 근접 중복(같은 상품의 옵션 · 용량 차이 등)
-# D 전용(결과 문서 §6 개선 1~5)
-D_POP_CANDS = 0       # 후보에 섞는 인기 상위(비선호 제외) 수. 2차 훑기에서 0 이 최선 — 30·100 은 취향 적중만 떨어뜨리고 U02·U10 은 그대로(결과 문서 §8)
-D_AXIS_WEIGHT = {"특징": 0.5}   # 축 가중(없으면 1.0) — "실용적인 선물" 같은 모호한 태그가 순위를 뒤집지 않게
-D_LAMBDA = 0.7        # 10-12 사용자 결정 — 0.5 는 느슨한 관련 상품(카메라 · 키링)이 섞임
-D_CAT_CAP = 10        # 한 소분류 최대 개수(10-12 사용자 결정 · K 훑기 결과 문서 §9). 태그가 한 소분류만 가리킬 때(U10)의 독차지를 막는다
+# D 의 상수(λ 0.7 · 한 소분류 최대 10 · 특징 축 ½ · 태그당 50)는 코어 profiling.selection 에 있다 — 실험과 코어가 한 구현(10-12).
+# 2차 훑기의 "인기 후보 섞기"는 취향만 흐려(결과 문서 §8.1) 코어에 넣지 않았다.
+D_CAT_CAP = selection.CAT_CAP
 _MODEL = re.compile(r"[A-Za-z]{1,6}-?\d{2,}[A-Za-z0-9-]*")   # WH-1000XM6 · ULT900N — 색상 · 옵션만 다른 상품을 묶는 열쇠
 
 
@@ -156,86 +156,70 @@ def _fill(picked: list[int], s0: list[int]) -> list[int]:
 
 
 def dup_key(p) -> tuple[str, str] | None:
-    """같은 브랜드 + 같은 모델 코드 → 같은 상품의 색상 · 옵션 차이로 본다. 모델 코드가 없으면 None(묶지 않음).
-    코사인으로는 못 가른다 — SONY WH-1000XM6 색상끼리 0.91~0.96 인데 다른 상품(WF-1000XM6 이어폰)과도 0.94 (10-12 측정)."""
-    m = _MODEL.findall(p.name)
-    return (p.brand, m[0].upper()) if m else None
+    """코어 selection.dup_key(같은 브랜드 + 같은 모델 코드) — 상품 객체를 받는 얇은 포장."""
+    return selection.dup_key(p.name, p.brand)
 
 
-def _mmr(cands: list[int], rel: np.ndarray, V: np.ndarray, lam: float, k: int, skip=None) -> list[int]:
-    """관련도 rel(cands 와 같은 순서, 0~1)과 이미 고른 상품과의 최대 코사인을 λ 로 섞어 k 개. skip(i, 고른 목록) 이 참이면 건너뜀."""
+def _mmr(cands: list[int], rel: np.ndarray, V: np.ndarray, lam: float, k: int) -> list[int]:
+    """C(1차) 의 MMR — 관련도 rel(cands 와 같은 순서, 0~1)과 이미 고른 상품과의 최대 코사인을 λ 로 섞어 k 개."""
     cv = V[cands]
     chosen: list[int] = []
     red = np.zeros(len(cands))
     left = np.ones(len(cands), dtype=bool)
     while len(chosen) < k and left.any():
-        mmr = np.where(left, lam * rel - (1 - lam) * red, -np.inf)
-        j = int(np.argmax(mmr))
+        j = int(np.argmax(np.where(left, lam * rel - (1 - lam) * red, -np.inf)))
         left[j] = False
-        if skip and skip(cands[j], chosen):
-            continue
         chosen.append(cands[j])
         red = np.maximum(red, cv @ cv[j])
     return chosen
 
 
-def strategy_d(ranked, qvecs: np.ndarray, axes: list[str], V: np.ndarray) -> tuple[list[int], dict[str, Any]]:
-    """D — 비선호를 빼고 검색 → 후보(태그 ∪ 인기 상위) → 점수(축 가중 유사도 + 인기 + 편향) → MMR(백분위 관련도, λ D_LAMBDA)
-    + 이름 중복 제거 + 소분류 상한 D_CAT_CAP → 모자라면 비선호 아닌 S0 순서(상한 지킴) → 그래도 모자라면 상한 없이
-    → 그래도 모자라면 비선호를 S0(감점) 순서로."""
+class _ArrayEmbedding:
+    """코어 ports.EmbeddingIndex 모양 — 이미 만든 상품 벡터(ranked 순서)와 질의 벡터(태그 순서)를 그대로 돌려준다."""
+
+    version = "embed_compare"
+
+    def __init__(self, ranked, V: np.ndarray, tags: list[str], qvecs: np.ndarray) -> None:
+        self._row = {s.product.productId: i for i, s in enumerate(ranked)}
+        self._V, self._q = V, {t: qvecs[k] for k, t in enumerate(tags)}
+
+    def product_vectors(self, ids: list[int]) -> np.ndarray:
+        return self._V[[self._row[i] for i in ids]]
+
+    def encode(self, texts: list[str]) -> np.ndarray:
+        return np.stack([self._q[t] for t in texts])
+
+
+def strategy_d(ranked, qvecs: np.ndarray, axes: list[str], V: np.ndarray, *, penalize: bool = True,
+               texts: list[str] | None = None) -> tuple[list[int], dict[str, Any]]:
+    """D — **코어 selection.select_pool 그대로**(10-12 코어 반영 뒤, 실험과 코어가 한 구현). 돌려주는 목록은 ranked 의 위치.
+    점수 내역(유사도 항 · 총점)은 엑셀 'D_점수내역' 표시용으로만 여기서 다시 계산한다(selection 과 같은 식)."""
     n = len(ranked)
-    allowed = np.array([not s.disliked for s in ranked])
-    ok = np.flatnonzero(allowed)
-    keys = [dup_key(s.product) for s in ranked]
-
-    cats = [s.product.categoryId for s in ranked]
-
-    def is_dup(i: int, chosen: list[int]) -> bool:
-        return keys[i] is not None and any(keys[c] == keys[i] for c in chosen)
-
-    def blocked(i: int, chosen: list[int], cap: bool = True) -> bool:
-        return is_dup(i, chosen) or (cap and sum(cats[c] == cats[i] for c in chosen) >= D_CAT_CAP)
-
-    info: dict[str, Any] = {"d_cands": 0, "d_filled_disliked": 0, "d_dups_skipped": 0, "d_sim_term": np.zeros(n), "d_total": np.zeros(n)}
-    picked: list[int] = []
+    texts = texts or [f"tag{k}" for k in range(len(qvecs))]
+    tags = [selection.Tag(a, t) for a, t in zip(axes, texts)]
+    emb = _ArrayEmbedding(ranked, V, texts, qvecs) if len(qvecs) else None
+    sel = selection.select_pool(ranked, POOL, allow_disliked=penalize, tags=tags if len(qvecs) else (), embedding=emb)
+    pos = {s.product.productId: i for i, s in enumerate(ranked)}
+    info: dict[str, Any] = {"d_cands": sel.candidates, "d_filled_disliked": sel.filled_disliked, "d_dups_skipped": sel.dups_skipped,
+                            "d_sim_term": np.zeros(n), "d_total": np.zeros(n)}
+    ok = np.array([i for i, s in enumerate(ranked) if not s.disliked])
     if len(qvecs) and len(ok):
-        sims = V[ok] @ qvecs.T                                # 비선호 밖에서만 검색
-        w = np.array([D_AXIS_WEIGHT.get(a, 1.0) for a in axes])
-        rrf = np.zeros(len(ok))
-        cand: set[int] = set(range(min(D_POP_CANDS, len(ok))))   # ok 는 S0 순서 → 앞이 인기 상위(편향 포함)
-        for j in range(sims.shape[1]):
-            top = np.lexsort((np.arange(len(ok)), -sims[:, j]))[:PER_TAG]
-            rrf[top] += w[j] / (RRF_K + np.arange(1, len(top) + 1))
-            cand.update(top.tolist())
+        sims = V[ok] @ qvecs.T
+        w = np.array([selection.AXIS_WEIGHT.get(a, 1.0) for a in axes])
         pct = np.stack([_pct(sims[:, j]) for j in range(sims.shape[1])], axis=1)
-        sim_term = SIM_WEIGHT * (pct * w).max(axis=1)
-        total = np.array([ranked[i].popularity + ranked[i].bias for i in ok]) + sim_term
-        cl = sorted(cand)
-        rel = _pct(total[cl])
-        local = _mmr(cl, rel, V[ok], D_LAMBDA, POOL, skip=lambda i, ch: blocked(int(ok[i]), [int(ok[c]) for c in ch]))
-        picked = [int(ok[i]) for i in local]
-        info |= {"d_cands": len(cl)}
-        info["d_sim_term"][ok], info["d_total"][ok] = sim_term, total
-    for cap in (True, False):                                 # 태그 없음 · 후보 부족 → 비선호 아닌 S0 순서(중복 제거 · 상한 지킴 → 상한 없이)
-        for i in ok:
-            if len(picked) >= POOL:
-                break
-            if i not in picked and not blocked(int(i), picked, cap):
-                picked.append(int(i))
-    for i in np.flatnonzero(~allowed):                        # 그래도 모자라면 비선호를 감점 순서로 — 안전장치
-        if len(picked) >= POOL:
-            break
-        picked.append(int(i))
-        info["d_filled_disliked"] += 1
-    return picked[:POOL], info
+        sim_term = selection.SIM_WEIGHT * (pct * w).max(axis=1)
+        info["d_sim_term"][ok] = sim_term
+        info["d_total"][ok] = np.array([ranked[i].popularity + ranked[i].bias for i in ok]) + sim_term
+    return [pos[p] for p in sel.product_ids], info
 
 
-def strategies(ranked, qvecs: np.ndarray, V: np.ndarray, penalize: bool, axes: list[str] | None = None) -> dict[str, Any]:
+def strategies(ranked, qvecs: np.ndarray, V: np.ndarray, penalize: bool, axes: list[str] | None = None,
+               texts: list[str] | None = None) -> dict[str, Any]:
     """ranked = rank_products 결과(후보 전체, S0 순서). V = ranked 와 같은 순서의 상품 벡터. 돌려주는 목록은 ranked 의 위치."""
     n = len(ranked)
     s0 = list(range(n))
     out: dict[str, Any] = {"S0": s0[:POOL], "sim": None, "cands": 0}
-    out["D"], dinfo = strategy_d(ranked, qvecs, axes or ["카테고리"] * len(qvecs), V)
+    out["D"], dinfo = strategy_d(ranked, qvecs, axes or ["카테고리"] * len(qvecs), V, penalize=penalize, texts=texts)
     out |= dinfo
     if len(qvecs) == 0:
         out |= {"A": s0[:POOL], "B": s0[:POOL], "C": s0[:POOL], "fallback": True}
@@ -336,9 +320,9 @@ def run(scenarios: Path = DEFAULT_SCENARIOS, out_dir: Path = DEFAULT_OUT, modes:
                 ranked = pipeline.rank_products(rq, products, dislike_mode=pipeline.DislikeMode(mode), scores=scores)
                 V = V_all[[row[s.product.productId] for s in ranked]]
                 axes = [a for a, _ in utags]
-                st = strategies(ranked, qv, V, mode == "penalty", axes)
+                st = strategies(ranked, qv, V, mode == "penalty", axes, [t for _, t in utags])
                 t_rank = time.perf_counter() - t1
-                st2 = strategies(ranked, again, V, mode == "penalty", axes)
+                st2 = strategies(ranked, again, V, mode == "penalty", axes, [t for _, t in utags])
                 view_pct = pipeline._view_percentile([s.product for s in ranked])
                 r = {"user": u, "mode": mode, "tags": utags, "notes": notes, "scores": scores, "by_id": by_id, "ranked": ranked, "st": st, "t_enc": t_enc, "t_rank": t_rank,
                      "deterministic": all(st[k] == st2[k] for k in STRATEGIES),
@@ -485,12 +469,13 @@ def write_files(results, out_dir: Path, vinfo: dict[str, Any], tagger: str = DEF
     sheet("설정", ("항목", "값"), [("태그 추출 모델", tagger), ("임베딩 모델", f"{vinfo['model']} ({vinfo['precision']}, {vinfo['dimensions']}차원)"),
                                    ("태그당 후보", PER_TAG), ("RRF 상수", RRF_K), ("유사도 가중", SIM_WEIGHT), ("MMR λ", MMR_LAMBDA),
                                    ("풀 크기", POOL), ("근접 중복 기준(코사인)", NEAR_DUP),
-                                   ("D 인기 후보", D_POP_CANDS), ("D 축 가중", json.dumps(D_AXIS_WEIGHT, ensure_ascii=False)), ("D MMR λ", D_LAMBDA),
+                                   ("D 구현", "profiling.selection.select_pool(코어)"), ("D 축 가중", json.dumps(selection.AXIS_WEIGHT, ensure_ascii=False)),
+                                   ("D MMR λ", selection.MMR_LAMBDA),
                                    ("D 이름 중복", "같은 브랜드 + 같은 모델 코드"), ("D 소분류 상한", D_CAT_CAP), *vinfo.items(), ("모델 라이선스", "CC BY-NC 4.0 — 비상업. 서비스 반영 전 확인 필요")], (16, 70))
     wb.save(xlsx)
     js.write_text(json.dumps({
         "settings": {"tagger": tagger, "embedding_model": vinfo["model"], "near_dup": NEAR_DUP, "per_tag": PER_TAG, "rrf_k": RRF_K, "sim_weight": SIM_WEIGHT, "mmr_lambda": MMR_LAMBDA,
-                     "d": {"pop_cands": D_POP_CANDS, "axis_weight": D_AXIS_WEIGHT, "lambda": D_LAMBDA, "cat_cap": D_CAT_CAP}, "vectors": vinfo},
+                     "d": {"impl": "profiling.selection", "axis_weight": selection.AXIS_WEIGHT, "lambda": selection.MMR_LAMBDA, "cat_cap": selection.CAT_CAP}, "vectors": vinfo},
         "runs": [{"user": r["user"].no, "mode": r["mode"], "tags": r["tags"],
                   "input": {"alias": r["user"].alias, "persona": r["user"].persona, "disliked": r["user"].disliked,
                             "preference": r["user"].preference, "reviews": r["user"].reviews,

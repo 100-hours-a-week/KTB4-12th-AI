@@ -37,6 +37,7 @@ def test_scenarios_all_checks_pass(db_catalog_ready, tmp_path) -> None:
         os.environ.clear()
         os.environ.update(saved)
         get_settings.cache_clear()
-    failed = [f"{no}/{mode} {kind} · {name} — {detail}" for (no, mode), ch in res["checks"].items() for kind, name, ok, detail in ch if not ok]
+    failed = [f"{no}/{mode} {kind} · {name} — {detail}" for (no, mode), ch in res["checks"].items() for kind, name, ok, detail in ch
+              if not ok and sc.blocking((kind, name, ok, detail))]      # 관찰 등급은 보고만(품질 비교용)
     assert not failed, "\n".join(failed)
     assert len(res["results"]) == 20 and res["xlsx"].exists() and res["json"].exists()

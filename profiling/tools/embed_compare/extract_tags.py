@@ -28,75 +28,22 @@ from typing import Any
 import httpx
 import sqlalchemy as sa
 
+from profiling import tagging
+from profiling.schemas import ProductRecord
+from profiling.types import ProfileRequest, Review
 from tools.embed_compare.run import DEFAULT_OUT, DEFAULT_SCENARIOS
 
 OLLAMA = "http://localhost:11434"
-AXES = ("카테고리", "IP", "브랜드", "특징")
-PROMO = re.compile(r"증정|사은품|선물포장|쇼핑백|메세지카드|택1|택일|랜덤|단독|각인|NEW|신상|한정|리뉴얼|에디션|BEST|베스트|1위|인기|누적판매|"
-                   r"백화점|공식|정품|본사|당일발송|빠른배송|무료배송|추천", re.IGNORECASE)
 SEED = 42
-
-SYSTEM = """너는 선물 추천 서비스의 취향 태그 추출기다. 선물 받을 사람이 남긴 리뷰와 취향 문장을 읽고, 그 사람이 **좋아하는 것**을 태그로 뽑는다.
-
-축(axis)은 네 가지 중 하나만 쓴다.
-- 카테고리: 상품 종류(예: 향수, 헤드폰, 케이크, 출산 선물세트). 가능하면 리뷰 상품의 소분류나 상품 종류(kind) 수준으로.
-- IP: 캐릭터 · 지식재산(예: 산리오 한교동, 카카오프렌즈 춘식이). 캐릭터는 IP 와 함께 적는다.
-- 브랜드: 상품의 브랜드(예: 소니, 조말론런던). 판매처 · 백화점은 브랜드가 아니다.
-- 특징: 향 · 맛 · 소재 · 기능 · 질감 같은 성질(예: 은은한 향, 노이즈캔슬링, 부드러운 소재).
-
-규칙
-1. 별점 4~5점 리뷰와 취향 문장만 근거로 쓴다. 별점 1~3점 리뷰로는 선호 태그를 만들지 않는다.
-2. 상품명의 판촉 문구는 상품의 특징이 아니라 판매 조건이다. 태그로도 근거로도 쓰지 마라:
-   증정 · 사은품, 단독, 선물포장 · 쇼핑백 · 메세지카드, 택1 · N종 택1 · 랜덤, 각인, NEW · 신상 · 한정 · 리뉴얼 · 에디션,
-   BEST · 1위 · 인기 · 누적판매, 백화점 · 공식 · 정품 · 본사, 당일발송 · 빠른배송, 추천. 상품명 맨 앞 [ ] 머리말과 따옴표 광고 문구는 대부분 판촉이다.
-3. "(+○○ 증정)", "[○○ 증정]" 같은 증정품은 본품이 아니다. 그 이름 · 종류 · 캐릭터로 태그를 만들지 마라.
-4. 리뷰 글의 포장 · 배송 · 증정품 · 가격 이야기는 취향이 아니다.
-5. 같은 말이 여러 축에 걸리면 더 구체적인 축 하나에만 둔다(예: 포켓몬 → IP).
-6. 태그는 짧은 명사구로, 사람마다 2~6개. 근거가 없으면 빈 목록을 낸다.
-7. ref 는 근거가 된 리뷰 번호(r1, r2 …) 또는 취향 문장이면 pref 다."""
-
-SCHEMA = {"type": "object", "properties": {"tags": {"type": "array", "items": {
-    "type": "object", "properties": {"axis": {"type": "string", "enum": list(AXES)}, "tag": {"type": "string"},
-                                     "ref": {"type": "string"}, "evidence": {"type": "string"}},
-    "required": ["axis", "tag", "ref", "evidence"]}}}, "required": ["tags"]}
+# 프롬프트 · 출력 형식 · 검증기는 코어 profiling.tagging 이 정본이다(10-12 코어 반영) — 도구와 서비스가 한 프롬프트(해시 2fc950d4)를 쓴다.
+AXES, PROMO, SYSTEM, SCHEMA, validate = tagging.AXES, tagging.PROMO, tagging.SYSTEM, tagging.SCHEMA, tagging.validate
 
 
-def user_prompt(u, info: dict[int, dict[str, Any]]) -> tuple[str, dict[str, int]]:
-    """사람 하나의 입력 — (프롬프트, ref → 별점)."""
-    lines, ratings, seen = [], {}, set()
-    for rv in u.reviews:
-        pid = rv["productId"]
-        if pid in seen or pid not in info:
-            continue
-        seen.add(pid)
-        p = info[pid]
-        ref = f"r{len(ratings) + 1}"
-        ratings[ref] = rv["rating"]
-        lines.append(f"{ref}. 별점 {rv['rating']}점 · 상품명: {p['name']} · 브랜드: {p['brand']} · 분류: {p['path']} · 종류: {p['kind']}"
-                     f" · 리뷰 글: {rv['reviewText'] or '(없음)'}")
-    pref = u.preference or "(없음)"
-    body = f"취향 문장(pref): {pref}\n리뷰:\n" + ("\n".join(lines) if lines else "(없음)")
-    return body + '\n\nJSON 으로만 답하라: {"tags": [{"axis": ..., "tag": ..., "ref": ..., "evidence": ...}]}', ratings
-
-
-def validate(tags: list[dict[str, Any]], ratings: dict[str, int], has_pref: bool) -> tuple[list[dict], list[dict]]:
-    """근거 ref 는 여러 개일 수 있다("pref, r1") — 하나라도 취향 문장이거나 4~5점 리뷰면 통과, 전부 1~3점이거나 없는 번호면 버림."""
-    keep, drop = [], []
-    for t in tags:
-        tag = str(t.get("tag", "")).strip()
-        refs = [x for x in re.split(r"[\s,/·]+", str(t.get("ref", ""))) if x]
-        known = [x for x in refs if (x == "pref" and has_pref) or x in ratings]
-        good = [x for x in known if x == "pref" or ratings[x] >= 4]
-        why = ("축이 4개 밖" if t.get("axis") not in AXES else "빈 태그" if not tag else "판촉 단어" if PROMO.search(tag)
-               else "근거 ref 가 없음" if not known
-               else "근거가 별점 1~3점 리뷰뿐(" + ",".join(f"{x}={ratings[x]}" for x in known) + ")" if not good else "")
-        (drop if why else keep).append({**t, "tag": tag, **({"drop": why} if why else {})})
-    uniq, seen = [], set()
-    for t in keep:                                  # 같은 축 · 같은 태그는 하나만
-        if (t["axis"], t["tag"]) not in seen:
-            seen.add((t["axis"], t["tag"]))
-            uniq.append(t)
-    return uniq, drop
+def user_prompt(u, info: dict[int, ProductRecord]) -> tuple[str, dict[str, int]]:
+    """시나리오 사용자 하나 → (프롬프트, ref → 별점). 코어 tagging.build_prompt 그대로."""
+    rq = ProfileRequest(recipient_user_id=1, source_version=1, gift_preference=u.preference, disliked_categories=[],
+                        reviews=[Review(product_id=r["productId"], rating=r["rating"], review_text=r["reviewText"]) for r in u.reviews])
+    return tagging.build_prompt(rq, info)
 
 
 def extract(model: str, users, info) -> dict[str, Any]:
@@ -173,11 +120,9 @@ def main() -> int:
     a = ap.parse_args()
     users = load_scenarios(a.scenarios)
     eng = sa.create_engine(get_settings().DATABASE_URL, future=True)
-    with eng.connect() as c:
-        info = {r.id: {"name": r.name, "brand": r.brand, "path": f"{r.parent} > {r.cat}", "kind": r.kind} for r in c.execute(sa.text(
-            "select p.backend_product_id id, p.name, p.brand, p.product_kind kind, c.name cat, cp.name parent from ai_catalog.products p "
-            "join ai_catalog.categories c on c.source_category_id = p.source_category_id "
-            "left join ai_catalog.categories cp on cp.source_category_id = c.parent_source_category_id where p.backend_product_id is not null"))}
+    from profiling.catalog import DbCatalogReader
+    _, products = DbCatalogReader(eng).active()
+    info = {p.productId: p for p in products}
     eng.dispose()
     DEFAULT_OUT.mkdir(parents=True, exist_ok=True)
     if a.from_json:
