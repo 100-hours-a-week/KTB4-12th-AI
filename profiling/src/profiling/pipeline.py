@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from bisect import bisect_left
+from collections.abc import Callable
 from enum import StrEnum
+from typing import NamedTuple
 from uuid import UUID
 
 from profiling.ports import (
@@ -129,7 +132,12 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
     """상품을 **점수 내림차순**으로 pool_size개. 점수 = 인기 + 리뷰 별점 편향 (+ 비선호 감점). 비선호는 빼거나(EXCLUDE) 감점(PENALTY).
 
     점수 (두 모드 공통, v2 2단계 · 가이드 10-11 보강 A·D):
-      인기   = 조회수 ÷ 최대 조회수 × 2 (0~2). 최대값은 **재고 필터만 거친 후보**(비선호를 빼기 전) 기준 — 두 모드에서 같은 상품의 인기가 같다
+      인기   = **조회수 순위 백분위** × 2 (0~2) = 2 × (조회수가 나보다 낮은 후보 수) ÷ (후보 수 − 1). 1위 2.0 · 꼴찌 0 · 같은 조회수는 같은 값.
+               후보는 **재고 필터만 거친 상품**(비선호를 빼기 전) — 두 모드에서 같은 상품의 인기가 같다.
+               (10-12: 조회수 ÷ 최대 × 2 에서 바꿈. 순위는 조회수 분포와 상관없이 0~2 를 고르게 쓴다 — 실제 조회수는 소수 상품에
+               몰리는 분포가 흔해, 비율이면 대부분이 0 근처로 눌린다. 지금 BE 조회수(임의값)는 고르게 퍼져 있어 두 방식 결과가 같다.
+               주의: 상위 30개는 카탈로그의 0.7%라 편향 +0.67 이면 편향 소분류가 30개를 거의 다 차지한다 — 정규화가 아니라
+               BIAS_WEIGHT 크기·소분류 상한 문제. docs/시나리오_검증_결과_2026-10-12.md)
       편향   = BIAS_WEIGHT × CategoryScore.bias (리뷰한 소분류만, 나머지 0). 편향 먼저·조회수 나중(사전식)이 아니라 같은 눈금으로 더한다 —
                사전식이면 5점 한 번 받은 소분류가 30개를 다 차지한다
       감점   = PENALTY 이고 직접 고른 비선호면 DISLIKED_CATEGORY_SCORE(−2.0). 편향은 그 위에 더한다(5점 받은 비선호 소분류는 덜 내려감)
@@ -153,6 +161,28 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
     v1 배포 시점에도 정렬이 동작한다. 팀원 Search가 붙는 v3에서 이 함수 호출이 search.search(...)로 바뀐다.
     query_text는 v1에서 빈 문자열 — Search가 붙으면 검증기의 preferred_tags를 이어 붙인 질의가 들어간다.
     """
+    ranked = rank_products(rq, products, dislike_mode=dislike_mode, scores=scores)
+    picked = [s.product.productId for s in ranked[:pool_size]]
+    return SearchResult(product_ids=picked, query_text="", catalog_version_id=catalog_version_id)
+
+
+class ScoredProduct(NamedTuple):
+    """rank_products() 한 줄 — 점수가 어떻게 나왔는지까지(시나리오 검증 도구가 그대로 보여 준다). total = popularity + bias + penalty."""
+
+    product: ProductRecord
+    popularity: float      # 조회수 순위 백분위 × 2 (0~2)
+    bias: float            # BIAS_WEIGHT × 소분류 편향 (리뷰 없는 소분류 0)
+    penalty: float         # PENALTY 이고 직접 고른 비선호면 DISLIKED_CATEGORY_SCORE, 아니면 0
+    total: float
+    disliked: bool
+
+
+def rank_products(rq: ProfileRequest, products: list[ProductRecord], *, dislike_mode: DislikeMode = DislikeMode.EXCLUDE,
+                  scores: list[CategoryScore] | None = None) -> list[ScoredProduct]:
+    """build_pool() 의 점수 계산 본체 — 후보 **전체**를 점수 내림차순(동점 productId 오름차순)으로, 점수 내역과 함께. 규칙은 build_pool 독스트링.
+
+    EXCLUDE 면 비선호 상품은 목록에 없고, PENALTY 면 감점된 채 남는다. build_pool 은 이 목록의 앞 pool_size 개를 쓴다.
+    """
     disliked_ids = {c.category_id for c in rq.disliked_categories}
     disliked_names = {c.category_name for c in rq.disliked_categories}
 
@@ -164,20 +194,30 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
                 or (p.parentCategoryName is not None and p.parentCategoryName in disliked_names))
 
     candidates = [p for p in products if p.availability != "unavailable"]   # unknown은 남긴다 — 재고 판단은 Backend 몫
-    max_views = max((p.viewCount for p in candidates), default=0)            # 비선호를 빼기 전 기준
+    pct = _view_percentile(candidates)                                       # 비선호를 빼기 전 기준
     bias_of = {s.category_id: s.bias for s in scores or []}
     penalize = dislike_mode is DislikeMode.PENALTY
 
-    def score(p: ProductRecord) -> float:
-        popularity = 2.0 * p.viewCount / max_views if max_views else 0.0
-        base = DISLIKED_CATEGORY_SCORE if penalize and disliked(p) else 0.0
-        return popularity + base + BIAS_WEIGHT * bias_of.get(p.categoryId, 0.0)
+    out: list[ScoredProduct] = []
+    for p in candidates:
+        is_disliked = disliked(p)
+        if is_disliked and not penalize:
+            continue
+        popularity = 2.0 * pct(p.viewCount)
+        bias = BIAS_WEIGHT * bias_of.get(p.categoryId, 0.0)
+        penalty = DISLIKED_CATEGORY_SCORE if penalize and is_disliked else 0.0
+        out.append(ScoredProduct(p, popularity, bias, penalty, popularity + penalty + bias, is_disliked))
+    out.sort(key=lambda s: (-s.total, s.product.productId))
+    return out
 
-    if not penalize:
-        candidates = [p for p in candidates if not disliked(p)]
-    candidates.sort(key=lambda p: (-score(p), p.productId))
-    picked = [p.productId for p in candidates[:pool_size]]
-    return SearchResult(product_ids=picked, query_text="", catalog_version_id=catalog_version_id)
+
+def _view_percentile(candidates: list[ProductRecord]) -> Callable[[int], float]:
+    """조회수 → 순위 백분위(0~1) = (조회수가 더 낮은 후보 수) ÷ (후보 수 − 1). 같은 조회수는 같은 값, 후보가 1개 이하면 0."""
+    views = sorted(p.viewCount for p in candidates)
+    span = len(views) - 1
+    if span <= 0:
+        return lambda v: 0.0
+    return lambda v: bisect_left(views, v) / span
 
 
 def category_scores(rq: ProfileRequest, products: list[ProductRecord], catalog: CatalogReader) -> list[CategoryScore]:

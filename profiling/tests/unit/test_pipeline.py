@@ -180,15 +180,17 @@ def test_pool_default_mode_is_exclude() -> None:
 
 
 def test_pool_penalty_keeps_disliked_but_ranks_lower() -> None:
-    """감점은 빼지 않고 뒤로 민다. 점수 = 조회수 ÷ 최대 × 2 + (비선호면 −2.0, DISLIKED_CATEGORY_SCORE).
-    뷰티 100회(비선호) → 2.0 − 2.0 = 0.0 · 패션 60회 → 1.2 · 패션 10회 → 0.2  ⇒ [2, 3, 1] — 조회수 최대여도 비선호는 맨 뒤"""
+    """감점은 빼지 않고 뒤로 민다. 점수 = 인기(조회수 순위 백분위 × 2) + (비선호면 −2.0, DISLIKED_CATEGORY_SCORE).
+    조회수 순위 100 > 60 > 30 > 10 → 인기 2.0 · 1.33 · 0.67 · 0. 뷰티 100회(비선호) → 2.0 − 2.0 = 0.0 = 꼴찌(3번, 0.0)와 동점 → 번호 순
+    ⇒ [2, 4, 1, 3] — 조회수 1위여도 비선호는 맨 뒤로"""
     assert pipeline.DISLIKED_CATEGORY_SCORE == -2.0                              # 아래 수치는 이 값 기준
     products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=100),
                 _product(2, 21, "여성의류", parent_id=2, parent_name="패션", views=60),
-                _product(3, 22, "가방·지갑", parent_id=2, parent_name="패션", views=10)]
+                _product(3, 22, "가방·지갑", parent_id=2, parent_name="패션", views=10),
+                _product(4, 22, "가방·지갑", parent_id=2, parent_name="패션", views=30)]
     rq = _rq(disliked=[(1, "뷰티")])
-    assert pipeline.build_pool(rq, products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 3, 1]
-    assert pipeline.build_pool(rq, products, 30, CV).product_ids == [2, 3]      # 같은 입력, 제외 모드
+    assert pipeline.build_pool(rq, products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 4, 1, 3]
+    assert pipeline.build_pool(rq, products, 30, CV).product_ids == [2, 4, 3]   # 같은 입력, 제외 모드
 
 
 def test_pool_penalty_without_dislikes_equals_exclude() -> None:
@@ -216,9 +218,10 @@ def test_pool_penalty_all_zero_views_puts_disliked_last() -> None:
 
 def test_pool_penalty_matches_leaf_and_name_like_exclude() -> None:
     """비선호 판정 규칙(소분류 id · 이름 보조)은 두 모드가 같다 — 처리만 다르다."""
-    products = [_product(1, 11, "스킨케어", views=9), _product(2, 21, "여성의류", views=6)]   # 1: 2.0 − 2.0 = 0.0 · 2: 1.33
-    assert pipeline.build_pool(_rq(disliked=[(999, "스킨케어")]), products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 1]
-    assert pipeline.build_pool(_rq(), products, 30, CV, dislike_mode=PENALTY).product_ids == [1, 2]   # 비선호가 없으면 원래 순서
+    products = [_product(1, 11, "스킨케어", views=9), _product(2, 21, "여성의류", views=6), _product(3, 21, "여성의류", views=3)]
+    # 인기 2.0 · 1.0 · 0 → 1(이름으로 비선호): 2.0 − 2.0 = 0.0 = 3번과 동점 → 번호 순
+    assert pipeline.build_pool(_rq(disliked=[(999, "스킨케어")]), products, 30, CV, dislike_mode=PENALTY).product_ids == [2, 1, 3]
+    assert pipeline.build_pool(_rq(), products, 30, CV, dislike_mode=PENALTY).product_ids == [1, 2, 3]   # 비선호가 없으면 원래 순서
 
 
 # ---------------------------------------------------------------- build_pool — 리뷰 별점 편향 (v2 2단계 · 가이드 10-11 보강)
@@ -229,30 +232,44 @@ FOUR = [_product(1, 11, "스킨케어", views=100), _product(2, 11, "스킨케�
 
 
 def test_pool_bias_moves_reviewed_category_forward_but_mixes() -> None:
-    """메이크업(12) 5점 1건 → 편향 +0.67. 1: 2.0 · 2: 0.2 · 3: 1.6 + 0.67 = 2.27 · 4: 1.2 + 0.67 = 1.87 ⇒ [3, 1, 4, 2].
-    조회수 최대인 스킨케어(1)가 여전히 2위 — 편향이 순서를 '섞을' 뿐 소분류가 풀을 독차지하지 않는다. EXCLUDE(기본)도 편향을 쓴다."""
+    """메이크업(12) 5점·4점 → 편향 3 ÷ 4 = +0.75. 조회수 순위 100 > 80 > 60 > 10 → 인기 2.0 · 1.33 · 0.67 · 0.
+    1: 2.0 · 2: 0 · 3: 1.33 + 0.75 = 2.08 · 4: 0.67 + 0.75 = 1.42 ⇒ [3, 1, 4, 2].
+    조회수 1위인 스킨케어(1)가 여전히 2위 — 편향이 순서를 '섞을' 뿐 소분류가 풀을 독차지하지 않는다. EXCLUDE(기본)도 편향을 쓴다."""
     assert pipeline.BIAS_WEIGHT == 1.0                                          # 아래 수치는 이 값 기준
-    scores = [CategoryScore(category_id=12, n=1, score_sum=2)]
+    scores = [CategoryScore(category_id=12, n=2, score_sum=3)]
     assert pipeline.build_pool(_rq(), FOUR, 30, CV).product_ids == [1, 3, 4, 2]                    # 리뷰 없음 = 조회수순
     assert pipeline.build_pool(_rq(), FOUR, 30, CV, scores=scores).product_ids == [3, 1, 4, 2]     # EXCLUDE + 편향
     assert pipeline.build_pool(_rq(), FOUR, 30, CV, scores=scores, dislike_mode=PENALTY).product_ids == [3, 1, 4, 2]   # 비선호 없으면 두 모드 같음
 
 
+def test_rank_products_breakdown_sums_and_matches_build_pool() -> None:
+    """rank_products — 점수 내역(인기 · 편향 · 감점)의 합이 총점이고, build_pool 의 30개는 그 앞부분이다(시나리오 검증 도구가 이 내역을 보여 준다)."""
+    rq, scores = _rq(disliked=[(12, "메이크업")]), [CategoryScore(category_id=11, n=1, score_sum=2)]
+    ranked = pipeline.rank_products(rq, FOUR, dislike_mode=PENALTY, scores=scores)
+    assert all(abs(s.total - (s.popularity + s.bias + s.penalty)) < 1e-12 for s in ranked)
+    assert [s.disliked for s in ranked if s.product.categoryId == 12] == [True, True]
+    assert {s.penalty for s in ranked if s.disliked} == {pipeline.DISLIKED_CATEGORY_SCORE}
+    assert [s.product.productId for s in ranked] == pipeline.build_pool(rq, FOUR, 30, CV, dislike_mode=PENALTY, scores=scores).product_ids
+    assert [s.product.productId for s in pipeline.rank_products(rq, FOUR, scores=scores)] == [1, 2]   # 제외 모드는 비선호가 목록에 없음
+
+
 def test_pool_low_rating_pushes_back_not_excluded() -> None:
-    """스킨케어(11) 1점 2건 → 편향 −4 ÷ 4 = −1.0. 1: 1.0 · 2: −0.8 · 3: 1.6 · 4: 1.2 ⇒ [3, 4, 1, 2] — 뒤로 갈 뿐 빠지지 않는다(규칙표 §5)."""
+    """스킨케어(11) 1점 2건 → 편향 −4 ÷ 4 = −1.0. 1: 2.0 − 1 = 1.0 · 2: 0 − 1 = −1.0 · 3: 1.33 · 4: 0.67 ⇒ [3, 1, 4, 2]
+    — 조회수 1위(1)가 2위로 밀리고 스킨케어 꼴찌(2)는 맨 뒤. 뒤로 갈 뿐 빠지지 않는다(규칙표 §5)."""
     scores = [CategoryScore(category_id=11, n=2, score_sum=-4)]
-    assert pipeline.build_pool(_rq(), FOUR, 30, CV, scores=scores).product_ids == [3, 4, 1, 2]
+    assert pipeline.build_pool(_rq(), FOUR, 30, CV, scores=scores).product_ids == [3, 1, 4, 2]
 
 
 def test_pool_penalty_disliked_category_adds_review_bias() -> None:
     """직접 고른 비선호는 −2.0 에서 출발하고 리뷰 편향을 그 위에 더한다(결정 D, 10-11).
-    뷰티(1) 비선호 · 스킨케어(11) 5점 1건(+0.67). 1(스킨케어): 2.0 − 2.0 + 0.67 = 0.67 · 2(메이크업, 리뷰 없음): 2.0 − 2.0 = 0 · 3(패션): 0.4
-    ⇒ [1, 3, 2]. 같은 비선호 대분류라도 리뷰 없는 소분류(메이크업)엔 편향이 번지지 않는다. EXCLUDE 에선 뷰티 전체가 빠진다."""
+    뷰티(1) 비선호 · 스킨케어(11) 5점 1건(+0.67). 조회수 50 · 50 · 10 → 인기 1.0 · 1.0 · 0.
+    1(스킨케어): 1.0 − 2.0 + 0.67 = −0.33 · 2(메이크업, 리뷰 없음): 1.0 − 2.0 = −1.0 · 3(패션): 0 ⇒ [3, 1, 2].
+    가산 덕에 스킨케어가 같은 비선호 대분류의 메이크업보다 앞 — 리뷰 없는 소분류엔 편향이 번지지 않는다. EXCLUDE 에선 뷰티 전체가 빠진다."""
     products = [_product(1, 11, "스킨케어", parent_id=1, parent_name="뷰티", views=50),
                 _product(2, 12, "메이크업", parent_id=1, parent_name="뷰티", views=50),
                 _product(3, 21, "여성의류", parent_id=2, parent_name="패션", views=10)]
     rq, scores = _rq(disliked=[(1, "뷰티")]), [CategoryScore(category_id=11, n=1, score_sum=2)]
-    assert pipeline.build_pool(rq, products, 30, CV, scores=scores, dislike_mode=PENALTY).product_ids == [1, 3, 2]
+    assert pipeline.build_pool(rq, products, 30, CV, scores=scores, dislike_mode=PENALTY).product_ids == [3, 1, 2]
     assert pipeline.build_pool(rq, products, 30, CV, scores=scores).product_ids == [3]
 
 
@@ -313,18 +330,19 @@ BIAS_PRODUCTS = [_product(1, 11, "스킨케어", views=10), _product(2, 11, "스
 
 def test_profile_with_reviews_applies_bias_and_stores_scores(caplog) -> None:
     """리뷰 별점이 풀 순서에 들어가고(2단계) 점수·취향·리뷰가 프로필 행에 실린다. 태그(모델)는 아직 없다.
-    상품 2(스킨케어) 5점 → 스킨케어 편향 +0.67. 리뷰 없으면 [1, 3, 2, 4](2.0 · 0.4 · 0 · 0) → 있으면 2가 0.67로 3(0.4)을 앞지른다."""
+    조회수 10 · 2 · 0 · 0 → 인기 2.0(1) · 1.33(3) · 0(2·4). 리뷰 없으면 [1, 3, 2, 4].
+    여성의류(21) 상품 3·4에 5점 → 편향 +1.0: 3 = 2.33 · 1 = 2.0 · 4 = 1.0 · 2 = 0 ⇒ [3, 1, 4, 2] — 조회수 1위를 앞지른다."""
     rstore = FakeRecipientStore()
-    rq = _rq(pref="휴대용", reviews=[Review(product_id=2, rating=5, review_text="좋아요")])
+    rq = _rq(pref="휴대용", reviews=[Review(product_id=3, rating=5, review_text="좋아요"), Review(product_id=4, rating=5)])
     assert pipeline.profile(_rq(), catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(),
                             recipient_store=FakeRecipientStore()).search.product_ids == [1, 3, 2, 4]
     with caplog.at_level("INFO", logger="profiling.pipeline"):
         out = pipeline.profile(rq, catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(), recipient_store=rstore)
-    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [1, 2, 3, 4]
+    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [3, 1, 4, 2]
     assert out.validation.preferred_tags == []                                  # 글·취향 → 태그는 하네스 뒤
     row = rstore.get(9073)
-    assert row.category_scores == [CategoryScore(category_id=11, n=1, score_sum=2)]
-    assert row.gift_preference_hash == preference_hash("휴대용") and [r.product_id for r in row.reviews] == [2]
+    assert row.category_scores == [CategoryScore(category_id=21, n=2, score_sum=4)]
+    assert row.gift_preference_hash == preference_hash("휴대용") and [r.product_id for r in row.reviews] == [3, 4]
     assert "좋아요" not in row.model_dump_json()                                 # 원문은 저장하지 않는다(10-11 결정 B)
     assert any("scores=1" in r.message and pipeline.POOL_RULE_V2 in r.message for r in caplog.records)
     assert not any("좋아요" in r.message for r in caplog.records)               # 리뷰 원문은 로그에 남지 않는다
