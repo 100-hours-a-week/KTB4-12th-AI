@@ -126,10 +126,14 @@ def cmd_reset(be: Be, ai: Ai, a) -> dict:
 
 def cmd_s1(be: Be, ai: Ai, a) -> dict:
     tok, u = be.login(USERS[0]), be.user_id(USERS[0])
-    log(f"S1 사용자{u} 비선호 [1] 저장 → HTTP {be.put_dislikes(tok, [1])} · BE {short(be_profile(be, u))}")
+    # 기준은 저장 **전** 번호. 앞 시나리오가 남긴 COMPLETED 행을 보고 바로 ✓ 하지 않게, "새 번호 한 건"이 끝나야 성공이다(10-11 거짓 양성 수정)
+    before = be_profile(be, u)
+    nxt = int(before["source_version"]) + 1 if before else 1
+    ids = changed_set(be, u, [[1], [1, 2]])
+    log(f"S1 사용자{u} 비선호 {ids} 저장 → HTTP {be.put_dislikes(tok, ids)} · BE {short(be_profile(be, u))} · 번호 {nxt} 기대")
     t0 = time.time()
-    run, took = wait(lambda: ai_run(ai, u, 1) if (r := ai_run(ai, u, 1)) and r["status"] != "RUNNING" else None, a.wait_dispatch)
-    prof, _ = wait(lambda: (p := be_profile(be, u)) and p["profile_status"] == "COMPLETED" and p["analyzed_source_version"] == "1" and p, 30)
+    run, took = wait(lambda: ai_run(ai, u, nxt) if (r := ai_run(ai, u, nxt)) and r["status"] != "RUNNING" else None, a.wait_dispatch)
+    prof, _ = wait(lambda: (p := be_profile(be, u)) and p["profile_status"] == "COMPLETED" and p["analyzed_source_version"] == str(nxt) and p, 30)
     r = {"took_s": took, "ai": ai_runs(ai, u), "be": be_profile(be, u)}
     ok = bool(run) and run["status"] == "DELIVERED" and bool(prof)
     log(f"S1 {'✓' if ok else '✗'} {round(time.time() - t0, 1)}초 — AI {r['ai']} · BE {short(r['be'])}")
@@ -140,12 +144,13 @@ def cmd_s2_observe(be: Be, ai: Ai, a) -> dict:
     assert get_json(f"{a.ai}/health") is None, "AI 가 떠 있다 — s2-observe 는 AI 를 끈 채 돌린다"
     tok, u = be.login(USERS[0]), be.user_id(USERS[0])
     before = be_profile(be, u)
+    base_v = before["source_version"] if before else "0"      # 행이 없으면(reset 직후) 번호 0 — 저장이 행을 만든다
     ids = changed_set(be, u, [[1, 2], [1, 2, 3]])
-    log(f"S2 AI 꺼짐 확인 · 사용자{u} 비선호 {ids} 저장 → HTTP {be.put_dislikes(tok, ids)} · 40초 관찰 (번호 {before['source_version']} 유지돼야)")
+    log(f"S2 AI 꺼짐 확인 · 사용자{u} 비선호 {ids} 저장 → HTTP {be.put_dislikes(tok, ids)} · 40초 관찰 (번호 {base_v} 유지돼야)")
     samples = sample(be, ai, u, 40)
     after = be_profile(be, u)
-    ok = after["source_version"] == before["source_version"] and after["last_changed_at"] != "NULL"
-    log(f"S2-observe {'✓' if ok else '✗'} 번호 {before['source_version']} → {after['source_version']} · 변경 시각 {after['last_changed_at']}")
+    ok = after["source_version"] == base_v and after["last_changed_at"] != "NULL"
+    log(f"S2-observe {'✓' if ok else '✗'} 번호 {base_v} → {after['source_version']} · 변경 시각 {after['last_changed_at']}")
     return {"ok": ok, "before": before, "after": after, "samples": samples}
 
 
