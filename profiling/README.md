@@ -1,12 +1,14 @@
 # profiling — 수신자 프로파일링 (AI 백엔드 · Profile / Catalog 파트)
 
-Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 **7.6**으로 보내면, 즉시 `202`로 접수하고 백그라운드에서 추천 상품 30개를 골라 **7.7 콜백**으로 돌려주는 서비스. 태그는 AI가 보관하고 Backend에는 상품 번호만 보낸다(DR-035). 상품 목록은 지금은 Backend 전달 파일(+09-25 회신)로 `ai_catalog` 에 적재하고, **7.9 export** 는 BE 가 제공하면 붙인다(검색 연결 v2 때).
+Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 **7.6**으로 보내면, 즉시 `202`로 접수하고 백그라운드에서 추천 상품 30개를 골라 **7.7 콜백**으로 돌려주는 서비스. 태그는 AI가 보관하고 Backend에는 상품 번호만 보낸다(DR-035). 상품 목록은 지금은 Backend 전달 파일(+09-25 회신)로 `ai_catalog` 에 적재하고, **7.9 export** 는 BE 가 제공하면 붙인다(검색 연결 v2 때). 10-09에 BE에 전달한 요청서 v1.2(취향 문장 · 리뷰 두 칸)의 AI 쪽은 이 브랜치에 들어 있다 — 두 칸은 **받아 두고**, 추천에 반영하는 것은 코어 브랜치 작업이다.
 
-| 상태 (2026-09-29) | |
+| 상태 (2026-10-12 · 브랜치 `feat/v2-profiling(AI-BE)_callback` `093ad6b`) | |
 |---|---|
-| 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
+| 동작 범위 | **추천 규칙은 v1**(비선호 대분류 제외 · 재고 제외 · 조회수순 30개) + **계약은 v2**(요청서 v1.2): 취향 · 리뷰 두 칸 수신, `dislikedCategories` 키 필수(1단계), 리뷰 11개 400, 입력 세 칸이 전부 비면 추천 0개(결정 C), `/health` 두 필드 핑, 같은 번호 재요청은 재분석 없이 재전송, 더 새 번호가 전달되면 옛 미전달 행 SUPERSEDED(A5). 취향·리뷰를 읽는 단계는 코어 브랜치 |
+| BE 연동 | BE `develop` **`0871187`**(10-11, 멀티 모듈 · 발송 선점)과 여섯 시나리오 **전부 통과** → [docs/BE_연동_시험_결과_2026-10-11.md](docs/BE_연동_시험_결과_2026-10-11.md). 요청서 v1.2 ↔ 코드 대조는 그 §7 — 전환 2단계(`giftPreference` · `reviews` 키 필수)만 BE V2 배포 시(순서: BE 먼저, AI 나중) |
+| 브랜치 | 이 브랜치 = **BE 연동(콜백) 작업**. 코어(리뷰 신호 · `0005` · stores)는 `feat/v2-profiling-init`에서 따로 — 합류 시 `pipeline.py` 3)단계(0개 분기 ↔ 풀 가중) 수동 병합 한 곳 |
 | 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그도 DB(`ai_catalog`, `0003`, 09-23) — 배포는 `CATALOG_SOURCE=db`, 로컬 기본만 파일(`catalog_sample.json`). 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
-| 테스트 | 단위 155개(외부 의존 없음) + 통합 51개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 204 passed, 2 skipped |
+| 테스트 | 단위 162개(외부 의존 없음) + 통합 52개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → **214 passed, 2 skipped**(DB가 이 브랜치 head `0004`에 카탈로그가 적재된 상태일 때. 다른 브랜치가 같은 DB를 `0005`로 올려 두면 schema 비교 2개가 환경 드리프트로 실패 — 임시 Postgres에 `0004`를 올려 돌린다, 10-12) |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
 
 ---
@@ -23,12 +25,12 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 | 폴더 · 파일 | 내용 |
 |---|---|
-| `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · **Backend 생애주기 흉내**(`lifecycle.py` — 디바운스→7.6→202→실패·타임아웃 시 같은 번호 재시도 2회(`Retry-After`·백오프)→FAILED) |
+| `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · Backend 생애주기 흉내(`lifecycle.py`). **생애주기는 옛 09-27 모델**(같은 번호 재시도 2회)이라 실물 BE v0.7(핑 · 재시작 1회 · 복구 전송)과 다르다 — 7.6/7.7 모양 확인용으로만 |
 | `tools/scenario_callback30/` | **프로파일링 코어 30개 상품 콜백 검증** `run.py` — 가상 수신자 엑셀(`scenarios.xlsx`, 10명) → 앱 전체(7.6 → 점수 → 30개 → 진짜 7.7 요청) → 화면 + `out/` 엑셀·JSON(점수 내역 · 30개 · 콜백 원문 · 검사). 절차는 [tools/scenario_callback30/README.md](tools/scenario_callback30/README.md) |
 | `tools/embed_compare/` | **임베딩 비교 실험** `run.py` — 같은 시나리오(+ '태그' 시트)로 지금 점수식(S0)과 임베딩 네 방식(A · B · C · **D 비선호를 빼고 검색**)의 30개를 나란히. product-search 상품 벡터 · Node 질의 임베딩(로컬, 유료 API 없음). 절차는 [tools/embed_compare/README.md](tools/embed_compare/README.md) |
 | `tools/bench/` | **시간 백분위** `percentiles.py` — 저장 3방식 1,000회 · 앱만 7.6 200건(GC 기본 / `gc.freeze()` / 끔, 모드마다 새 프로세스) · 30개 콜백 하네스 10회 · 임베딩 질의 · D 순위 · 로컬 LLM 추출 기록 → p75 · p90 · p95 · p99 (`docs/assets/report/percentiles.json`). 서버 · LLM 호출 없음 |
 | `tools/loadtest/` | **부하 시험 하네스** `run.py` — 7.6 동시 N건 · `/health` 지연 · `profile_runs` 시각 · `pg_stat_activity` · 정리 · BE 구동 SQL 3종. 절차는 [tools/loadtest/README.md](tools/loadtest/README.md), 결과는 `docs/부하_시험_결과_2026-09-29.md`(팀 공유용 before/after) · `…_2026-09-28.md`(기준선) |
-| `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버** `drive.py` — 로그인 → 비선호 저장 → 7.6 관찰 → 대분류 제외 검증 → (옵션) AI 다운 시 BE 재시도 관찰. 절차는 `docs/BE_연동_시험_결과_2026-09-27.md` §7 |
+| `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버 `drive_v07.py`** — 사용자 행동(로그인 · 비선호 저장)과 관찰(BE MySQL · AI Postgres)만 하고 서버는 바깥에서 켜고 끈다. 명령 `reset` · `s1`(정상) · `s2-observe/recover`(AI 꺼짐) · `s34-start/finish`(콜백 불통 → PENDING 중 새 번호 → 복구 전송 · A5) · `s5-start/finish`(401 → 재시작 1회 → 접음) · `s6-observe/recover`(AI DB만 꺼짐) · `report`. 10-11 결과와 왜는 [docs/BE_연동_시험_결과_2026-10-11.md](docs/BE_연동_시험_결과_2026-10-11.md). `drive.py`는 09-27 첫 드라이버(보관) |
 | `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
 | `tools/catalog/load_catalog.py` | Backend 전달 패키지 → `ai_catalog` 적재 · 회신 반영(`--id-map` · `--metrics`) |
 | `tools/catalog/import_be_ids.py` | Backend 회신 xlsx 2종 → id-map · metrics jsonl (이름으로 매칭, 1:1 보장). 결과는 `tools/catalog/returned/날짜/` |
@@ -42,8 +44,10 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | [docs/학습_가이드/](docs/학습_가이드/) | **학습 가이드 — 처음 보는 사람은 여기부터.** 기술 스택·아키텍처·디자인 패턴·통신·동시성·병목·DB·테스트·운영·용어집·실습·패턴 유래와 판단 12장. 항목마다 개념 → 우리 코드(파일:줄) → 왜 → 대안 → 확인해 보기 |
 | [docs/코드_안내서.md](docs/코드_안내서.md) | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
 | [docs/FE_연동_시험_시나리오.md](docs/FE_연동_시험_시나리오.md) | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
-| [docs/BE_연동_시험_가이드.md](docs/BE_연동_시험_가이드.md) | **BE 실물 연동을 혼자 돌리는 절차** — DB·AI·BE 켜기 순서, 초기화 SQL, 자동 드라이버·수동 한 바퀴·콜백 오류 응답·장애 재현(AI 꺼짐·7.7 불통), 확인 SQL, 10-06 정상값 |
+| [docs/BE_연동_시험_가이드.md](docs/BE_연동_시험_가이드.md) | **BE 실물 연동을 혼자 돌리는 절차** — DB·AI·BE 켜기, 초기화, 자동 드라이버·수동 한 바퀴·콜백 오류 응답·장애 재현, 확인 SQL, 정상값. §7에 10-08·10-11 갱신(BE는 멀티 모듈이라 `./gradlew :main-backend:bootRun`) |
 | [docs/BE_연동_시험_결과_2026-09-27.md](docs/BE_연동_시험_결과_2026-09-27.md) | **BE `develop` 실물 연동 시험** — 7.6·202·대분류 제외 정상, 7.7은 PR3 전이라 401, AI 다운 시 새 번호 반복·PENDING 고착 실측. §7 재현 절차 |
+| [docs/BE_연동_시험_결과_2026-10-08.md](docs/BE_연동_시험_결과_2026-10-08.md) | **BE `develop` v0.7 반영판 실물 시험(10-08)** — AI 꺼짐·콜백 불통·PENDING 중 재변경·7.6 401 다섯 시나리오 통과, D1·D2 해소. `/health` 두 필드가 BE 계약, 같은 번호 재전송 실측 |
+| [docs/BE_연동_시험_결과_2026-10-11.md](docs/BE_연동_시험_결과_2026-10-11.md) | **BE `develop` 멀티 모듈 · 발송 선점판 실물 시험(10-11)** — AI `624f91c` × BE `0871187`, 여섯 시나리오 전부 통과 · 결과표(어느 판을 썼나 §0) · 드라이버 결함 2 고침 · 실행 명령 `:main-backend:bootRun` |
 | [docs/FE_연동_시험_결과_2026-09-25.md](docs/FE_연동_시험_결과_2026-09-25.md) | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
 | [docs/부하_시험_결과_2026-09-29.md](docs/부하_시험_결과_2026-09-29.md) | **부하 시험 재측정 보고(팀 공유용)** — 무엇을 어디서 어떻게 왜 바꿨나(Supervisor 워커+상한 큐 · DB 왕복 34→8 · 슬롯 env) + 시나리오 9종 before/after: 느린 콜백에서 `/health` 실패 15 → 0, 굶는 동안 접수 34.5초 → 6.5ms, 300건은 큐 200에서 503, BE 실물 p50 17.5 → 6.8ms. 하네스 keep-alive 한계와 `--no-keepalive` |
 | [docs/부하_시험_결과_2026-09-28.md](docs/부하_시험_결과_2026-09-28.md) | **부하 시험 기준선과 after** — 동시 100·300 · 슬롯 1·4 · 느린 콜백(500·timeout)에서 `/health` 150초·접수 34.5초 굶음 재현(§4) → 왕복 34→8(§10·§11) → Supervisor 수정 뒤 `/health` 최대 57ms·추가 접수 13ms(§12) · BE 실물 200건. 하네스 [tools/loadtest/README.md](tools/loadtest/README.md) |
@@ -69,24 +73,27 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 - 두 세계의 변환은 **두 함수뿐**: `pipeline.to_internal()`(7.6 → 내부) · `backend.to_callback()`(내부 → 7.7). 업무 코드에서 camelCase가 보이면 규칙 위반.
 - 7.6 DTO 변수는 `body`, 내부 요청은 `rq`, 결과는 `outcome`. 세부는 [이름_대조표.md](이름_대조표.md).
 
-### 요청 한 건의 흐름 (v1)
+### 요청 한 건의 흐름 (이 브랜치)
 
 ![파이프라인 지도](docs/assets/pipeline-map.png)
 
 (4단계 · 포트 · 구현 · 바깥의 연결만 그렸다(10-07 단순화). 단계마다 부르는 함수 목록은 [지도 10-06 §1](docs/파이프라인_지도/2026-10-06.md), 시퀀스 형태는 [v1-flow.png](docs/assets/v1-flow.png))
 
 1. `POST 7.6` → Pydantic 검증(위반 400 `INVALID_REQUEST`) → 서비스 토큰(401) → 활성 카탈로그 없으면 503(Retry-After 300) → Supervisor 큐에 넣기(가득이면 503, Retry-After 30) → **202 `PENDING`** (HTTP 끝)
-2. Supervisor 워커 스레드에서 `dispatch`(잠금·판정) → `run_and_callback`: `to_internal` → `profile()` — `store.save(RUNNING, input_hash)` → `catalog.active()` 한 번(같은 버전 유지) → 비선호 이름만 담은 `ValidationResult` → `build_pool`(재고 없음(`unavailable`)만 제외 · 비선호 **대분류**의 하위 소분류 전체 제외 · 조회수 내림차순 · 30개) → `ProfileOutcome(RESULT_READY)` → `store.save`(콜백 본문을 DB에 먼저 커밋) → `recipient_store.upsert(from_outcome)`
-3. `RESULT_READY`면 `backend.send_profile_callback` → `POST 7.7` → 응답을 `RunStatus`로: `200→DELIVERED`, `409→SUPERSEDED`, `4xx→FAILED`, `5xx·네트워크→RESULT_READY`(같은 슬롯에서 0.5초·2초 뒤 최대 3회 재시도) → `store.save(마지막 상태, callback_attempts + 시도 수)`. `FAILED` 결과는 콜백 없음(AI는 침묵, Backend가 판정). DB에 무엇이 언제 남는지: [docs/DB_전환_설명.md](docs/DB_전환_설명.md)
+2. Supervisor 워커 스레드에서 `dispatch`(잠금·판정) → `run_and_callback`: `to_internal` → `profile()` — `store.save(RUNNING, input_hash)` → `catalog.active()` 한 번(같은 버전 유지) → 비선호 이름만 담은 `ValidationResult`(취향·리뷰가 실려 있으면 '모델 단계 미구현' 경고만 남기고 v1 경로) → 입력 세 칸이 전부 비면 풀을 만들지 않고 **빈 배열**(`has_no_input`, 결정 C 10-09), 아니면 `build_pool`(재고 없음(`unavailable`)만 제외 · 비선호 **대분류**의 하위 소분류 전체 제외 · 조회수 내림차순 · 30개) → `ProfileOutcome(RESULT_READY)` → `store.save`(콜백 본문을 DB에 먼저 커밋) → `recipient_store.upsert(from_outcome)`
+3. `RESULT_READY`면 `backend.send_profile_callback` → `POST 7.7` → 응답을 `RunStatus`로: `200→DELIVERED`, `409→SUPERSEDED`, `4xx→FAILED`, `5xx·네트워크→RESULT_READY`(같은 슬롯에서 첫 전송 포함 **모두 3번** — 0.5초 · 2초 뒤) → `store.save(마지막 상태, callback_attempts + 시도 수)`. `FAILED` 결과는 콜백 없음(AI는 침묵, Backend가 판정). DB에 무엇이 언제 남는지: [docs/DB_전환_설명.md](docs/DB_전환_설명.md)
 
 ### 지금 정해진 규칙과 미결
 | 규칙 | 값 | 출처 |
 |---|---|---|
-| 비선호 ≤5 · 리뷰 상한 10 · rating 1~5 · 글 null 가능 · 콜백 ID ≤30 · 태그 미전송 | 스키마에서 강제 | 문서 1 v3.2.7 · 비선호 5는 BE `MAX_SELECTABLE_COUNT`(09-29 스키마 반영) |
+| 비선호 ≤5 · 리뷰 ≤10(11개면 400, 자르지 않음) · rating 1~5 · 글 null 가능 · 콜백 ID ≤30 · 태그 미전송 | 스키마에서 강제 | 요청서 v1.2(10-09) · 비선호 5는 BE `MAX_SELECTABLE_COUNT` |
+| 7.6 키 규칙 — 값 필수는 `recipientUserId`·`sourceVersion` 둘, 세 칸은 키를 보내고 값은 비어도 됨. **1단계(지금):** `dislikedCategories` 키가 빠지면 400. **2단계(BE V2 배포 시):** `giftPreference`·`reviews`도 키 필수 — `schemas.py` default 두 줄 삭제 + `test_schemas` 두 줄 | `schemas.ProfileExtractRequest` 머리말 | 10-09 D4 (BE 먼저, AI 나중) |
+| 입력 세 칸이 전부 비면 추천 **0개** 콜백 — BE는 0행 저장 + 인기순 대체 | `pipeline.has_no_input()` | 10-09 결정 C |
 | 풀 정렬 (v1) | **조회수(`viewCount`) 내림차순**, 동점은 productId 오름차순. 임의성 없음 | 결정 a (09-22 Backend 합의: 초기엔 임의 조회수를 넣어 보냄). 필드명은 Backend 확정 전 임시 |
 | 모델 호출 조건 | 취향 문장 또는 리뷰가 있을 때 (`needs_model`) | 결정 c — v1은 경고 후 v1 경로 |
 | 비선호 상한 5 | 스키마 `max_length=5`(09-29) — BE `PreferencePolicy.MAX_SELECTABLE_COUNT` 와 같은 값. 설정 `MAX_DISLIKED`·`MAX_REVIEWS` 는 아무 데서도 안 읽어 삭제 | 결정 b 종결 (BE 코드로 확인) |
-| 7.7 계약 | 태그 없음(v3.2.7 작업본) | 위키 v3.2.6은 태그 필수 — 미결 |
+| 7.7 계약 | 태그 없음 — BE 구현·실측(10-08 ~ 10-11)으로 확정 | DR-035 |
+| BE 연동 동작(통합 수정점 v0.7, BE develop 10-08 구현) | 틱마다 `/health` 핑(`catalog.active` · `store.connected`) → 아니면 틱 건너뜀 · 7.6 실패 시 디바운스 재시작 1회 뒤 접음 · 콜백 못 받으면 `maximum-window` 뒤 **같은 번호** 복구 요청(AI는 `decide → RESEND`) · PENDING 중 새 번호(AI는 옛 미전달 행 SUPERSEDED) | 10-11 여섯 시나리오 전부 통과 |
 | 필드 계약 불일치 | HTTP 코드는 계약대로(400 INVALID_REQUEST 등). 원인은 **내부 코드** `ErrorCode`로: `CONTRACT_7_6_UNKNOWN_FIELD`(7.6 모르는 필드 → 무시+경고) · `CONTRACT_7_7_REJECTED`(7.7 4xx → `profile_runs.error`) · `CONTRACT_7_9_SCHEMA`(7.9 필수 누락·타입 → CLI가 저장 거부). 7.6·7.9 DTO는 모르는 필드를 거부하지 않음, 조회수는 `viewCount`/`views` 둘 다 수용 | 09-22 결정 |
 
 ---
@@ -108,7 +115,7 @@ uv sync                                     # .venv + 의존성 (uv.lock 기준)
 # .env 만들기: 담당자에게 받은 .env.example 을 복사한다 (저장소에는 없음 · 키 목록은 src/profiling/settings.py)
 docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
 uv run alembic upgrade head                 # 테이블 생성 (0001~0004)
-uv run pytest -q                            # 204 passed, 2 skipped (DB 꺼져 있으면 통합 51개 skip)
+uv run pytest -q                            # 214 passed, 2 skipped (DB 꺼져 있으면 통합 52개 skip)
 uv run ruff check src tests tools alembic   # lint
 ```
 
@@ -171,6 +178,8 @@ curl -s -X POST localhost:8000/api/internal/v1/ai/profile/extract-and-pool \
 curl -s localhost:8081/received | python3 -m json.tool | head -30
 ```
 
+**실물 BE와 붙이기** — 절차는 [docs/BE_연동_시험_가이드.md](docs/BE_연동_시험_가이드.md), 자동 시나리오는 `uv run python tools/be_integration/drive_v07.py reset` → `s1` → …(위 표). BE 쪽은 멀티 모듈이라 `./gradlew :main-backend:bootRun`, 로컬 디바운스는 10s · 60s · 10s로 줄인다. BE 담당자용 처음부터 끝까지 안내는 팀 폴더 「BE 로컬 AI 세팅 가이드 v0.2」(10-12 전달).
+
 카탈로그 적재(배포 경로) — Backend 전달 패키지를 `ai_catalog` 에 넣는다:
 ```bash
 uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1     # 적재 (트랜잭션 하나, 활성 버전 교체)
@@ -187,14 +196,15 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 4. 테스트
 
-원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 155개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 51개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
+원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 162개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 52개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
 
 | 파일 | 대상 | 방법 | 개수 |
 |---|---|---|---|
-| `test_schemas.py` | 7.6·7.7·7.9 DTO 경계 | Pydantic `ValidationError` — 11개 리뷰·비선호 6개·rating 0/6·모르는 필드·조회수 별칭·재고 3값 변환·태그 포함 콜백 거부 | 12 |
-| `test_pipeline.py` | `to_internal`·`needs_model`·`input_hash`·`build_pool`·`profile()` | `FakeCatalog`·`FakeStore`·`FakeRecipientStore`(ports 모양). 비선호 제외·재고 `unavailable`만 제외(`unknown` 유지)·조회수 정렬·상한·**대분류 비선호는 하위 소분류 전체 제외**(이름 보조·대분류 정보 없으면 소분류만)·FAILED 경로·저장 실패·RUNNING→RESULT_READY 순서·프로필 upsert·빈 풀은 빈 배열 | 22 |
+| `test_schemas.py` | 7.6·7.7·7.9 DTO 경계 | Pydantic `ValidationError` — 11개 리뷰·비선호 6개·rating 0/6·모르는 필드·조회수 별칭·재고 3값 변환·태그 포함 콜백 거부 · **키 규칙**(필수 셋 중 하나라도 빠지면 400, 값은 비어도 됨, 세 필드 본문은 2단계 전까지 통과) | 13 |
+| `test_pipeline.py` | `to_internal`·`needs_model`·`input_hash`·`build_pool`·`profile()` | `FakeCatalog`·`FakeStore`·`FakeRecipientStore`(ports 모양). 비선호 제외·재고 `unavailable`만 제외(`unknown` 유지)·조회수 정렬·상한·**대분류 비선호는 하위 소분류 전체 제외**(이름 보조·대분류 정보 없으면 소분류만)·FAILED 경로·저장 실패·RUNNING→RESULT_READY 순서·프로필 upsert·빈 풀은 빈 배열 · **`has_no_input` 5경우 · 전부 비면 0개 콜백**(결정 C) | 28 |
 | `test_catalog.py` | `FileCatalogReader` | tmp JSON 두 형식 · 중복/오류 제외 · 재고 3값(상태 없으면 `unknown`) · `isinstance(…, Protocol)` 모양 검사 | 3 |
-| `test_backend.py` | `to_callback`·`HttpBackendPort` | `httpx.MockTransport` — 상태 코드 6종 → `CallbackResult(status, code)`, 헤더·경로·본문, 네트워크 오류 | 12 |
+| `test_backend.py` | `to_callback`·`HttpBackendPort` | `httpx.MockTransport` — 상태 코드 6종 → `CallbackResult(status, code)`, 헤더·경로·본문, 네트워크 오류 | 13 |
+| `test_health_contract.py` | `/health` BE 핑 계약 | `catalog.active` · `store.connected` 두 필드가 BE 핑 조건(10-08) — 이름·불리언 고정 | 2 |
 | `test_fetch_export.py` | `tools/catalog/fetch_export` | 계약 점검(모르는 필드·별칭·필수 누락) · ID 대조 · 저장 정규화 · 종료 코드 | 7 |
 | `test_catalog_fixture.py` | 예시 카탈로그(파일만) | 111건·56카테고리·null 1·재고 없음 2 | 1 |
 | `test_load_catalog.py` | `tools/catalog/load_catalog` 읽기·검사 | 패키지 파일만(DB 없음) — 누락 파일·부모 없는 소분류·중복 ID·선언 수 불일치 | 5 |
@@ -211,7 +221,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | `integration/test_db_catalog.py` | 마이그레이션 0003 + 적재 SQL | 표·CHECK·활성 버전 1개 · 재적재 멱등 · Backend ID/재고 보존 · `--id-map` 회신 반영 | 9 |
 | `integration/test_db_catalog_reader.py` | `DbCatalogReader` | 활성 버전 읽기·필드 매핑 · 같은 버전이면 재질의 없음 · Backend 번호 우선/임시 번호 · 번호 충돌 거부 · 활성 없음 · **버전과 상품이 한 스냅샷에서 나오는지** · 대분류(parent) 채움 · 폴링 TTL(안이면 질의 없음 · 0이면 호출마다 · 주입 시계로 만료 · 실패는 캐시 안 함) | 12 |
 | `integration/test_db_recipient_profiles.py` | 마이그레이션 결과 | 열 순서·PK 시퀀스 없음·유니크·CHECK·upsert 버전 규칙 | 5 |
-| `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED · 0004 열 주석 · 잠금 안 저장소 호출은 풀에서 더 꺼내지 않음(체크아웃 0) | 15 |
+| `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED · 0004 열 주석 · 잠금 안 저장소 호출은 풀에서 더 꺼내지 않음(체크아웃 0) · **DELIVERED 저장이 낮은 미전달 행을 SUPERSEDED로**(A5, `undelivered` 0) | 16 |
 | `integration/test_e2e_app.py` | **끝에서 끝** | `TestClient(app)` — lifespan(진짜 DB) → 7.6 202 → Supervisor 슬롯 → 가짜 BackendPort가 7.7 받음 → `profile_runs` DELIVERED·`recipient_profiles` upsert. 400은 백그라운드로 안 감. 모르는 필드 경고. `/health`. **배포 모양(`CATALOG_SOURCE=db`)으로 기동** · **7.7 500 → 0.5초 뒤 재시도 → 200 (진짜 포트)** · **큐 가득 503 + Retry-After 30, 행 없음, `/health` 큐 키** · 완료는 워커를 기다려 확인 | 8 |
 | `integration/test_fetch_export_db.py` | `--compare-db` | 팀원 DDL로 `ai_search.products` 만들어 TEXT id·누락·이름 차이 보고 | 2 |
 | `test_backend.py::test_callback_path_matches_fake_backend` | 계약 문자열 | AI 송신 경로 == fake 수신 경로 | (포함) |
@@ -222,11 +232,11 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 5. 다음 순서와 건드리는 곳
 
-인수인계용 전체 목록은 [docs/파이프라인_지도/2026-10-06.md §5](docs/파이프라인_지도/2026-10-06.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 여기는 요약이다.
+인수인계용 전체 목록은 [docs/파이프라인_지도/2026-10-06.md §5](docs/파이프라인_지도/2026-10-06.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 10-06 이후의 연동 변화와 후속은 [docs/BE_연동_시험_결과_2026-10-11.md §5](docs/BE_연동_시험_결과_2026-10-11.md). 여기는 요약이다.
 
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
-| 1 | **Backend 미팅 결과 반영** — 7.7 태그 유무 · 7.9 조회수 필드명 · 제외 vs 감점 | `schemas.py` · `pipeline.build_pool` · `tools/fake_backend` | 포트·저장소 |
+| 1 | ~~7.7 태그 유무~~ **없음으로 확정**(BE 구현·실측). 남은 것: 7.9 조회수 필드명 · 제외 vs 감점 | `schemas.py` · `pipeline.build_pool` · `tools/fake_backend` | 포트·저장소 |
 | 2 | ~~Backend ID 회신 받기~~ **완료(09-25)** — xlsx 2종으로 받아 상품 4,231/4,231 · 카테고리 67/67 · 재고 · 조회수까지 반영했다. 7.7로 나가는 번호가 이제 Backend 번호다 | — | 코드 전부 |
 | 3 | ~~상품 카탈로그 DB~~ **완료(09-23)** — `0003` + `load_catalog.py`로 4,231건·67분류 적재, `DbCatalogReader`로 읽기까지. `PROFILING_CATALOG_SOURCE=db`가 배포 경로다. Backend 번호가 없는 동안은 임시 번호로 돌고 `/health`가 `provisional_ids`로 표시한다(2번이 끝나면 사라짐) | — | `pipeline.py`·`ports.py` |
 | 4 | ~~접수 단계 중복 판정~~ **완료(09-25)** — Backend가 같은 `sourceVersion`으로 최대 2회 재전송하기로 해서 필수가 됐다. `decide()`가 analyze/resend/skip으로 가른다 | — | 어댑터·ports |
@@ -235,6 +245,9 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | 7 | **v3** 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) + **팀원 Search 호출** | `pipeline.profile` 2)단계 · `model.py` · `ports.py`에 `SearchPort`·`ProfileModel` 추가 | 접수·저장·콜백 |
 | 7′ | **v3 마이그레이션** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/000N_*.py` (`add_column`) · `types.RecipientProfile` 필드 · 통합 테스트 | 기존 마이그레이션 |
 | 8 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
+| 9 | **BE V2 배포 시 7.6 키 규칙 2단계** — `giftPreference`·`reviews` 키 필수로(BE 먼저, AI 나중) | `schemas.py` default 두 줄 · `test_schemas` 두 줄 | 나머지 전부 |
+| 10 | 공동 시험 도구에 V2 입력 경로 — 리뷰 등록(선물 이력 시드) · 취향 저장 · 시나리오 둘(취향만 변경 → 새 번호 · 전부 비움 → 0개) | `tools/be_integration/drive_v07.py` · 관측 콘솔(저장소 밖) | 앱 코드 |
+| 11 | 코어 브랜치(`feat/v2-profiling-init`: 리뷰 신호 · `0005` · stores) 합류 — `pipeline.py` 3)단계는 "0개 판정 먼저 → 점수 가중 풀" 순서로 수동 병합 | `pipeline.py` · `types.py` · `stores.py` · alembic | 접수·콜백 |
 
 **팀원 Search는 v3부터 부른다.** v1은 질의어가 없어 검색기가 카테고리 라운드로빈으로 돌려주고, 팀원 카탈로그에는 조회수 필드가 없어 09-22에 합의한 정렬 규칙을 지킬 수 없다. 프로파일링의 카탈로그 공급처는 Backend(7.9 또는 전달 파일)이고, 두 쪽이 맞춰야 하는 것은 테이블이 아니라 **상품 ID 체계**다.
 

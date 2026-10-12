@@ -6,6 +6,7 @@
 v1: 취향 문장 None · 리뷰 [] → 추출·검증을 건너뛰고, 비선호 카테고리를 뺀(또는 감점한) 상품 풀 30개를 만든다.
 v2(지금): 리뷰 별점 → 소분류 편향(score_categories)을 풀 순서에 더하고, 30개는 D(selection — 비선호 하드 제외 · 한 소분류 최대 10 ·
     같은 모델 하나)로 고른다. 글·취향 → 태그(LLM)는 아직 없음 — 태그가 생기면 D 의 임베딩 단계가 켜진다.
+입력 세 칸이 전부 비면(비선호 0 · 취향 없음 · 리뷰 0) 추천 0개를 돌려준다 — has_no_input(), 10-09 결정 C.
 v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.analyze()(모델) → 검증기 → Search 호출이 들어온다. 나머지 흐름은 그대로.
 
 흐름 (한 건):
@@ -136,6 +137,16 @@ def input_hash(rq: ProfileRequest) -> str:
 # ---------------------------------------------------------------------------
 # 2) 판단 — 모델(LLM)이 필요한 요청인가 (결정 c)
 # ---------------------------------------------------------------------------
+
+
+def has_no_input(rq: ProfileRequest) -> bool:
+    """입력 세 칸이 전부 비었나 — 비선호 0 · 취향 문장 없음(공백만도 없음) · 리뷰 0.
+
+    10-09 결정(C): 이때 추천을 **0개**로 돌려준다. Backend 는 0행을 저장하고 상품 목록을 인기순으로 대체한다(빈 콜백은 BE 가 정상 완료로 처리).
+    가입 직후에는 Backend 가 요청을 보내지 않으므로, 이 요청은 "기존 사용자가 전부 지웠다"는 신호다 — AI 사본(비선호 · 취향 · 리뷰)은 빈 값으로 덮인다.
+    입력이 없는데 인기순 30개를 "AI 추천"으로 내보내던 것(v1)은 그만둔다 — 추천할 근거가 없으면 추천하지 않는다.
+    """
+    return not rq.disliked_categories and not (rq.gift_preference or "").strip() and not rq.reviews
 
 
 def needs_model(rq: ProfileRequest) -> bool:
@@ -344,15 +355,21 @@ def profile(
             validation, tags, prompt_version, tag_status = tag_run.validation, tag_run.tags, tag_run.prompt_version, tag_run.status
             validator_version = VALIDATOR_VERSION_TAG4
 
-        # 3) 풀 30개 — 태그(글 · 취향 → LLM)가 아직 없어 D 는 임베딩 없이 돈다(비선호 하드 제외 · 상한 · 중복 제거)
-        search, rule = make_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores,
-                                 pool_strategy=pool_strategy, tags=tags, embedding=embedding)
-        if not search.product_ids:
-            # 0개도 성공이다 — 빈 배열을 7.7로 보낸다. Backend는 저장된 추천이 없으면 인기순으로 대체한다(BE PR4 fallback).
-            # 침묵(FAILED)하면 Backend 타임아웃 10분 × 재시도 뒤에야 인기순이 되므로 보내는 쪽이 빠르다. BE 확인 요청 8번.
-            # PENALTY 모드에서는 비선호로 0개가 될 수 없다 — 남는 원인은 재고(전량 unavailable)나 빈 카탈로그뿐
-            why = "비선호·재고로 전부 제외" if dislike_mode is DislikeMode.EXCLUDE else "재고 없음·빈 카탈로그"
-            log.warning("profile recipient=%s source_version=%s 풀 0개(%s) — 빈 배열 콜백, Backend가 인기순 대체", rid, sv, why)
+        # 3) 풀 30개 — 입력이 전부 비면 추천 0개 (10-09 결정 C). 0개 콜백은 성공이다: Backend 는 0행을 저장하고 인기순으로 대체한다.
+        #    그 밖에는 D(비선호 하드 제외 · 리뷰한 상품 제외 · 상한 · 중복 제거, 태그가 있으면 임베딩 + MMR)
+        if has_no_input(rq):
+            search = SearchResult(product_ids=[], query_text="", catalog_version_id=catalog_version_id)
+            rule = "none:no-input"
+            log.info("profile recipient=%s source_version=%s 입력 없음(비선호 0 · 취향 없음 · 리뷰 0) → 추천 0개 콜백, Backend 가 인기순 대체", rid, sv)
+        else:
+            search, rule = make_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores,
+                                     pool_strategy=pool_strategy, tags=tags, embedding=embedding)
+            if not search.product_ids:
+                # 0개도 성공이다 — 빈 배열을 7.7로 보낸다. Backend는 저장된 추천이 없으면 인기순으로 대체한다(BE PR4 fallback).
+                # 침묵(FAILED)하면 Backend 는 maximum-window(⚙6h) 뒤 복구 전송 때까지 기다리므로 보내는 쪽이 빠르다. BE 확인 요청 8번.
+                # PENALTY 모드에서는 비선호로 0개가 될 수 없다 — 남는 원인은 재고(전량 unavailable)나 빈 카탈로그뿐
+                why = "비선호·재고로 전부 제외" if dislike_mode is DislikeMode.EXCLUDE else "재고 없음·빈 카탈로그"
+                log.warning("profile recipient=%s source_version=%s 풀 0개(%s) — 빈 배열 콜백, Backend가 인기순 대체", rid, sv, why)
 
         # 4) 결과
         outcome = ProfileOutcome(

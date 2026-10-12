@@ -109,10 +109,11 @@ def test_profile_uses_d_by_default_and_s0_on_switch() -> None:
     from tests.unit.test_pipeline import FakeCatalog, FakeRecipientStore, FakeStore
 
     products = [_p(i, 10, 1000 - i) for i in range(1, 16)] + [_p(100 + i, 20, 500 - i) for i in range(1, 11)]
-    run = lambda **kw: pipeline.profile(_rq(), catalog=FakeCatalog(products), store=FakeStore(), recipient_store=FakeRecipientStore(),
+    rq = _rq(disliked=[(99, "관계없는 대분류")])                                     # 입력이 전부 비면 0개라(결정 C) 무관한 비선호 하나
+    run = lambda **kw: pipeline.profile(rq, catalog=FakeCatalog(products), store=FakeStore(), recipient_store=FakeRecipientStore(),
                                         pool_size=20, **kw).search.product_ids
     assert sum(pid < 100 for pid in run()) == selection.CAT_CAP
-    assert run(pool_strategy=pipeline.PoolStrategy.S0) == pipeline.build_pool(_rq(), products, 20, CV).product_ids
+    assert run(pool_strategy=pipeline.PoolStrategy.S0) == pipeline.build_pool(rq, products, 20, CV).product_ids
 
 
 def test_reviewed_products_are_never_recommended() -> None:
