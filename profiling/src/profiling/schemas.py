@@ -181,6 +181,8 @@ class ProductRecord(BaseModel):
                     "비선호는 대분류로 오므로(09-27 BE 결정: PreferenceSaveService 가 root만 허용) 비선호 판정(v1 제외 · v2 감점)에 쓴다. "
                     "파일 카탈로그는 없으면 None")
     parentCategoryName: str | None = Field(default=None, description="대분류 이름 — 이름 보조 판정용")
+    productKind: str | None = Field(default=None, description="상품 종류(product_kind, 727종 — 예: 공용향수 · 헤드폰). 태그 추출 프롬프트가 쓴다. "
+                                                          "DB 카탈로그가 채우고 7.9 export · 파일 카탈로그엔 없으면 None")
     price: int = Field(ge=0, description="현재 가격. export 시점의 값이며 결제 근거가 아님")
     availability: Availability = Field(
         default="unknown", validation_alias=AliasChoices("availability", "available"),

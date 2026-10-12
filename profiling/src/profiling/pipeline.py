@@ -4,7 +4,8 @@
 그래서 단위 테스트는 ports 모양의 가짜(dict 하나짜리 클래스)를 넣어 DB 없이 돈다.
 
 v1: 취향 문장 None · 리뷰 [] → 추출·검증을 건너뛰고, 비선호 카테고리를 뺀(또는 감점한) 상품 풀 30개를 만든다.
-v2(지금, 2단계): 리뷰 별점 → 소분류 편향(score_categories)을 풀 순서에 더한다. 글·취향 → 태그(LLM)는 아직 없음(하네스 뒤).
+v2(지금): 리뷰 별점 → 소분류 편향(score_categories)을 풀 순서에 더하고, 30개는 D(selection — 비선호 하드 제외 · 한 소분류 최대 10 ·
+    같은 모델 하나)로 고른다. 글·취향 → 태그(LLM)는 아직 없음 — 태그가 생기면 D 의 임베딩 단계가 켜진다.
 v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.analyze()(모델) → 검증기 → Search 호출이 들어온다. 나머지 흐름은 그대로.
 
 흐름 (한 건):
@@ -13,7 +14,9 @@ v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.anal
                             1) catalog.active()            활성 카탈로그 (없으면 NoActiveCatalog — api가 접수 단계에서 이미 걸렀지만 여기서도 FAILED로 기록)
                             2) validation 만들기           v1: 비선호 이름만 disliked_tags에, 나머지 빈 값
                                category_scores            리뷰 별점 → 소분류 편향 (1)에서 받은 products 로 소분류를 찾는다 — 같은 카탈로그 버전)
-                            3) build_pool()                비선호 제외(v1) 또는 감점(v2, DislikeMode) · 재고 없음(unavailable)만 제외 · 조회수순 pool_size개  (결정 a)
+                            3) make_pool()                 rank_products()(인기 + 편향 + 감점 순위) → 고르기: PoolStrategy.D(기본, selection.select_pool —
+                                                           비선호 하드 제외 · 한 소분류 최대 10 · 같은 모델 하나 · 모자라면 비선호를 감점 순서로)
+                                                           또는 S0(build_pool — 순위 앞 pool_size개, 10-12 까지의 규칙)
                             4) ProfileOutcome(RESULT_READY)
                             5) store.save(outcome)         실행 기록 갱신 — callback_payload·hash가 여기서 DB에 먼저 커밋된다 (§16.4)
                             6) recipient_store.upsert()    수신자 프로필 (recipient_profiles, category_scores 포함) — 낮은 버전이면 DB가 무시
@@ -24,17 +27,25 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from bisect import bisect_left
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Sequence
 from enum import StrEnum
 from typing import NamedTuple
 from uuid import UUID
 
+from profiling import selection, tagging
 from profiling.ports import (
     CatalogReader,
+    EmbeddingIndex,
     NoActiveCatalog,
     ProfileRunStore,
     RecipientProfileStore,
+    TagExtractError,
+    TagExtractor,
+    TagReply,
+    TokenUsage,
 )
 from profiling.schemas import ProductRecord, ProfileExtractRequest
 from profiling.types import (
@@ -55,6 +66,7 @@ log = logging.getLogger(__name__)
 
 # 관측 라벨 — 어떤 규칙으로 만든 결과인지 저장해 두면 나중에 결과를 비교·회귀할 때 "언제 규칙이 바뀌었나"를 알 수 있다
 VALIDATOR_VERSION_V1 = "v1-skip"      # 검증기 없이 비선호만 반영
+VALIDATOR_VERSION_TAG4 = "tag4-v1"    # tagging.validate — 4축 · 근거 ref · 별점 4~5 · 판촉 단어 (10-12)
 # 풀 정렬 규칙 라벨 (10-11 까지의 로그엔 "v1-view-count" = 조회수 내림차순만). 리뷰가 없어도 같은 라벨 — 라벨은 규칙이지 입력이 아니다
 POOL_RULE_V2 = "v2-views+bias"                              # EXCLUDE: 인기(0~2) + BIAS_WEIGHT × 편향, 비선호는 뺌
 POOL_RULE_V2_PENALTY = "v2-views+bias+dislike-penalty"      # PENALTY: 인기 + 편향 + (비선호면 DISLIKED_CATEGORY_SCORE)
@@ -74,6 +86,18 @@ class DislikeMode(StrEnum):
 
     EXCLUDE = "exclude"
     PENALTY = "penalty"
+
+
+class PoolStrategy(StrEnum):
+    """순위에서 30개를 어떻게 고르나 (10-12 결정 — docs/임베딩_추천_설계안_2026-10-12.md §6).
+
+    D  비선호 하드 제외 · 한 소분류 최대 10 · 같은 모델 하나 · (태그 + 임베딩이 있으면) 임베딩 후보 + MMR. selection.select_pool
+    S0 순위 앞 pool_size개 그대로(build_pool) — 10-12 까지의 규칙. 5점 소분류가 30개를 독차지하는 문제가 있어 D 로 바꿨고, 되돌릴 수 있게 남긴다.
+    고르는 곳은 설정 하나(settings.POOL_STRATEGY).
+    """
+
+    D = "d"
+    S0 = "s0"
 
 
 # PENALTY 모드에서 **사용자가 직접 고른 비선호 카테고리의 기본 점수** — 이 상수에서 출발해 리뷰 편향을 **더한다**(10-11 결정).
@@ -162,8 +186,37 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
     query_text는 v1에서 빈 문자열 — Search가 붙으면 검증기의 preferred_tags를 이어 붙인 질의가 들어간다.
     """
     ranked = rank_products(rq, products, dislike_mode=dislike_mode, scores=scores)
-    picked = [s.product.productId for s in ranked[:pool_size]]
+    seen = reviewed_ids(rq)                         # 리뷰한 상품(이미 받은 선물)은 추천하지 않는다(10-12)
+    picked = [s.product.productId for s in ranked if s.product.productId not in seen][:pool_size]
     return SearchResult(product_ids=picked, query_text="", catalog_version_id=catalog_version_id)
+
+
+def reviewed_ids(rq: ProfileRequest) -> frozenset[int]:
+    """리뷰한 상품 = 이미 받은 선물 — 다시 추천하지 않는다(10-12 사용자 결정). 별점 · 태그는 취향 신호로만 쓴다."""
+    return frozenset(r.product_id for r in rq.reviews)
+
+
+def make_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int, catalog_version_id: UUID, *,
+              dislike_mode: DislikeMode = DislikeMode.EXCLUDE, scores: list[CategoryScore] | None = None,
+              pool_strategy: PoolStrategy = PoolStrategy.D, tags: Sequence[selection.Tag] = (),
+              embedding: EmbeddingIndex | None = None) -> tuple[SearchResult, str]:
+    """풀 pool_size개와 규칙 라벨. 순위(rank_products)는 두 전략이 같고, 고르는 법만 다르다(PoolStrategy).
+
+    두 전략 모두 **리뷰한 상품은 고르지 않는다**(reviewed_ids — 이미 받은 선물).
+    D 에서 비선호 처리: EXCLUDE 면 순위에 비선호가 아예 없고, PENALTY 면 순위엔 있지만 **비선호 아닌 상품으로 다 못 채울 때만** 감점 순서로
+    채운다 — 비선호 카테고리 상품에 높은 별점이 있어도 그 카테고리는 빼고, 그 상품의 태그만 취향 신호로 쓴다(selection 모듈 설명).
+    """
+    if pool_strategy is PoolStrategy.S0:
+        rule = POOL_RULE_V2 if dislike_mode is DislikeMode.EXCLUDE else POOL_RULE_V2_PENALTY
+        return build_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores), rule
+    ranked = rank_products(rq, products, dislike_mode=dislike_mode, scores=scores)
+    sel = selection.select_pool(ranked, pool_size, allow_disliked=dislike_mode is DislikeMode.PENALTY, tags=tags, embedding=embedding,
+                                exclude_ids=reviewed_ids(rq))
+    if sel.filled_disliked:
+        log.info("profile recipient=%s 비선호 아닌 상품으로 %d개를 못 채워 비선호 %d개를 감점 순서로 채움",
+                 rq.recipient_user_id, pool_size, sel.filled_disliked)
+    rule = sel.rule + ("" if dislike_mode is DislikeMode.EXCLUDE else "+penalty-fill")
+    return SearchResult(product_ids=sel.product_ids, query_text=sel.query_text, catalog_version_id=catalog_version_id), rule
 
 
 class ScoredProduct(NamedTuple):
@@ -250,6 +303,8 @@ def category_scores(rq: ProfileRequest, products: list[ProductRecord], catalog: 
 def profile(
     rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStore,
     recipient_store: RecipientProfileStore, pool_size: int = 30, dislike_mode: DislikeMode = DislikeMode.EXCLUDE,
+    pool_strategy: PoolStrategy = PoolStrategy.D, embedding: EmbeddingIndex | None = None,
+    tagger: TagExtractor | None = None,
 ) -> ProfileOutcome:
     """7.6 요청 한 건 → ProfileOutcome (저장까지). 예외를 밖으로 내지 않고 FAILED로 돌려준다.
 
@@ -274,22 +329,24 @@ def profile(
         return _fail(rq, store, ErrorCode.NO_ACTIVE_CATALOG, f"활성 카탈로그 없음: {e}")
 
     try:
-        # 2) 리뷰 별점 → 소분류 편향. 글·취향 → 태그(모델)는 아직 없다(하네스 뒤) — 별점만 쓴다
+        # 2) 리뷰 별점 → 소분류 편향 + (추출기가 있으면) 글 · 취향 → 4축 태그(LLM 한 번 → 코드 검증기)
         scores = category_scores(rq, products, catalog)
-        if needs_model(rq):
-            # v3 자리: 조인 → ProfileModel.analyze() → validator. 원문은 로그에 남기지 않는다 — 개수만
-            log.warning("profile recipient=%s: 취향/리뷰(%d개) 있음 — 글·취향 태그 추출은 아직 없음(하네스 뒤), 별점 편향 소분류 %d개 반영",
-                        rid, len(rq.reviews), len(scores))
-        # 검증 결과 — v1/v2 는 검증기를 돌리지 않는다. Backend 명시 비선호 이름만 disliked_tags에 (병합 규칙: Backend 목록이 앞)
-        validation = ValidationResult(
-            likes=[], key_features=[], dislikes=[],
-            preferred_tags=[],
-            disliked_tags=[c.category_name for c in rq.disliked_categories],
-            log=[],
-        )
+        disliked_names = [c.category_name for c in rq.disliked_categories]
+        validation = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_tags=disliked_names, log=[])
+        tags: list[selection.Tag] = []
+        prompt_version, validator_version = None, VALIDATOR_VERSION_V1
+        tag_status = "skip" if not needs_model(rq) else "off"   # 글 · 취향 없음 → skip, 추출기 꺼짐 → off
+        if needs_model(rq) and tagger is None:
+            log.info("profile recipient=%s: 취향/리뷰(%d개) 있음 — 태그 추출기 꺼짐(TAGGER=none), 별점 편향 소분류 %d개만 반영",
+                     rid, len(rq.reviews), len(scores))
+        elif needs_model(rq):
+            tag_run = _extract_tags(rq, products, tagger, disliked_names)
+            validation, tags, prompt_version, tag_status = tag_run.validation, tag_run.tags, tag_run.prompt_version, tag_run.status
+            validator_version = VALIDATOR_VERSION_TAG4
 
-        # 3) 풀 30개
-        search = build_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores)
+        # 3) 풀 30개 — 태그(글 · 취향 → LLM)가 아직 없어 D 는 임베딩 없이 돈다(비선호 하드 제외 · 상한 · 중복 제거)
+        search, rule = make_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores,
+                                 pool_strategy=pool_strategy, tags=tags, embedding=embedding)
         if not search.product_ids:
             # 0개도 성공이다 — 빈 배열을 7.7로 보낸다. Backend는 저장된 추천이 없으면 인기순으로 대체한다(BE PR4 fallback).
             # 침묵(FAILED)하면 Backend 타임아웃 10분 × 재시도 뒤에야 인기순이 되므로 보내는 쪽이 빠르다. BE 확인 요청 8번.
@@ -301,7 +358,7 @@ def profile(
         outcome = ProfileOutcome(
             recipient_user_id=rid, source_version=sv, status=RunStatus.RESULT_READY, input_hash=h,
             validation=validation, search=search,
-            prompt_version=None, validator_version=VALIDATOR_VERSION_V1,
+            prompt_version=prompt_version, validator_version=validator_version,
         )
     except Exception as e:  # 업무 단계의 어떤 오류도 FAILED로 기록 — 백그라운드에서 조용히 죽지 않게
         log.exception("profile recipient=%s source_version=%s 실패", rid, sv)
@@ -322,10 +379,69 @@ def profile(
         log.exception("profile recipient=%s 수신자 프로필 저장 실패", rid)
         return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {type(e).__name__}: {e}")
 
-    log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d scores=%d catalog_version=%s rule=%s",
-             rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), len(scores), catalog_version_id,
-             POOL_RULE_V2 if dislike_mode is DislikeMode.EXCLUDE else POOL_RULE_V2_PENALTY)
+    log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d scores=%d tags=%d tagger=%s catalog_version=%s rule=%s",
+             rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), len(scores), len(tags), tag_status, catalog_version_id, rule)
     return outcome
+
+
+class TagRun(NamedTuple):
+    """태그 추출 한 번의 결과 — 검증 결과 · D 태그 · prompt_version · 상태(로그 · 집계용: ok · empty · bad_json · fail:<kind>) · 사용량."""
+
+    validation: ValidationResult
+    tags: list[selection.Tag]
+    prompt_version: str | None
+    status: str
+    usage: TokenUsage | None = None
+
+
+def _usage_fields(u: TokenUsage | None) -> str:
+    if u is None:
+        return "in_tok=? out_tok=?"
+    return (f"in_tok={u.input_tokens} out_tok={u.output_tokens} load_ms={u.load_ms} in_ms={u.input_ms} out_ms={u.output_ms} "
+            f"llm_ms={u.total_ms} stop={u.stop}")
+
+
+def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: TagExtractor,
+                  disliked_names: list[str]) -> TagRun:
+    """LLM 한 번 → 검증기 → TagRun. **실패해도 요청은 계속** — 태그 없이(빈 결과) 돌려준다.
+
+    장애 추적: 한 줄 로그 `tag_extract <상태> recipient= source_version= model= …` 를 항상 남긴다 — 상태 · 원인 분류(timeout · connect ·
+    http_404 …) · 토큰 · 시간(적재/입력/출력) · 입력 크기(리뷰 수 · 프롬프트 글자 수) · 남김/버림 수 · 축별 수 · 버림 사유별 수.
+    원문(리뷰 글 · 취향 문장 · 모델 출력 · 태그 글자)은 로그에 남기지 않는다 — 개수 · 시간 · 모델 · 분류만."""
+    rid, sv = rq.recipient_user_id, rq.source_version
+    empty = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_tags=disliked_names, log=[])
+    prompt, ratings = tagging.build_prompt(rq, {p.productId: p for p in products})
+    pv = f"{tagging.PROMPT_VERSION}@{tagger.model}"
+    head = (f"recipient={rid} source_version={sv} model={tagger.model} prompt={tagging.PROMPT_VERSION} "
+            f"reviews={len(rq.reviews)} pref={'y' if rq.gift_preference else 'n'} prompt_chars={len(prompt)}")
+    t0 = time.perf_counter()
+    try:
+        reply = tagger.extract(tagging.SYSTEM, prompt, tagging.SCHEMA)
+    except TagExtractError as e:                     # 분류된 실패 — 시간 초과 · 연결 실패 · 모델 없음 · 잘림
+        log.warning("tag_extract fail:%s %s wall_ms=%.0f %s err=%s — 태그 없이 진행", e.kind, head, (time.perf_counter() - t0) * 1000,
+                    _usage_fields(e.usage), e)
+        return TagRun(empty, [], None, f"fail:{e.kind}", e.usage)
+    except Exception as e:                           # 분류 못 한 실패 — 스택을 남긴다(메시지엔 URL · 모델만, 원문 없음)
+        log.warning("tag_extract fail:unknown %s wall_ms=%.0f err=%s — 태그 없이 진행", head, (time.perf_counter() - t0) * 1000,
+                    type(e).__name__, exc_info=True)
+        return TagRun(empty, [], None, "fail:unknown")
+    wall_ms = (time.perf_counter() - t0) * 1000
+    raw, usage = (reply.text, reply.usage) if isinstance(reply, TagReply) else (str(reply), None)
+    parsed, parse_err = tagging.parse_report(raw)
+    keep, drop = tagging.validate(parsed, ratings, bool(rq.gift_preference))
+    validation = tagging.to_validation(keep, drop, disliked_names)
+    axes = Counter(t["axis"] for t in keep)
+    drops = Counter(tagging.drop_reason_key(t.get("drop")) for t in drop)
+    status = parse_err if parse_err in ("bad_json", "no_tags_list") else "empty" if not keep else "ok"
+    level = logging.INFO if status == "ok" else logging.WARNING  # 깨진 출력 · 전부 버림은 품질 장애 — 경고로 올린다
+    log.log(level, "tag_extract %s %s wall_ms=%.0f %s out_chars=%d parsed=%d kept=%d dropped=%d axes=%s drops=%s%s", status, head, wall_ms,
+            _usage_fields(usage), len(raw), len(parsed), len(keep), len(drop), _counts(axes), _counts(drops),
+            f" parse={parse_err}" if parse_err else "")
+    return TagRun(validation, tagging.tags_of(validation), pv, status, usage)
+
+
+def _counts(c: Counter) -> str:
+    return ",".join(f"{k}:{v}" for k, v in c.most_common()) or "-"
 
 
 def _fail(rq: ProfileRequest, store: ProfileRunStore, code: ErrorCode, reason: str, *, save: bool = True) -> ProfileOutcome:

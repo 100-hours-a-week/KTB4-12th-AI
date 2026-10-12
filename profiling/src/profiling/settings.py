@@ -73,6 +73,25 @@ class Settings(BaseSettings):
                     "penalty: 빼지 않고 순서에서 감점(v2, 설계 DR-005). pipeline.DislikeMode · DISLIKED_CATEGORY_SCORE 참고",
     )
 
+    POOL_STRATEGY: Literal["d", "s0"] = Field(
+        default="d",
+        description="순위에서 30개 고르기 — d: 비선호 하드 제외 · 한 소분류 최대 10 · 같은 모델 하나(10-12 결정, selection.select_pool) · "
+                    "s0: 순위 앞 30개 그대로(10-12 까지의 규칙, 되돌릴 수 있게 남김). pipeline.PoolStrategy 참고",
+    )
+
+    # ---- 태그 추출(LLM) · 임베딩 (10-12, 기본 꺼짐 — 켜면 D 의 임베딩 단계가 돈다)
+    TAGGER: Literal["none", "ollama"] = Field(
+        default="none",
+        description="태그 추출기 — none: 끔(태그 없이 D) · ollama: 로컬 Ollama(OLLAMA_URL · TAGGER_MODEL). 실패하면 태그 없이 진행",
+    )
+    OLLAMA_URL: str = Field(default="http://localhost:11434", description="TAGGER=ollama 일 때 Ollama 주소")
+    TAGGER_MODEL: str = Field(default="gemma4:12b", description="TAGGER=ollama 일 때 모델(10-12 비교: gemma4:12b 정밀 · qwen3.5:9b 빠름)")
+    TAGGER_TIMEOUT_S: float = Field(default=120.0, gt=0, description="LLM 호출 한 번의 시간 상한(초)")
+    EMBEDDING_DIR: str | None = Field(
+        default=None,
+        description="product-search 폴더(상품 벡터 data/ · 질의 인코더 embedding/). 없으면 임베딩 끔. 모델 라이선스 CC BY-NC — 서비스 전 확인",
+    )
+
     # ---- 실행 (3단계 구현 상세 §12.1 개발 시험 시작값)
     PROFILING_SLOTS: int = Field(
         default=1, ge=1,

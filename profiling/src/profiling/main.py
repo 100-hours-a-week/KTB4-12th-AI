@@ -68,6 +68,21 @@ async def lifespan(app: FastAPI):
         log.error("활성 카탈로그 없음: %s — 7.6은 503을 반환합니다", e)
         app.state.catalog = _NoCatalog(str(e))
     app.state.store = DbProfileRunStore(app.state.engine)
+
+    # 태그 추출기 · 임베딩 — 설정으로 켤 때만(기본 꺼짐). 만들다 실패하면 끈 채로 뜬다: 태그 없이 D 가 돈다(요청은 실패하지 않음)
+    app.state.tagger = app.state.embedding = None
+    if settings.TAGGER == "ollama":
+        from profiling.llm import OllamaTagExtractor
+        app.state.tagger = OllamaTagExtractor(settings.OLLAMA_URL, settings.TAGGER_MODEL, timeout_s=settings.TAGGER_TIMEOUT_S)
+        app.state.tagger.warm_up()
+        log.info("태그 추출기 ollama model=%s url=%s", settings.TAGGER_MODEL, settings.OLLAMA_URL)
+    if settings.EMBEDDING_DIR:
+        try:
+            from profiling.embedding import ProductSearchEmbedding
+            app.state.embedding = ProductSearchEmbedding(Path(settings.EMBEDDING_DIR), app.state.engine)
+            log.info("임베딩 %s (%s)", app.state.embedding.version, settings.EMBEDDING_DIR)
+        except Exception:
+            log.exception("임베딩을 켜지 못함 — 끈 채로 진행(태그가 있어도 임베딩 단계 없이 D)")
     app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
 
     # 끊긴 실행 정리 — 프로세스가 죽으면 그 행은 RUNNING 인 채 남는다. 남겨 두면 중복 판정이 "이미 분석 중"으로
@@ -82,16 +97,18 @@ async def lifespan(app: FastAPI):
     app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS, queue_max=settings.QUEUE_MAX)   # 3단계 §12.1 시작값 슬롯 1
     app.state.supervisor.start()
     app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S)
-    log.info("profiling 시작 backend=%s pool_size=%s dislike_mode=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE, settings.DISLIKE_MODE)
+    log.info("profiling 시작 backend=%s pool_size=%s dislike_mode=%s pool_strategy=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE,
+             settings.DISLIKE_MODE, settings.POOL_STRATEGY)
 
     yield
 
     # 종료 — 신규 접수를 막고 큐를 버린 뒤 실행 중인 것만 SHUTDOWN_DRAIN_S 까지 기다린다(compose 유예 10초 안). 그 다음 콜백 클라이언트·DB 풀 정리.
     dropped = app.state.supervisor.stop(settings.SHUTDOWN_DRAIN_S)
     log.info("profiling 종료 dropped=%d", dropped)
-    close = getattr(app.state.backend, "close", None)
-    if callable(close):
-        close()
+    for part in (app.state.backend, getattr(app.state, "tagger", None), getattr(app.state, "embedding", None)):
+        close = getattr(part, "close", None)
+        if callable(close):
+            close()
     app.state.engine.dispose()
 
 

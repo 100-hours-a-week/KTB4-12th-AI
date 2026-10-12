@@ -14,7 +14,7 @@ typing.Protocol 이라 상속이 필요 없다: 메서드 이름·인자·반환
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 from profiling.schemas import ProductRecord
 from profiling.types import CallbackResult, ProfileOutcome, RecipientProfile
@@ -111,3 +111,63 @@ class RecipientProfileStore(Protocol):
     def get(self, recipient_user_id: int) -> RecipientProfile | None: ...
 
     def delete(self, recipient_user_id: int) -> bool: ...
+
+
+@runtime_checkable
+class EmbeddingIndex(Protocol):
+    """상품 벡터 + 질의 임베딩 — 풀 고르기 D 의 임베딩 단계(selection.select_pool)가 쓴다. 없으면(None) D 는 임베딩 없이 돈다.
+
+    구현 후보: product-search(검색기)가 만든 상품 벡터 · 같은 모델의 질의 인코더. 벡터는 모두 L2 정규화(내적 = 코사인).
+    `version` 은 모델 · 벡터 해시처럼 결과를 다시 만들 수 있게 하는 식별자 — 같은 입력 = 같은 결과를 지키려면 실행 기록에 남긴다.
+    """
+
+    version: str
+
+    def product_vectors(self, product_ids: list[int]):  # -> numpy.ndarray (len, d)
+        ...
+
+    def encode(self, texts: list[str]):  # -> numpy.ndarray (len, d)
+        ...
+
+
+class TokenUsage(NamedTuple):
+    """LLM 한 번의 사용량 — 로컬이어도 잰다(외부 API 로 바꿀 때 비용 추정 · 느려짐 원인 추적). 모르는 값은 None.
+
+    input/output 은 토큰 수, *_ms 는 밀리초. stop 은 멈춘 이유(stop = 정상 · length = 출력 상한에 잘림)."""
+
+    input_tokens: int | None
+    output_tokens: int | None
+    total_ms: float | None = None
+    load_ms: float | None = None
+    input_ms: float | None = None
+    output_ms: float | None = None
+    stop: str | None = None
+
+
+class TagReply(NamedTuple):
+    """TagExtractor.extract 의 반환 — 원출력(JSON 문자열) + 사용량."""
+
+    text: str
+    usage: TokenUsage | None = None
+
+
+class TagExtractError(Exception):
+    """태그 추출 실패를 원인별로 — kind: timeout · connect · http_<상태> · bad_response · truncated. 로그 · 집계용 분류다.
+    메시지엔 모델 · 상태만 넣고 원문(프롬프트 · 출력)은 넣지 않는다."""
+
+    def __init__(self, kind: str, detail: str = "", usage: TokenUsage | None = None) -> None:
+        super().__init__(f"{kind}: {detail}" if detail else kind)
+        self.kind, self.usage = kind, usage
+
+
+@runtime_checkable
+class TagExtractor(Protocol):
+    """LLM 한 번 호출 — 시스템 프롬프트 + 사용자 입력 + JSON 스키마 → TagReply(원출력 JSON 문자열 + 사용량). 프롬프트 · 검증은 tagging 모듈이 한다.
+
+    구현: llm.OllamaTagExtractor(로컬 Ollama). `model` 은 실행 기록 · 로그에 남길 모델 이름(예: gemma4:12b). 실패는 예외로(되도록
+    TagExtractError — 원인 분류) — pipeline 이 잡아 태그 없이 진행한다(요청을 실패시키지 않는다).
+    """
+
+    model: str
+
+    def extract(self, system: str, prompt: str, schema: dict) -> TagReply: ...

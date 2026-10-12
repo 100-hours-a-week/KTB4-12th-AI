@@ -184,7 +184,7 @@ _ACTIVE_VERSION = sa.text(f"select id, package_id from {SCHEMA}.catalog_versions
 ## products 에는 버전 FK가 없고 package_id 만 있어 그 열로 잇는다(시험용 행이 섞여 있어도 활성 패키지만 본다).
 _ACTIVE_PRODUCTS = sa.text(f"""
     select v.id as version_id, v.package_id,
-           p.source_product_id, p.backend_product_id, p.name, p.brand, p.description,
+           p.source_product_id, p.backend_product_id, p.name, p.brand, p.description, p.product_kind,
            p.source_category_id, c.backend_category_id, c.name as category_name,
            cp.backend_category_id as parent_backend_category_id, cp.name as parent_category_name,
            p.unit_price, p.availability, p.view_count, p.updated_at
@@ -320,7 +320,7 @@ class DbCatalogReader:
                 productId=pid, name=r["name"], brand=r["brand"], description=r["description"] or None,
                 categoryId=cid, categoryName=r["category_name"],
                 parentCategoryId=r["parent_backend_category_id"], parentCategoryName=r["parent_category_name"],
-                price=r["unit_price"],
+                productKind=r["product_kind"] or None, price=r["unit_price"],
                 availability=r["availability"], updatedAt=r["updated_at"], viewCount=r["view_count"] or 0,
             ))
 

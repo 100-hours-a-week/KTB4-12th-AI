@@ -5,7 +5,7 @@ from uuid import UUID
 
 import pytest
 
-from profiling import pipeline
+from profiling import pipeline, selection
 from profiling.ports import NoActiveCatalog
 from profiling.schemas import ProductRecord, ProfileExtractRequest
 from profiling.types import (
@@ -300,14 +300,15 @@ def test_profile_empty_pool_is_result_ready_with_empty_list(caplog) -> None:
 
 
 def test_profile_penalty_mode_keeps_disliked_and_logs_rule(caplog) -> None:
-    """profile() 이 dislike_mode 를 build_pool 에 넘긴다 — 감점 모드에선 비선호 상품만 있어도 풀이 찬다. 규칙 라벨이 로그에 남는다."""
+    """profile() 이 dislike_mode 를 고르기(D)에 넘긴다 — 감점 모드에선 비선호 상품만 있어도 채움용으로 풀이 찬다. 규칙 라벨이 로그에 남는다."""
     only_beauty = [_product(1, 100, "뷰티", views=5), _product(2, 100, "뷰티", views=3)]
     with caplog.at_level("INFO", logger="profiling.pipeline"):
         out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(only_beauty), store=FakeStore(),
                                recipient_store=FakeRecipientStore(), pool_size=30, dislike_mode=PENALTY)
     assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [1, 2]
     assert out.validation.disliked_tags == ["뷰티"]                               # 태그는 모드와 무관
-    assert any(pipeline.POOL_RULE_V2_PENALTY in rec.message for rec in caplog.records)
+    assert any(selection.POOL_RULE_D + "+penalty-fill" in rec.message for rec in caplog.records)
+    assert any("비선호 2개를 감점 순서로 채움" in rec.message for rec in caplog.records)
 
 
 def test_profile_overwrites_same_recipient() -> None:
@@ -329,22 +330,24 @@ BIAS_PRODUCTS = [_product(1, 11, "스킨케어", views=10), _product(2, 11, "스
 
 
 def test_profile_with_reviews_applies_bias_and_stores_scores(caplog) -> None:
-    """리뷰 별점이 풀 순서에 들어가고(2단계) 점수·취향·리뷰가 프로필 행에 실린다. 태그(모델)는 아직 없다.
-    조회수 10 · 2 · 0 · 0 → 인기 2.0(1) · 1.33(3) · 0(2·4). 리뷰 없으면 [1, 3, 2, 4].
-    여성의류(21) 상품 3·4에 5점 → 편향 +1.0: 3 = 2.33 · 1 = 2.0 · 4 = 1.0 · 2 = 0 ⇒ [3, 1, 4, 2] — 조회수 1위를 앞지른다."""
+    """리뷰 별점이 풀 순서에 들어가고(2단계) 점수·취향·리뷰가 프로필 행에 실린다. 리뷰한 상품 자체는 추천하지 않는다(10-12).
+    조회수 10 · 0 · 2 · 0 · 1 → 인기 2.0(1) · 0(2) · 1.5(3) · 0(4) · 1.0(5). 리뷰 없으면 [1, 3, 5, 2, 4].
+    여성의류(21) 상품 3·4에 5점 → 편향 +1.0: 3 = 2.5 · 1 = 2.0 · 5 = 2.0 · 4 = 1.0 · 2 = 0. 리뷰한 3·4는 빠지고 [1, 5, 2] —
+    리뷰 안 한 같은 소분류 상품 5가 조회수 0인 2를 앞지른다(동점 1·5 는 상품 번호 순)."""
+    products = BIAS_PRODUCTS + [_product(5, 21, "여성의류", views=1)]
     rstore = FakeRecipientStore()
     rq = _rq(pref="휴대용", reviews=[Review(product_id=3, rating=5, review_text="좋아요"), Review(product_id=4, rating=5)])
-    assert pipeline.profile(_rq(), catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(),
-                            recipient_store=FakeRecipientStore()).search.product_ids == [1, 3, 2, 4]
+    assert pipeline.profile(_rq(), catalog=FakeCatalog(products), store=FakeStore(),
+                            recipient_store=FakeRecipientStore()).search.product_ids == [1, 3, 5, 2, 4]
     with caplog.at_level("INFO", logger="profiling.pipeline"):
-        out = pipeline.profile(rq, catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(), recipient_store=rstore)
-    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [3, 1, 4, 2]
+        out = pipeline.profile(rq, catalog=FakeCatalog(products), store=FakeStore(), recipient_store=rstore)
+    assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [1, 5, 2]
     assert out.validation.preferred_tags == []                                  # 글·취향 → 태그는 하네스 뒤
     row = rstore.get(9073)
     assert row.category_scores == [CategoryScore(category_id=21, n=2, score_sum=4)]
     assert row.gift_preference_hash == preference_hash("휴대용") and [r.product_id for r in row.reviews] == [3, 4]
     assert "좋아요" not in row.model_dump_json()                                 # 원문은 저장하지 않는다(10-11 결정 B)
-    assert any("scores=1" in r.message and pipeline.POOL_RULE_V2 in r.message for r in caplog.records)
+    assert any("scores=1" in r.message and selection.POOL_RULE_D in r.message for r in caplog.records)
     assert not any("좋아요" in r.message for r in caplog.records)               # 리뷰 원문은 로그에 남지 않는다
 
 
