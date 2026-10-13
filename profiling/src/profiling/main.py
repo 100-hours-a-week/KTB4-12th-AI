@@ -127,26 +127,58 @@ async def lifespan(app: FastAPI):
     app.state.engine.dispose()
 
 
+def db_pool_size(settings: Settings) -> int:
+    """상시 커넥션 수 — 설정이 없으면 슬롯 수 + IO_THREADS(슬롯마다 잠금 커넥션 1개를 분석 내내 쥐고, 접수 폴링 · /health 가 그만큼 더 쓴다)."""
+    return settings.DB_POOL_SIZE or settings.PROFILING_SLOTS + settings.IO_THREADS
+
+
+def db_session_options(settings: Settings) -> str:
+    """세션마다 거는 시간 상한 — libpq 접속 옵션(-c). PgBouncer(트랜잭션 모드)는 접속 옵션을 받지 않으니 그때는 역할(ALTER ROLE … SET)로 옮긴다."""
+    return " ".join(f"-c {name}={ms}" for name, ms in (
+        ("statement_timeout", settings.DB_STATEMENT_TIMEOUT_MS),
+        ("lock_timeout", settings.DB_LOCK_TIMEOUT_MS),
+        ("idle_in_transaction_session_timeout", settings.DB_IDLE_IN_TX_TIMEOUT_MS)))
+
+
 def _connect_db(settings: Settings) -> sa.Engine:
-    """Engine 생성 + 연결 확인 + 마이그레이션 버전 확인. 실패하면 RuntimeError로 앱 시작을 막는다.
+    """Engine 생성 + 연결 확인 + 마이그레이션 버전 · 접속 계정 확인. 실패하면 RuntimeError로 앱 시작을 막는다.
 
     pool_pre_ping: 풀에서 꺼낸 커넥션이 죽어 있으면(DB 재시작) 버리고 새로 연다 — 백그라운드 작업이 오래 뒤에 실행되므로 필요.
+    풀 크기 · 시간 상한 · 슈퍼유저 거부는 10-13 DB 검토(설정 DB_*).
     """
-    engine = sa.create_engine(settings.DATABASE_URL, pool_pre_ping=True, future=True)
+    pool_size, need = db_pool_size(settings), settings.PROFILING_SLOTS + settings.IO_THREADS
+    if pool_size + settings.DB_MAX_OVERFLOW < need:
+        raise RuntimeError(f"DB 커넥션 풀이 작다: pool_size {pool_size} + max_overflow {settings.DB_MAX_OVERFLOW} < "
+                           f"슬롯 {settings.PROFILING_SLOTS} + IO_THREADS {settings.IO_THREADS} — 슬롯이 커넥션을 기다리다 실패한다. "
+                           "PROFILING_DB_POOL_SIZE 를 비우거나(자동) 늘린다")
+    engine = sa.create_engine(
+        settings.DATABASE_URL, pool_pre_ping=True, future=True,
+        pool_size=pool_size, max_overflow=settings.DB_MAX_OVERFLOW, pool_timeout=settings.DB_POOL_TIMEOUT_S,
+        connect_args={"connect_timeout": settings.DB_CONNECT_TIMEOUT_S, "options": db_session_options(settings)},
+    )
     try:
         with engine.connect() as conn:
             conn.execution_options(isolation_level="AUTOCOMMIT")     # 읽기 한 문장 — BEGIN/ROLLBACK 없이
-            version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
+            version, user, superuser = conn.execute(sa.text(
+                "select (select version_num from alembic_version), current_user, "
+                "(select rolsuper from pg_roles where rolname = current_user)")).one()
     except sa.exc.OperationalError as e:
         engine.dispose()
         raise RuntimeError(
             f"DB 연결 실패 ({settings.DATABASE_URL.split('@')[-1]}): {e.orig if hasattr(e, 'orig') else e}\n"
             "  → docker compose up -d && uv run alembic upgrade head"
         ) from e
-    except sa.exc.ProgrammingError as e:    # alembic_version 테이블 없음 = 마이그레이션 안 됨
+    except sa.exc.ProgrammingError as e:    # alembic_version 없음(마이그레이션 안 됨) · 읽을 권한 없음(ai_app 인데 0007 이 안 됨)
         engine.dispose()
-        raise RuntimeError("DB는 있으나 마이그레이션이 적용되지 않음 → uv run alembic upgrade head") from e
-    log.info("DB 연결 %s migration=%s", settings.DATABASE_URL.split("@")[-1], version)
+        raise RuntimeError(f"DB는 있으나 마이그레이션 장부를 못 읽음({type(e.orig).__name__}) → uv run alembic upgrade head") from e
+    if superuser:
+        if settings.DB_REFUSE_SUPERUSER:
+            engine.dispose()
+            raise RuntimeError(f"앱이 슈퍼유저 계정({user})으로 접속했다 — 앱 전용 계정 ai_app(0007)으로 PROFILING_DATABASE_URL 을 바꾼다")
+        log.warning("앱이 슈퍼유저 계정(%s)으로 접속 — 로컬 전용. 운영 · 개발 서버는 ai_app + PROFILING_DB_REFUSE_SUPERUSER=true", user)
+    log.info("DB 연결 %s migration=%s user=%s pool=%d+%d timeout=%.0fs statement=%dms lock=%dms",
+             settings.DATABASE_URL.split("@")[-1], version, user, pool_size, settings.DB_MAX_OVERFLOW, settings.DB_POOL_TIMEOUT_S,
+             settings.DB_STATEMENT_TIMEOUT_MS, settings.DB_LOCK_TIMEOUT_MS)
     return engine
 
 

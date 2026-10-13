@@ -42,7 +42,30 @@ class Settings(BaseSettings):
 
     # ---- DB (로컬 compose 기본값. 합칠 때 접두사만 맞춤)
     DATABASE_URL: str = Field(default="postgresql+psycopg://ai_user:ai_password@localhost:5432/ai_chat",
-                              description="SQLAlchemy URL (psycopg 3). Alembic env.py도 이 값을 쓴다")
+                              description="SQLAlchemy URL (psycopg 3). Alembic env.py도 이 값을 쓴다. 앱은 운영 · 개발 서버에서 "
+                                          "앱 전용 계정 ai_app(0007 — ai_profile 읽기·쓰기, ai_catalog 읽기만)으로, 마이그레이션 · 적재는 소유자 계정으로")
+    DB_REFUSE_SUPERUSER: bool = Field(
+        default=False,
+        description="true 면 앱이 슈퍼유저 계정으로 접속할 때 기동을 거부한다(운영 · 개발 서버 · compose 는 true + ai_app). "
+                    "false(로컬 uv 기본)면 경고 로그만")
+    # 커넥션 풀(10-13 DB 검토) — 슬롯마다 잠금 커넥션 1개를 분석 내내(LLM 대기 · 콜백 포함) 쥐고, 접수 폴링 · /health 가 IO_THREADS 만큼 더 쓴다
+    DB_POOL_SIZE: int | None = Field(
+        default=None, ge=1,
+        description="상시 커넥션 수. 비우면 PROFILING_SLOTS + IO_THREADS. pool_size + max_overflow 가 그보다 작으면 기동 거부 "
+                    "(슬롯이 커넥션을 기다리다 DB_POOL_TIMEOUT_S 뒤 실패하는 상태를 만들지 않게)")
+    DB_MAX_OVERFLOW: int = Field(default=2, ge=0, description="상시 수를 넘어 잠깐 더 여는 커넥션 수(기동 때 카탈로그 · 임베딩 적재 등)")
+    DB_POOL_TIMEOUT_S: float = Field(default=10.0, gt=0, description="풀이 다 찼을 때 커넥션을 기다리는 상한(초). 넘으면 그 작업만 실패")
+    # 시간 상한(10-13 DB 검토) — 접속 옵션으로 세션마다 건다. 0 = 무제한. 넘으면 그 문장만 취소되고(예외) 파이프라인이 FAILED 로 기록
+    DB_CONNECT_TIMEOUT_S: int = Field(default=5, ge=1, description="DB 접속 상한(초)")
+    DB_STATEMENT_TIMEOUT_MS: int = Field(
+        default=5000, ge=0,
+        description="문장 하나의 상한(ms). 앱 문장은 전부 수십 ms 안쪽(가장 긴 것은 카탈로그 전체 읽기) — 멈춘 문장이 슬롯을 영영 잡지 않게")
+    DB_LOCK_TIMEOUT_MS: int = Field(
+        default=2000, ge=0,
+        description="표 · 행 · advisory 잠금을 기다리는 상한(ms). 수신자 저장 잠금(stores._PROFILE_LOCK)도 여기에 걸린다")
+    DB_IDLE_IN_TX_TIMEOUT_MS: int = Field(
+        default=60000, ge=0,
+        description="트랜잭션을 연 채 쉬는 세션을 끊는 상한(ms). 앱은 트랜잭션을 짧게만 연다 — 안전망")
 
     # ---- 카탈로그
     CATALOG_SOURCE: Literal["file", "db"] = Field(

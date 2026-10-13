@@ -1,5 +1,7 @@
+import os
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
@@ -67,6 +69,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        # 표 잠금 대기 상한(10-13 DB 검토) — ALTER TABLE 이 앱의 긴 쿼리 뒤에서 ACCESS EXCLUSIVE 를 기다리는 동안 그 뒤의 앱 쿼리가
+        # 전부 줄을 서서 서비스가 멈춘다. 오래 기다리느니 마이그레이션을 실패시키고 다시 돌린다. 문장 시간 상한은 두지 않는다(데이터 채우기는 길 수 있다)
+        connection.execute(sa.text("select set_config('lock_timeout', :v, false)"),
+                           {"v": os.environ.get("PROFILING_MIGRATE_LOCK_TIMEOUT", "5s")})
+        connection.commit()
         context.configure(
             connection=connection, target_metadata=target_metadata
         )
