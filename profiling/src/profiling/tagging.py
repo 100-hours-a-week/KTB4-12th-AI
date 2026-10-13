@@ -32,7 +32,14 @@ from profiling.schemas import ProductRecord
 from profiling.selection import Tag
 from profiling.types import Decision, ProfileRequest, ValidatedTag, ValidationResult
 
-AXES = ("카테고리", "IP", "브랜드", "특징")
+
+def _axes() -> tuple[str, ...]:
+    from profiling.settings import get_settings
+
+    return tuple(x.strip() for x in get_settings().TAG_AXES.split(",") if x.strip())
+
+
+AXES = _axes()   # 기본 4축(카테고리 · IP · 브랜드 · 특징) — PROFILING_TAG_AXES 로 3축 등 시험(10-13)
 PROMO = re.compile(r"증정|사은품|선물포장|쇼핑백|메세지카드|택1|택일|랜덤|단독|각인|NEW|신상|한정|리뉴얼|에디션|BEST|베스트|1위|인기|누적판매|"
                    r"백화점|공식|정품|본사|당일발송|빠른배송|무료배송|추천", re.IGNORECASE)
 
@@ -69,7 +76,7 @@ SCHEMA = {"type": "object", "properties": {"tags": {"type": "array", "items": {
     "required": ["axis", "tag", "ref", "evidence"]}}}, "required": ["tags"]}
 
 PROMPT_SHA256 = hashlib.sha256((SYSTEM + json.dumps(SCHEMA)).encode()).hexdigest()
-PROMPT_VERSION = f"tag4-{PROMPT_SHA256[:8]}"   # 프롬프트 파일 글 + 스키마의 해시 — 파일을 고치면 자동으로 바뀐다
+PROMPT_VERSION = f"tag{len(AXES)}-{PROMPT_SHA256[:8]}"   # 프롬프트 파일 글 + 스키마의 해시 — 파일을 고치면 자동으로 바뀐다
 
 
 class Prepared(NamedTuple):
@@ -131,7 +138,7 @@ def validate(tags: Sequence[dict[str, Any]], ratings: dict[str, int], has_pref: 
         refs = [x for x in re.split(r"[\s,/·]+", str(t.get("ref", ""))) if x]
         known = [x for x in refs if (x == "pref" and has_pref) or x in ratings]
         good = [x for x in known if x == "pref" or ratings[x] >= 4]
-        why = ("축이 4개 밖" if t.get("axis") not in AXES else "빈 태그" if not tag else "판촉 단어" if PROMO.search(tag)
+        why = ("축 밖" if t.get("axis") not in AXES else "빈 태그" if not tag else "판촉 단어" if PROMO.search(tag)
                else guard.tag_problem(tag) if guard.tag_problem(tag)
                else "근거 ref 가 없음" if not known
                else "근거가 별점 1~3점 리뷰뿐(" + ",".join(f"{x}={ratings[x]}" for x in known) + ")" if not good else "")

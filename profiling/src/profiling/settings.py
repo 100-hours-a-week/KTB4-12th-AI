@@ -94,6 +94,11 @@ class Settings(BaseSettings):
         description="태그 추출 시스템 프롬프트 파일 — 없으면 src/profiling/prompts/tag4_system.md. 상대 경로는 실행 위치(profiling/) 기준. "
                     "바꾸면 PROMPT_VERSION(해시)이 바뀐다",
     )
+    TAG_AXES: str = Field(
+        default="카테고리,IP,브랜드,특징",
+        description="태그 축(쉼표로) — 스키마 enum · 검증기가 이 목록만 받는다. 3축 시험은 '카테고리,IP,브랜드' + 3축 프롬프트 파일(prompts/tag3_system.md). "
+                    "바꾸면 PROMPT_VERSION(해시)이 바뀐다",
+    )
     OPENROUTER_URL: str = Field(default="https://openrouter.ai/api/v1", description="OpenRouter API 주소(OpenAI 호환 /chat/completions)")
     OLLAMA_URL: str = Field(default="http://localhost:11434", description="TAGGER=ollama 일 때 Ollama 주소")
     TAGGER_MODEL: str = Field(default="gemma4:12b", description="태그 추출 모델 — ollama: gemma4:12b(정밀) · qwen3.5:9b(빠름), openrouter: 제공자/모델 이름(OpenRouter 모델 목록의 id)")

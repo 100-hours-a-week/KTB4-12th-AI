@@ -154,7 +154,7 @@ def test_tag_extract_broken_json_and_all_dropped_warn(caplog) -> None:
         _profile(_rq(pref="x"), [_p(1, 1, 5)], tagger=FakeTagger([{"axis": "색", "tag": "빨강", "ref": "pref"}]))
     bad, empty = _tag_logs(caplog)
     assert bad.startswith("tag_extract bad_json") and "parse=bad_json" in bad and "out_chars=13" in bad
-    assert empty.startswith("tag_extract empty") and "drops=축이 4개 밖:1" in empty
+    assert empty.startswith("tag_extract empty") and "drops=축 밖:1" in empty
     assert all(r.levelname == "WARNING" for r in caplog.records if r.getMessage().startswith("tag_extract"))
 
 
