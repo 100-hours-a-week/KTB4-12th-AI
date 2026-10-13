@@ -1,4 +1,4 @@
-"""프로파일링 코어 30개 상품 콜백 검증 — tools/scenario_callback30 의 시나리오(가상 수신자 10명 × 두 모드)를 시험으로 돌린다.
+"""프로파일링 코어 30개 상품 콜백 검증 — tools/scenario_callback30 의 시나리오(가상 수신자 엑셀 전원 — 정상 10 + 비정상 12 · 10-13 — × 두 모드)를 시험으로 돌린다.
 
 앱 전체(7.6 → 분석 → 저장 → 진짜 HttpBackendPort 의 7.7)를 서버 없이 탄다. DB 카탈로그(ai_catalog)가 필요하고, 없으면 skip.
 결과 엑셀·JSON 은 pytest 임시 폴더에 쓴다(저장소 out/ 을 더럽히지 않음). 실패하면 실패한 검사 이름을 모두 보여 준다.
@@ -40,4 +40,5 @@ def test_scenarios_all_checks_pass(db_catalog_ready, tmp_path) -> None:
     failed = [f"{no}/{mode} {kind} · {name} — {detail}" for (no, mode), ch in res["checks"].items() for kind, name, ok, detail in ch
               if not ok and sc.blocking((kind, name, ok, detail))]      # 관찰 등급은 보고만(품질 비교용)
     assert not failed, "\n".join(failed)
-    assert len(res["results"]) == 20 and res["xlsx"].exists() and res["json"].exists()
+    users = sc.load_scenarios(sc.DEFAULT_SCENARIOS)   # 10-13 비정상 사용자 U11~U22 추가로 22명 — 엑셀 인원에서 센다
+    assert len(res["results"]) == len(users) * len(sc.MODES) and res["xlsx"].exists() and res["json"].exists()
