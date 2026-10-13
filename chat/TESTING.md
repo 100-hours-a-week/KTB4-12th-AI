@@ -1,6 +1,8 @@
 # 고정 응답 연동 테스트
 
-Base URL은 `https://wjo-ai-chat-demo.hf.space/v1/chat/test/conversations`입니다. 모든 요청에 제품 API와 같은 `Authorization: Bearer <AI_SERVICE_TOKEN>`을 사용합니다. HTTP Method, UUID, 요청·응답, SSE, 재시도와 취소 규칙은 [채팅 API 명세](https://wjo-ai-chat-demo.hf.space/guide#integration)를 따릅니다.
+팀 서버 검증에는 실제 배포 origin 뒤에 `/v1/chat/test/conversations`를 붙인 Base URL을 사용합니다. 모든 요청에 해당 배포의 제품 API와 같은 `Authorization: Bearer <AI_SERVICE_TOKEN>`을 사용합니다. HTTP Method, UUID, 요청·응답, SSE, 재시도와 취소 규칙은 [채팅 API 명세](INTEGRATION.md)를 따릅니다.
+
+`https://wjo-ai-chat-demo.hf.space/v1/chat/test/conversations`는 기존 HF 데모의 보조 예시입니다. 그 주소에서의 성공은 팀 서버 배포 검증을 대신하지 않습니다.
 
 ## 호출 순서
 
