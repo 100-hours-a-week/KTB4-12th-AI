@@ -91,13 +91,14 @@ class Settings(BaseSettings):
     )
     TAG_PROMPT_FILE: str | None = Field(
         default=None,
-        description="태그 추출 시스템 프롬프트 파일 — 없으면 src/profiling/prompts/tag4_system.md. 상대 경로는 실행 위치(profiling/) 기준. "
-                    "바꾸면 PROMPT_VERSION(해시)이 바뀐다",
+        description="태그 추출 시스템 프롬프트 파일(문구 실험용 덮어쓰기) — 없으면 TAG_SPEC 규격의 src/profiling/prompts/<규격>_system.md. "
+                    "축은 TAG_SPEC 을 따르고, 파일에 적힌 축이 다르면 기동 실패. 상대 경로는 실행 위치(profiling/) 기준. 바꾸면 판 이름(해시)이 바뀐다",
     )
-    TAG_AXES: str = Field(
-        default="카테고리,IP,브랜드,특징",
-        description="태그 축(쉼표로) — 스키마 enum · 검증기가 이 목록만 받는다. 3축 시험은 '카테고리,IP,브랜드' + 3축 프롬프트 파일(prompts/tag3_system.md). "
-                    "바꾸면 PROMPT_VERSION(해시)이 바뀐다",
+    TAG_SPEC: Literal["tag4", "tag3"] = Field(
+        default="tag4",
+        description="태그 규격 — 축 · 시스템 프롬프트 · 스키마 · 판 이름 한 묶음(tagging.TagSpec). tag4: 카테고리 · IP · 브랜드 · 특징 "
+                    "(prompts/tag4_system.md) · tag3: 카테고리 · IP · 브랜드(prompts/tag3_system.md, v2 운영 — DR-038). "
+                    "모르는 이름이면 기동 실패. 바꾸면 서버를 다시 켠다",
     )
     OPENROUTER_URL: str = Field(default="https://openrouter.ai/api/v1", description="OpenRouter API 주소(OpenAI 호환 /chat/completions)")
     OLLAMA_URL: str = Field(default="http://localhost:11434", description="TAGGER=ollama 일 때 Ollama 주소")

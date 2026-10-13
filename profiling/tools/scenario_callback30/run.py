@@ -1,6 +1,7 @@
 """프로파일링 코어 30개 상품 콜백 검증 — 시나리오 엑셀(가상 수신자) → 앱 전체 → 결과 화면 + 파일.
 
     cd profiling && uv run python -m tools.scenario_callback30.run [--modes exclude,penalty] [--keep] [--top 5]
+    uv run python -m tools.scenario_callback30.run --tagger openrouter --tagger-model google/gemini-3.1-flash-lite --tag-spec tag3 --embedding-dir ../product-search   # v2(3축)
 
 한 사람마다 실제 앱 경로를 그대로 탄다: 7.6 POST(TestClient) → 202 → Supervisor 워커 → pipeline.profile()(별점 편향 · 풀 30개)
 → PostgreSQL 저장(프로필 + 리뷰) → **진짜 HttpBackendPort 가 보내는 7.7 HTTP 요청**(MockTransport 가 받아 경로·토큰·본문을 기록).
@@ -199,7 +200,7 @@ def run_mode(mode: str, users: list[User], engine: sa.Engine, model_env: dict[st
             # 같은 입력으로 코드가 고를 30개(D: 비선호 하드 제외 · 한 소분류 최대 10 · 같은 모델 하나) — 콜백과 대조하고 점수 내역을 보여 준다
             # 태그 — 서비스가 받은 LLM 원출력(spy)을 같은 검증기로(LLM 을 다시 부르지 않는다). 저장된 프로필 태그와도 대조한다(검사)
             prof = app.state.recipient_store.get(rid)
-            tags, prompt_version = _tags_from_spy(spy, rq, products)
+            tags, prompt_version = _tags_from_spy(spy, rq, products, app.state.tag_spec)
             usage = _usage_from_spy(spy, rq, products)
             llm_prompt = _prompt_sent(spy, rq, products)          # LLM 에 실제로 보낸 프롬프트(없으면 None — 안 불렀음)
             search, rule = pipeline.make_pool(rq, products, 30, cv, dislike_mode=pipeline.DislikeMode(mode), scores=scores,
@@ -211,7 +212,7 @@ def run_mode(mode: str, users: list[User], engine: sa.Engine, model_env: dict[st
                             "calls": mine, "run": run_row, "scores": scores, "ranked": ranked, "products": products,
                             "pool": pool, "rule": rule, "strategy": strategy, "tags": tags, "verify": verify,
                             "config": {"tagger": get_settings().TAGGER, "model": get_settings().TAGGER_MODEL if get_settings().TAGGER != "none" else "",
-                                       "strategy": strategy.value},
+                                       "strategy": strategy.value, "tag_spec": app.state.tag_spec.name if app.state.tag_spec else ""},
                             "prompt_version": prompt_version, "stored_tags": list(prof.preferred_tags) if prof else None,
                             "usage": usage, "llm_prompt": llm_prompt, "warnings": app_warnings})
     plog.removeHandler(collector)
@@ -260,7 +261,7 @@ def _verify_d(calls, rq, products, cv, mode, scores, strategy, tags, embedding, 
     return out
 
 
-def _tags_from_spy(spy, rq, products) -> tuple[list, str | None]:
+def _tags_from_spy(spy, rq, products, spec=None) -> tuple[list, str | None]:
     """서비스가 그 요청에 받은 LLM 원출력 → 같은 검증기 → 풀 고르기 태그 · prompt_version. 추출기가 꺼졌거나 호출이 없었으면 ([], None)."""
     from profiling import tagging
 
@@ -271,8 +272,9 @@ def _tags_from_spy(spy, rq, products) -> tuple[list, str | None]:
     raw = spy.raws.get(prompt)
     if raw is None:
         return [], None
-    keep, drop = tagging.validate(tagging.parse(raw), ratings, prep.has_pref)
-    return tagging.tags_of(tagging.to_validation(keep, drop, [])), f"{tagging.PROMPT_VERSION}@{spy.model}"
+    spec = spec or tagging.SPEC                         # 서비스가 기동 때 읽은 규격(app.state.tag_spec)과 같은 검증기
+    keep, drop = tagging.validate(tagging.parse(raw), ratings, prep.has_pref, spec)
+    return tagging.tags_of(tagging.to_validation(keep, drop, [])), f"{spec.version}@{spy.model}"
 
 
 def _usage_from_spy(spy, rq, products):
@@ -762,10 +764,14 @@ def main() -> int:
     ap.add_argument("--tagger", choices=("none", "ollama", "openrouter"), default="none",
                     help="태그 추출(LLM) — ollama: 로컬 Ollama · openrouter: 외부 API(유료, profiling/.env 의 PROFILING_OPENROUTER_API_KEY)")
     ap.add_argument("--tagger-model", default="gemma4:12b")
+    ap.add_argument("--tag-spec", choices=("tag4", "tag3"), default=None,
+                    help="태그 규격 — tag4(4축) · tag3(카테고리 · IP · 브랜드, v2 운영). 비면 설정 PROFILING_TAG_SPEC(기본 tag4)")
     ap.add_argument("--embedding-dir", default=None, help="product-search 폴더 — 주면 D 의 임베딩 단계가 켜진다")
     ap.add_argument("--save-golden", action="store_true", help="태그 끔 · D 결과로 기준 파일(golden_d.json)을 새로 쓴다 — 의도된 변경 뒤에만")
     a = ap.parse_args()
     model_env = {"PROFILING_TAGGER": a.tagger, "PROFILING_TAGGER_MODEL": a.tagger_model}
+    if a.tag_spec:
+        model_env["PROFILING_TAG_SPEC"] = a.tag_spec
     if a.embedding_dir:
         model_env["PROFILING_EMBEDDING_DIR"] = a.embedding_dir
     modes = tuple(m.strip() for m in a.modes.split(",") if m.strip())

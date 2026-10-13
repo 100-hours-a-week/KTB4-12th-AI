@@ -12,8 +12,13 @@
 
 결과는 ValidationResult(기존 3축 형)로 바꿔 저장한다: 특징 → key_features, 나머지 셋 → likes. 4축 이름은 판정 로그(Decision)의
 `axis4` 에 남는다. 원문(리뷰 글 · 취향 문장)은 판정 로그 evidence 에도 넣지 않는다(결정 B — 저장 금지).
-**시스템 프롬프트는 파일** `src/profiling/prompts/tag4_system.md`(10-13 코드 밖으로 뺌) — 다른 파일로 시험하려면 PROFILING_TAG_PROMPT_FILE.
-프롬프트를 바꾸면 PROMPT_VERSION(내용 해시)이 바뀌고 실행 기록 · 프로필의 prompt_version 에 남는다.
+**태그 규격(TagSpec)** = 이름 · 축 · 시스템 프롬프트 한 묶음(10-13). 설정 `PROFILING_TAG_SPEC` 하나로 고른다 — tag4(기본, 4축) ·
+tag3(카테고리 · IP · 브랜드, v2 운영 — 의사결정기록 DR-038). 축 · 프롬프트 · 스키마 · 판 이름이 함께 움직여 어긋날 수 없고,
+프롬프트 파일에 적힌 축(`- 카테고리:` 꼴 줄)이 규격의 축과 다르면 load_spec 이 거부한다(서버가 뜨지 않음). 바꾸면 서버를 다시 켠다.
+**시스템 프롬프트는 파일** `src/profiling/prompts/<규격>_system.md` — 문구만 바꿔 시험하려면 PROFILING_TAG_PROMPT_FILE(축은 규격을 따른다).
+프롬프트를 바꾸면 판 이름(PROMPT_VERSION = <규격>-<글 + 스키마 해시 8자>)이 바뀌고 실행 기록 · 프로필의 prompt_version 에 남는다.
+서비스는 기동 때 load_spec() 한 번 → app.state.tag_spec → 요청마다 pipeline.profile(tag_spec=…) 로 넘긴다. 아래 모듈 값
+(SPEC · AXES · SYSTEM · SCHEMA · PROMPT_VERSION)은 기본 규격 — 도구 · 시험 편의용.
 도구 tools/embed_compare/extract_tags.py(로컬 모델 비교)도 이 모듈을 그대로 쓴다 — 10-12 비교 실험의 프롬프트 해시 2fc950d4.
 """
 
@@ -32,51 +37,94 @@ from profiling.schemas import ProductRecord
 from profiling.selection import Tag
 from profiling.types import Decision, ProfileRequest, ValidatedTag, ValidationResult
 
-
-def _axes() -> tuple[str, ...]:
-    from profiling.settings import get_settings
-
-    return tuple(x.strip() for x in get_settings().TAG_AXES.split(",") if x.strip())
-
-
-AXES = _axes()   # 기본 4축(카테고리 · IP · 브랜드 · 특징) — PROFILING_TAG_AXES 로 3축 등 시험(10-13)
+ALL_AXES = ("카테고리", "IP", "브랜드", "특징")
+SPEC_AXES: dict[str, tuple[str, ...]] = {          # 규격 이름 → 축. 프롬프트 파일은 prompts/<이름>_system.md
+    "tag4": ALL_AXES,
+    "tag3": ("카테고리", "IP", "브랜드"),           # v2 운영(DR-038) — 특징은 v2 에서 쓰는 기능이 없다
+}
 PROMO = re.compile(r"증정|사은품|선물포장|쇼핑백|메세지카드|택1|택일|랜덤|단독|각인|NEW|신상|한정|리뉴얼|에디션|BEST|베스트|1위|인기|누적판매|"
                    r"백화점|공식|정품|본사|당일발송|빠른배송|무료배송|추천", re.IGNORECASE)
 
 PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
-DEFAULT_PROMPT_FILE = PROMPT_DIR / "tag4_system.md"
+DEFAULT_PROMPT_FILE = PROMPT_DIR / "tag4_system.md"   # 기본 규격 tag4 의 파일
 
 
 def load_system(path: Path | str | None = None) -> str:
     """시스템 프롬프트를 파일에서 읽는다(10-13: 코드 밖으로 뺌 — 고쳐 가며 시험하기 쉽게).
-    path 가 없으면 설정 TAG_PROMPT_FILE(PROFILING_TAG_PROMPT_FILE, profiling/.env 가능), 그것도 없으면 prompts/tag4_system.md.
+    path 가 없으면 설정 TAG_PROMPT_FILE, 그것도 없으면 설정 TAG_SPEC 규격의 prompts/<규격>_system.md.
     끝 줄바꿈은 떼고 쓴다 — 같은 글이면 같은 해시(PROMPT_VERSION)."""
     if path is None:
         from profiling.settings import get_settings
 
-        path = get_settings().TAG_PROMPT_FILE or DEFAULT_PROMPT_FILE
+        path = get_settings().TAG_PROMPT_FILE or PROMPT_DIR / f"{get_settings().TAG_SPEC}_system.md"
     text = Path(path).read_text(encoding="utf-8").rstrip("\n")
     if not text.strip():
         raise ValueError(f"태그 프롬프트 파일이 비었음: {path}")
     return text
 
 
-def _prompt_file() -> Path:
-    from profiling.settings import get_settings
+def schema_for(axes: Sequence[str]) -> dict[str, Any]:
+    """LLM 출력 스키마 — axis 는 이 축들만(Ollama format · OpenRouter json_schema 가 강제한다)."""
+    return {"type": "object", "properties": {"tags": {"type": "array", "items": {
+        "type": "object", "properties": {"axis": {"type": "string", "enum": list(axes)}, "tag": {"type": "string"},
+                                         "ref": {"type": "string"}, "evidence": {"type": "string"}},
+        "required": ["axis", "tag", "ref", "evidence"]}}}, "required": ["tags"]}
 
-    return Path(get_settings().TAG_PROMPT_FILE or DEFAULT_PROMPT_FILE)
+
+def declared_axes(system: str) -> set[str]:
+    """프롬프트 글에 정의된 축 — '- 카테고리: …' 처럼 줄 머리에 축 이름이 오는 줄만(알려진 축 이름 안에서)."""
+    return {m for m in re.findall(r"^- (\S+?):", system, re.MULTILINE) if m in ALL_AXES}
 
 
-PROMPT_FILE = _prompt_file()   # 실제로 읽은 파일(기동 로그 · 기록용)
-SYSTEM = load_system(PROMPT_FILE)
+class TagSpec(NamedTuple):
+    """태그 규격 — 이름 · 축 · 시스템 프롬프트 한 묶음. 스키마 · 해시 · 판 이름은 여기서 계산한다(어긋날 수 없게)."""
 
-SCHEMA = {"type": "object", "properties": {"tags": {"type": "array", "items": {
-    "type": "object", "properties": {"axis": {"type": "string", "enum": list(AXES)}, "tag": {"type": "string"},
-                                     "ref": {"type": "string"}, "evidence": {"type": "string"}},
-    "required": ["axis", "tag", "ref", "evidence"]}}}, "required": ["tags"]}
+    name: str
+    axes: tuple[str, ...]
+    system: str
+    prompt_file: Path
 
-PROMPT_SHA256 = hashlib.sha256((SYSTEM + json.dumps(SCHEMA)).encode()).hexdigest()
-PROMPT_VERSION = f"tag{len(AXES)}-{PROMPT_SHA256[:8]}"   # 프롬프트 파일 글 + 스키마의 해시 — 파일을 고치면 자동으로 바뀐다
+    @property
+    def schema(self) -> dict[str, Any]:
+        return schema_for(self.axes)
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256((self.system + json.dumps(self.schema)).encode()).hexdigest()
+
+    @property
+    def version(self) -> str:
+        return f"{self.name}-{self.sha256[:8]}"    # 프롬프트 글 + 스키마의 해시 — 파일을 고치면 자동으로 바뀐다
+
+    @property
+    def validator_version(self) -> str:
+        return f"{self.name}-v1"                   # 검증 규칙은 같고 받는 축만 다르다 — tag4-v1 은 10-12 와 같은 값
+
+
+def load_spec(name: str | None = None, prompt_file: Path | str | None = None) -> TagSpec:
+    """규격 하나를 읽는다. name 이 없으면 설정 TAG_SPEC, prompt_file 이 없으면 설정 TAG_PROMPT_FILE, 그것도 없으면 prompts/<name>_system.md.
+    모르는 이름 · 빈 파일 · **프롬프트에 적힌 축이 규격의 축과 다르면 ValueError** — 서버는 뜨지 않는다(조용히 다른 축으로 돌지 않게)."""
+    if name is None or prompt_file is None:
+        from profiling.settings import get_settings
+
+        st = get_settings()
+        name = name or st.TAG_SPEC
+        prompt_file = prompt_file or st.TAG_PROMPT_FILE
+    if name not in SPEC_AXES:
+        raise ValueError(f"모르는 태그 규격 {name!r} — 쓸 수 있는 것: {', '.join(SPEC_AXES)}")
+    path = Path(prompt_file) if prompt_file else PROMPT_DIR / f"{name}_system.md"
+    system = load_system(path)
+    axes = SPEC_AXES[name]
+    found = declared_axes(system)
+    if found != set(axes):
+        raise ValueError(f"태그 규격 {name} 의 축 {'·'.join(axes)} 과 프롬프트 {path.name} 에 적힌 축 {'·'.join(sorted(found)) or '(없음)'} 이 다르다"
+                         " — PROFILING_TAG_SPEC 과 PROFILING_TAG_PROMPT_FILE 을 맞춰라")
+    return TagSpec(name, axes, system, path)
+
+
+SPEC = load_spec()                     # 기본 규격(설정대로) — 도구 · 시험 편의용. 서비스는 기동 때 따로 읽어 요청마다 넘긴다
+AXES, SYSTEM, SCHEMA, PROMPT_FILE = SPEC.axes, SPEC.system, SPEC.schema, SPEC.prompt_file
+PROMPT_SHA256, PROMPT_VERSION = SPEC.sha256, SPEC.version
 
 
 class Prepared(NamedTuple):
@@ -130,15 +178,18 @@ def worth_llm(prep: Prepared) -> bool:
     return prep.has_pref or any(r >= 4 for r in prep.ratings.values())
 
 
-def validate(tags: Sequence[dict[str, Any]], ratings: dict[str, int], has_pref: bool) -> tuple[list[dict], list[dict]]:
-    """근거 ref 는 여러 개일 수 있다("pref, r1") — 하나라도 취향 문장이거나 4~5점 리뷰면 통과, 전부 1~3점이거나 없는 번호면 버림."""
+def validate(tags: Sequence[dict[str, Any]], ratings: dict[str, int], has_pref: bool,
+             spec: TagSpec | None = None) -> tuple[list[dict], list[dict]]:
+    """근거 ref 는 여러 개일 수 있다("pref, r1") — 하나라도 취향 문장이거나 4~5점 리뷰면 통과, 전부 1~3점이거나 없는 번호면 버림.
+    축은 spec(없으면 기본 규격)의 축만 받는다 — 밖이면 '축 밖'."""
+    axes = (spec or SPEC).axes
     keep, drop = [], []
     for t in tags:
         tag = str(t.get("tag", "")).strip()
         refs = [x for x in re.split(r"[\s,/·]+", str(t.get("ref", ""))) if x]
         known = [x for x in refs if (x == "pref" and has_pref) or x in ratings]
         good = [x for x in known if x == "pref" or ratings[x] >= 4]
-        why = ("축 밖" if t.get("axis") not in AXES else "빈 태그" if not tag else "판촉 단어" if PROMO.search(tag)
+        why = ("축 밖" if t.get("axis") not in axes else "빈 태그" if not tag else "판촉 단어" if PROMO.search(tag)
                else guard.tag_problem(tag) if guard.tag_problem(tag)
                else "근거 ref 가 없음" if not known
                else "근거가 별점 1~3점 리뷰뿐(" + ",".join(f"{x}={ratings[x]}" for x in known) + ")" if not good else "")

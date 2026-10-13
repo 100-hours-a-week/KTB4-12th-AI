@@ -79,9 +79,10 @@ async def get_supervisor(request: Request) -> Supervisor:
     return request.app.state.supervisor
 
 
-async def get_model_parts(request: Request) -> tuple[TagExtractor | None, EmbeddingIndex | None]:
-    """태그 추출기 · 임베딩(설정으로 켤 때만 lifespan 이 만든다). 없으면 (None, None) — 태그 없이 D 를 돈다."""
-    return getattr(request.app.state, "tagger", None), getattr(request.app.state, "embedding", None)
+async def get_model_parts(request: Request) -> tuple[TagExtractor | None, EmbeddingIndex | None, Any]:
+    """태그 추출기 · 임베딩 · 태그 규격(설정으로 켤 때만 lifespan 이 만든다). 없으면 None — 태그 없이 D 를 돈다."""
+    st = request.app.state
+    return getattr(st, "tagger", None), getattr(st, "embedding", None), getattr(st, "tag_spec", None)
 
 
 async def get_io_limiter(request: Request) -> anyio.CapacityLimiter:
@@ -130,7 +131,7 @@ def run_and_callback(
     pool_size: int, recipient_store: RecipientProfileStore, *, max_attempts: int = 3, backoff_s: float = 0.5,
     dislike_mode: str = pipeline.DislikeMode.EXCLUDE,
     pool_strategy: str = pipeline.PoolStrategy.D,
-    tagger: TagExtractor | None = None, embedding: EmbeddingIndex | None = None,
+    tagger: TagExtractor | None = None, embedding: EmbeddingIndex | None = None, tag_spec: Any = None,
 ) -> None:
     """pipeline.profile() → 결과가 RESULT_READY일 때만 7.7 콜백 → 콜백 결과를 실행 기록에 저장.
 
@@ -145,7 +146,7 @@ def run_and_callback(
     try:
         outcome = pipeline.profile(rq, catalog=catalog, store=store, recipient_store=recipient_store, pool_size=pool_size,
                                    dislike_mode=pipeline.DislikeMode(dislike_mode), pool_strategy=pipeline.PoolStrategy(pool_strategy),
-                                   tagger=tagger, embedding=embedding)
+                                   tagger=tagger, embedding=embedding, tag_spec=tag_spec)
     except Exception:  # 백그라운드에서는 무엇이든 잡아 기록한다
         log.exception("profile 실패 recipient=%s source_version=%s", rid, rq.source_version)
         return
@@ -265,7 +266,7 @@ def dispatch(
     pool_size: int, recipient_store: RecipientProfileStore, stale_after_s: int,
     callback_max_attempts: int = 3, callback_backoff_s: float = 0.5, *, dislike_mode: str = pipeline.DislikeMode.EXCLUDE,
     pool_strategy: str = pipeline.PoolStrategy.D,
-    tagger: TagExtractor | None = None, embedding: EmbeddingIndex | None = None,
+    tagger: TagExtractor | None = None, embedding: EmbeddingIndex | None = None, tag_spec: Any = None,
 ) -> None:
     """**잠금 → 판정 → 실행**을 한 덩어리로. Supervisor 워커 스레드(슬롯) 하나에서 끝까지 돈다.
 
@@ -284,7 +285,7 @@ def dispatch(
         if action == ANALYZE:
             run_and_callback(rq, catalog, store, backend, pool_size, recipient_store,
                              max_attempts=callback_max_attempts, backoff_s=callback_backoff_s, dislike_mode=dislike_mode,
-                             pool_strategy=pool_strategy, tagger=tagger, embedding=embedding)
+                             pool_strategy=pool_strategy, tagger=tagger, embedding=embedding, tag_spec=tag_spec)
         elif action == RESEND and existing is not None:
             if existing.status is RunStatus.SUPERSEDED:   # 정상 흐름에서는 나오기 어렵다 — Backend 가 더 새 버전을 이미 저장했다는 뜻
                 log.warning("7.7 재전송 대상이 SUPERSEDED recipient=%s source_version=%s — Backend 가 다시 409 를 줄 수 있다", rid, sv)
@@ -307,7 +308,7 @@ async def extract_and_pool(
     supervisor: Annotated[Supervisor, Depends(get_supervisor)],
     settings: Annotated[Settings, Depends(settings_dep)],
     io_limiter: Annotated[anyio.CapacityLimiter, Depends(get_io_limiter)],
-    model_parts: Annotated[tuple[TagExtractor | None, EmbeddingIndex | None], Depends(get_model_parts)] = (None, None),
+    model_parts: Annotated[tuple[TagExtractor | None, EmbeddingIndex | None, Any], Depends(get_model_parts)] = (None, None, None),
 ) -> SuccessResponse[ProfileAccepted]:
     """접수만 하고 202를 돌려준다. 분석은 Supervisor 워커 스레드에서.
 
@@ -339,7 +340,8 @@ async def extract_and_pool(
     # 중복 판정은 **슬롯 안에서** 한다(dispatch) — 판정과 실행 사이가 벌어지면 같은 요청이 동시에 와서 분석이 두 벌 돈다
     accepted = supervisor.submit(dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S,
                                  settings.CALLBACK_MAX_ATTEMPTS, settings.CALLBACK_BACKOFF_S, dislike_mode=settings.DISLIKE_MODE,
-                                 pool_strategy=settings.POOL_STRATEGY, tagger=model_parts[0], embedding=model_parts[1])
+                                 pool_strategy=settings.POOL_STRATEGY, tagger=model_parts[0], embedding=model_parts[1],
+                                 tag_spec=model_parts[2])
     if not accepted:   # 큐 가득·종료 중 — 기다리지 않고 거절. Backend 는 Retry-After 를 읽지 않고 503 을 재시도 가능 실패로 본다:
                        # 틱 중단 + 디바운스 재시작 1회, 두 번째면 접음(v0.7 ②③). 그래서 QUEUE_MAX 는 BE 틱당 일반 ⚙100 + 복구 ⚙50 보다 커야 한다
         log.warning("7.6 거절 recipient=%s source_version=%s — 접수 대기열 가득(%d) 또는 종료 중 → 503 Retry-After %ds",

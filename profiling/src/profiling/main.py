@@ -69,12 +69,15 @@ async def lifespan(app: FastAPI):
         app.state.catalog = _NoCatalog(str(e))
     app.state.store = DbProfileRunStore(app.state.engine)
 
+    # 태그 추출기 · 임베딩 — 설정으로 켤 때만(기본 꺼짐). 만들다 실패하면 끈 채로 뜬다: 태그 없이 D 가 돈다(요청은 실패하지 않음)
+    app.state.tagger = app.state.embedding = app.state.tag_spec = None
     if settings.TAGGER != "none":
         from profiling import tagging
 
-        log.info("태그 프롬프트 %s file=%s", tagging.PROMPT_VERSION, tagging.PROMPT_FILE)
-    # 태그 추출기 · 임베딩 — 설정으로 켤 때만(기본 꺼짐). 만들다 실패하면 끈 채로 뜬다: 태그 없이 D 가 돈다(요청은 실패하지 않음)
-    app.state.tagger = app.state.embedding = None
+        # 태그 규격(축 · 프롬프트 한 묶음) — 기동 때 한 번 읽어 요청마다 넘긴다. 규격 · 프롬프트 축이 어긋나면 여기서 ValueError → 서버가 뜨지 않음
+        app.state.tag_spec = tagging.load_spec()
+        sp = app.state.tag_spec
+        log.info("태그 규격 %s 축=%s 판=%s 파일=%s", sp.name, "·".join(sp.axes), sp.version, sp.prompt_file)
     if settings.TAGGER == "ollama":
         from profiling.llm import OllamaTagExtractor
         app.state.tagger = OllamaTagExtractor(settings.OLLAMA_URL, settings.TAGGER_MODEL, timeout_s=settings.TAGGER_TIMEOUT_S)

@@ -3,6 +3,7 @@
     cd profiling && uv run python -m tools.embed_compare.extract_tags --models gemma4:12b,qwen3.5:9b
     uv run python -m tools.embed_compare.run --tagger gemma4:12b
     uv run python -m tools.embed_compare.extract_tags --from-json out/claude_prompt_responses.json   # 같은 프롬프트에 대한 다른 모델의 원출력 넣기
+    uv run python -m tools.embed_compare.extract_tags --tag-spec tag3 --label tag3 --models gemma4:12b         # 3축 규격(v2 운영)
 
 입력은 실제 서비스에서 AI 가 받는 것만 쓴다: 취향 문장(giftPreference) · 리뷰(별점 · 글) + 리뷰 상품의 카탈로그 정보(이름 · 브랜드 ·
 대분류 > 소분류 · product_kind). 페르소나 · '보고 싶은 것'(시나리오 설명)은 넣지 않는다. 비선호는 코드가 따로 처리하므로 넣지 않는다.
@@ -16,7 +17,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import sys
@@ -36,7 +36,12 @@ from tools.embed_compare.run import DEFAULT_OUT, DEFAULT_SCENARIOS
 OLLAMA = "http://localhost:11434"
 SEED = 42
 # 프롬프트 · 출력 형식 · 검증기는 코어 profiling.tagging 이 정본이다(10-12 코어 반영) — 도구와 서비스가 한 프롬프트(해시 2fc950d4)를 쓴다.
-AXES, PROMO, SYSTEM, SCHEMA, validate = tagging.AXES, tagging.PROMO, tagging.SYSTEM, tagging.SCHEMA, tagging.validate
+PROMO = tagging.PROMO
+SPEC = tagging.SPEC   # 태그 규격(축 · 프롬프트) — main 이 --tag-spec 으로 바꾼다. 아래 함수들은 이것만 본다
+
+
+def validate(tags, ratings: dict[str, int], has_pref: bool):
+    return tagging.validate(tags, ratings, has_pref, SPEC)
 
 
 def user_prompt(u, info: dict[int, ProductRecord]) -> tuple[str, dict[str, int]]:
@@ -56,16 +61,16 @@ def extract(model: str, users, info) -> dict[str, Any]:
     digest = next((m["digest"] for m in httpx.get(f"{OLLAMA}/api/tags", timeout=10).json()["models"] if m["name"] == model), None)
     if digest is None:
         raise SystemExit(f"Ollama 에 {model} 이 없음 — ollama pull {model}")
-    out = {"model": model, "digest": digest, "seed": SEED, "prompt_sha256": hashlib.sha256((SYSTEM + json.dumps(SCHEMA)).encode()).hexdigest(),
+    out = {"model": model, "digest": digest, "seed": SEED, "prompt_sha256": SPEC.sha256,
            "users": {}}
     with httpx.Client(base_url=OLLAMA, timeout=600) as c:
         c.post("/api/generate", json={"model": model, "prompt": "", "keep_alive": "10m"})          # 모델 올리기(시간 측정에서 뺌)
         for u in users:
             prompt, ratings = user_prompt(u, info)
             t0 = time.perf_counter()
-            r = c.post("/api/chat", json={"model": model, "stream": False, "think": False, "format": SCHEMA,
+            r = c.post("/api/chat", json={"model": model, "stream": False, "think": False, "format": SPEC.schema,
                                           "options": {"temperature": 0, "seed": SEED},
-                                          "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]})
+                                          "messages": [{"role": "system", "content": SPEC.system}, {"role": "user", "content": prompt}]})
             dt = time.perf_counter() - t0
             r.raise_for_status()
             body = r.json()
@@ -93,14 +98,14 @@ def extract_openrouter(model: str, users, info, repeat: int = 1) -> dict[str, An
         raise SystemExit("PROFILING_OPENROUTER_API_KEY 없음 — profiling/.env 에 넣기")
     tagger = OpenRouterTagExtractor(st.OPENROUTER_URL, st.OPENROUTER_API_KEY.get_secret_value(), model, timeout_s=st.TAGGER_TIMEOUT_S, seed=SEED)
     out = {"model": model, "digest": "openrouter", "seed": SEED, "repeat": repeat,
-           "prompt_sha256": hashlib.sha256((SYSTEM + json.dumps(SCHEMA)).encode()).hexdigest(), "users": {}}
+           "prompt_sha256": SPEC.sha256, "users": {}}
     try:
         for u in users:
             prompt, ratings = user_prompt(u, info)
             runs = []
             for _ in range(repeat):
                 try:
-                    reply = tagger.extract(SYSTEM, prompt, SCHEMA)
+                    reply = tagger.extract(SPEC.system, prompt, SPEC.schema)
                 except TagExtractError as e:
                     runs.append({"error": e.kind, "usage": e.usage._asdict() if e.usage else None})
                     continue
@@ -131,7 +136,7 @@ def from_responses(path: Path, users, info) -> dict[str, Any]:
     파일 모양: {"model": 이름, "note": 설명, "responses": {"U01": {"tags": [...]}, ...}}. 시간은 없다(API 호출이 아님)."""
     doc = json.loads(path.read_text())
     out = {"model": doc["model"], "digest": "", "seed": None, "note": doc.get("note", ""),
-           "prompt_sha256": hashlib.sha256((SYSTEM + json.dumps(SCHEMA)).encode()).hexdigest(), "users": {}}
+           "prompt_sha256": SPEC.sha256, "users": {}}
     for u in users:
         prompt, ratings = user_prompt(u, info)
         raw = doc["responses"].get(u.no, {"tags": []})
@@ -170,10 +175,15 @@ def main() -> int:
     ap.add_argument("--models", default="gemma4:12b,qwen3.5:9b")
     ap.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
     ap.add_argument("--openrouter", action="store_true", help="Ollama 대신 OpenRouter(유료) — --models 에 OpenRouter 모델 id(예 anthropic/claude-haiku-5.5)")
+    ap.add_argument("--tag-spec", choices=tuple(tagging.SPEC_AXES), default=None,
+                    help="태그 규격 — tag4(4축) · tag3(카테고리 · IP · 브랜드). 비면 설정 PROFILING_TAG_SPEC(기본 tag4)")
     ap.add_argument("--label", default="", help="기록 · 시트에 붙일 꼬리표 — 프롬프트 판끼리 비교할 때(예 v2 → 'gemma4:12b@v2'). 비면 모델 이름 그대로")
     ap.add_argument("--repeat", type=int, default=1, help="--openrouter 일 때 사람마다 반복 횟수(시간 분포 · 안정성)")
     ap.add_argument("--from-json", type=Path, help="Ollama 대신 원출력 파일(같은 프롬프트에 대한 다른 모델의 답)을 검증해 시트에 넣음")
     a = ap.parse_args()
+    global SPEC
+    SPEC = tagging.load_spec(a.tag_spec)
+    print(f"태그 규격 {SPEC.name} · 축 {'·'.join(SPEC.axes)} · 판 {SPEC.version}")
     users = load_scenarios(a.scenarios)
     eng = sa.create_engine(get_settings().DATABASE_URL, future=True)
     from profiling.catalog import DbCatalogReader
@@ -192,7 +202,7 @@ def main() -> int:
         print(f"\n=== 태그 추출 — {model}")
         res = extract_openrouter(model, users, info, a.repeat) if a.openrouter else extract(model, users, info)
         name = f"{model}@{a.label}" if a.label else model          # 같은 모델 · 다른 프롬프트 판을 따로 남긴다
-        res["model"], res["prompt_version"], res["prompt_file"] = name, tagging.PROMPT_VERSION, str(tagging.PROMPT_FILE)
+        res["model"], res["prompt_version"], res["prompt_file"] = name, SPEC.version, str(SPEC.prompt_file)
         write_sheet(a.scenarios, name, res)
         log = DEFAULT_OUT / f"태그추출_{re.sub(r'[^\w.-]', '_', name)}_{datetime.now().astimezone():%Y%m%d_%H%M%S}.json"
         log.write_text(json.dumps(res, ensure_ascii=False, indent=1))

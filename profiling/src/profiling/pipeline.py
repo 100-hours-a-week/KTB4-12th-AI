@@ -67,7 +67,7 @@ log = logging.getLogger(__name__)
 
 # 관측 라벨 — 어떤 규칙으로 만든 결과인지 저장해 두면 나중에 결과를 비교·회귀할 때 "언제 규칙이 바뀌었나"를 알 수 있다
 VALIDATOR_VERSION_V1 = "v1-skip"      # 검증기 없이 비선호만 반영
-VALIDATOR_VERSION_TAG4 = "tag4-v1"    # tagging.validate — 4축 · 근거 ref · 별점 4~5 · 판촉 단어 (10-12)
+VALIDATOR_VERSION_TAG4 = "tag4-v1"    # tagging.validate — 4축 · 근거 ref · 별점 4~5 · 판촉 단어 (10-12). 규격별 값은 TagSpec.validator_version
 # 풀 정렬 규칙 라벨 (10-11 까지의 로그엔 "v1-view-count" = 조회수 내림차순만). 리뷰가 없어도 같은 라벨 — 라벨은 규칙이지 입력이 아니다
 POOL_RULE_V2 = "v2-views+bias"                              # EXCLUDE: 인기(0~2) + BIAS_WEIGHT × 편향, 비선호는 뺌
 POOL_RULE_V2_PENALTY = "v2-views+bias+dislike-penalty"      # PENALTY: 인기 + 편향 + (비선호면 DISLIKED_CATEGORY_SCORE)
@@ -315,12 +315,13 @@ def profile(
     rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStore,
     recipient_store: RecipientProfileStore, pool_size: int = 30, dislike_mode: DislikeMode = DislikeMode.EXCLUDE,
     pool_strategy: PoolStrategy = PoolStrategy.D, embedding: EmbeddingIndex | None = None,
-    tagger: TagExtractor | None = None,
+    tagger: TagExtractor | None = None, tag_spec: tagging.TagSpec | None = None,
 ) -> ProfileOutcome:
     """7.6 요청 한 건 → ProfileOutcome (저장까지). 예외를 밖으로 내지 않고 FAILED로 돌려준다.
 
     반환의 status가 RESULT_READY면 호출자(api.run_and_callback)가 7.7 콜백을 보내고, FAILED면 보내지 않는다(문서 1: AI는 침묵).
     catalog·store·recipient_store는 ports 모양이면 무엇이든 된다(파일/DB → 테스트 가짜).
+    tag_spec 은 태그 규격(축 · 프롬프트) — 서비스는 기동 때 읽은 것을 넘기고, 없으면 tagging 의 기본 규격.
     """
     rid, sv = rq.recipient_user_id, rq.source_version
     h = input_hash(rq)
@@ -351,9 +352,10 @@ def profile(
             log.info("profile recipient=%s: 취향/리뷰(%d개) 있음 — 태그 추출기 꺼짐(TAGGER=none), 별점 편향 소분류 %d개만 반영",
                      rid, len(rq.reviews), len(scores))
         elif needs_model(rq):
-            tag_run = _extract_tags(rq, products, tagger, disliked_names)
+            spec = tag_spec or tagging.SPEC
+            tag_run = _extract_tags(rq, products, tagger, disliked_names, spec)
             validation, tags, prompt_version, tag_status = tag_run.validation, tag_run.tags, tag_run.prompt_version, tag_run.status
-            validator_version = VALIDATOR_VERSION_TAG4
+            validator_version = spec.validator_version
 
         # 3) 풀 30개 — 입력이 전부 비면 추천 0개 (10-09 결정 C). 0개 콜백은 성공이다: Backend 는 0행을 저장하고 인기순으로 대체한다.
         #    그 밖에는 D(비선호 하드 제외 · 리뷰한 상품 제외 · 상한 · 중복 제거, 태그가 있으면 임베딩 + MMR)
@@ -419,19 +421,20 @@ def _usage_fields(u: TokenUsage | None) -> str:
 
 
 def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: TagExtractor,
-                  disliked_names: list[str]) -> TagRun:
+                  disliked_names: list[str], spec: tagging.TagSpec | None = None) -> TagRun:
     """LLM 한 번 → 검증기 → TagRun. **실패해도 요청은 계속** — 태그 없이(빈 결과) 돌려준다.
 
     장애 추적: 한 줄 로그 `tag_extract <상태> recipient= source_version= model= …` 를 항상 남긴다 — 상태 · 원인 분류(timeout · connect ·
     http_404 …) · 토큰 · 시간(적재/입력/출력) · 입력 크기(리뷰 수 · 프롬프트 글자 수) · 남김/버림 수 · 축별 수 · 버림 사유별 수.
     원문(리뷰 글 · 취향 문장 · 모델 출력 · 태그 글자)은 로그에 남기지 않는다 — 개수 · 시간 · 모델 · 분류만."""
     rid, sv = rq.recipient_user_id, rq.source_version
+    spec = spec or tagging.SPEC
     empty = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_tags=disliked_names, log=[])
     prep = tagging.prepare(rq, {p.productId: p for p in products})       # 가드레일: 개인정보 · 욕설 가림, 의미 없는 글 버림, 인젝션 의심 표시
     prompt, ratings = prep.prompt, prep.ratings
-    pv = f"{tagging.PROMPT_VERSION}@{tagger.model}"
+    pv = f"{spec.version}@{tagger.model}"
     g = prep.guard
-    head = (f"recipient={rid} source_version={sv} model={tagger.model} prompt={tagging.PROMPT_VERSION} "
+    head = (f"recipient={rid} source_version={sv} model={tagger.model} prompt={spec.version} "
             f"reviews={len(rq.reviews)} pref={'y' if prep.has_pref else 'n'} prompt_chars={len(prompt)} "
             f"guard={g['version']}:{_counts(Counter(g['counts']))}")
     if not tagging.worth_llm(prep):                  # 근거가 될 것(취향 문장 · 4~5점 리뷰)이 없다 — 부르지 않는다(비용 0, 결과는 어차피 빈 태그)
@@ -439,7 +442,7 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
         return TagRun(empty, [], pv, "skip_no_signal")
     t0 = time.perf_counter()
     try:
-        reply = tagger.extract(tagging.SYSTEM, prompt, tagging.SCHEMA)
+        reply = tagger.extract(spec.system, prompt, spec.schema)
     except TagExtractError as e:                     # 분류된 실패 — 시간 초과 · 연결 실패 · 모델 없음 · 잘림
         log.warning("tag_extract fail:%s %s wall_ms=%.0f %s err=%s — 태그 없이 진행", e.kind, head, (time.perf_counter() - t0) * 1000,
                     _usage_fields(e.usage), e)
@@ -451,7 +454,7 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
     wall_ms = (time.perf_counter() - t0) * 1000
     raw, usage = (reply.text, reply.usage) if isinstance(reply, TagReply) else (str(reply), None)
     parsed, parse_err = tagging.parse_report(raw)
-    keep, drop = tagging.validate(parsed, ratings, prep.has_pref)
+    keep, drop = tagging.validate(parsed, ratings, prep.has_pref, spec)
     validation = tagging.to_validation(keep, drop, disliked_names)
     axes = Counter(t["axis"] for t in keep)
     drops = Counter(tagging.drop_reason_key(t.get("drop")) for t in drop)
