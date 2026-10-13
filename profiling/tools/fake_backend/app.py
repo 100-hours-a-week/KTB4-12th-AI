@@ -441,7 +441,7 @@ _RUNS = sa.text("""
     where (cast(:rid as bigint) is null or recipient_user_id = cast(:rid as bigint))
     order by updated_at desc limit :limit""")
 _PROFILES = sa.text("""
-    select recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories, created_at, updated_at
+    select recipient_user_id, source_version, preferred_tags, disliked_categories, created_at, updated_at
     from ai_profile.recipient_profiles
     where (cast(:rid as bigint) is null or recipient_user_id = cast(:rid as bigint))
     order by updated_at desc limit :limit""")
@@ -471,7 +471,9 @@ def console_db(recipient: int | None = None, limit: int = 20) -> dict:
         } for r in runs],
         "profiles": [{
             "recipientUserId": r["recipient_user_id"], "sourceVersion": r["source_version"],
-            "preferredTags": r["preferred_tags"], "dislikedTags": r["disliked_tags"], "dislikedCategories": r["disliked_categories"],
+            # 0006(DR-040): preferred_tags 는 [{axis, tag, …}] · disliked_tags 열은 없다 — 콘솔 화면이 쓰던 이름 목록은 disliked_categories 에서
+            "preferredTags": r["preferred_tags"], "dislikedTags": [c["category_name"] for c in r["disliked_categories"]],
+            "dislikedCategories": r["disliked_categories"],
             "createdAt": r["created_at"].isoformat(timespec="seconds"), "updatedAt": r["updated_at"].isoformat(timespec="seconds"),
         } for r in profiles],
     }

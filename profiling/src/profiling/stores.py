@@ -36,6 +36,7 @@ from profiling.types import (
     DislikedCategory,
     ErrorCode,
     ProfileOutcome,
+    ProfileTag,
     RecipientProfile,
     ReviewRecord,
     RunStatus,
@@ -84,9 +85,11 @@ RUNS_TABLE = "ai_profile.profile_runs"
 
 _RUN_UPSERT = sa.text(f"""
     insert into {RUNS_TABLE}
-        (recipient_user_id, source_version, input_hash, status, catalog_version_id, callback_payload, callback_hash, callback_attempts, error)
+        (recipient_user_id, source_version, input_hash, status, catalog_version_id, callback_payload, callback_hash, callback_attempts, error,
+         tag_status, prompt_version, validator_version, llm_cost_usd)
     values
-        (:rid, :sv, :input_hash, :status, :catalog_version_id, cast(:callback_payload as jsonb), :callback_hash, :callback_attempts, cast(:error as jsonb))
+        (:rid, :sv, :input_hash, :status, :catalog_version_id, cast(:callback_payload as jsonb), :callback_hash, :callback_attempts, cast(:error as jsonb),
+         :tag_status, :prompt_version, :validator_version, :llm_cost_usd)
     on conflict (recipient_user_id, source_version) do update set
         status             = excluded.status,
         input_hash         = excluded.input_hash,
@@ -96,6 +99,10 @@ _RUN_UPSERT = sa.text(f"""
         callback_hash      = coalesce(excluded.callback_hash, {RUNS_TABLE}.callback_hash),
         callback_attempts  = greatest(excluded.callback_attempts, {RUNS_TABLE}.callback_attempts),
         error              = excluded.error,
+        tag_status         = coalesce(excluded.tag_status, {RUNS_TABLE}.tag_status),          -- 콜백 뒤 저장 · 재전송은 이 값을 안 실어 온다(0006)
+        prompt_version     = coalesce(excluded.prompt_version, {RUNS_TABLE}.prompt_version),
+        validator_version  = coalesce(excluded.validator_version, {RUNS_TABLE}.validator_version),
+        llm_cost_usd       = coalesce(excluded.llm_cost_usd, {RUNS_TABLE}.llm_cost_usd),
         updated_at         = now()
     returning id, attempt""")
 
@@ -111,7 +118,7 @@ _SUPERSEDE_OLDER = sa.text(f"""
        and status = 'RESULT_READY'""")
 
 _RUN_COLUMNS = ("recipient_user_id, source_version, input_hash, status, catalog_version_id, "
-                "callback_payload, callback_attempts, error, updated_at")
+                "callback_payload, callback_attempts, error, updated_at, tag_status, prompt_version, validator_version, llm_cost_usd")
 
 _RUN_LATEST = sa.text(f"""
     select {_RUN_COLUMNS}
@@ -157,6 +164,8 @@ def _to_outcome(row: Any) -> ProfileOutcome | None:
         validation=None, search=search,
         failure_code=ErrorCode(row["error"]["code"]) if (row["error"] or {}).get("code") else None,
         failure_reason=(row["error"] or {}).get("reason"), callback_attempts=row["callback_attempts"],
+        tag_status=row["tag_status"], prompt_version=row["prompt_version"], validator_version=row["validator_version"],
+        llm_cost_usd=float(row["llm_cost_usd"]) if row["llm_cost_usd"] is not None else None,
         updated_at=row["updated_at"],
     )
 
@@ -188,6 +197,8 @@ class DbProfileRunStore:
             "callback_hash": payload_hash(payload) if payload is not None else None,
             "callback_attempts": outcome.callback_attempts,
             "error": json.dumps(error, ensure_ascii=False) if error is not None else None,
+            "tag_status": outcome.tag_status, "prompt_version": outcome.prompt_version,
+            "validator_version": outcome.validator_version, "llm_cost_usd": outcome.llm_cost_usd,
         }
         run_id, attempt = _one(self._engine, _RUN_UPSERT, params, lambda r: r.one(), write=True)
         log.debug("profile_runs recipient=%s source_version=%s → %s (id=%s attempt=%s callback_attempts=%s)",
@@ -316,21 +327,32 @@ REVIEWS_TABLE = "ai_profile.recipient_reviews"
 # 결과: p 의 행 수(1 = 저장, 0 = 가드에 막힘).
 _PROFILE_SAVE = sa.text(f"""
     with incoming as (
-        select * from unnest(cast(:pids as bigint[]), cast(:ratings as smallint[]), cast(:hashes as text[]), cast(:positions as smallint[]))
-            as t(product_id, rating, review_hash, position)
+        select * from unnest(cast(:pids as bigint[]), cast(:ratings as smallint[]), cast(:hashes as text[]), cast(:positions as smallint[]),
+                             cast(:texts as text[]))
+            as t(product_id, rating, review_hash, position, review_text_clean)
     ),
     p as (
-        insert into {PROFILES_TABLE} (recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories,
-                                      gift_preference_hash, category_scores)
-        values (:rid, :sv, cast(:preferred as jsonb), cast(:disliked as jsonb), cast(:categories as jsonb),
-                :pref_hash, cast(:scores as jsonb))
+        insert into {PROFILES_TABLE} (recipient_user_id, source_version, preferred_tags, disliked_categories,
+                                      gift_preference_hash, category_scores,
+                                      gift_preference_clean, guard_version, tag_status, prompt_version, validator_version,
+                                      recommended_product_ids, catalog_version_id)
+        values (:rid, :sv, cast(:preferred as jsonb), cast(:categories as jsonb),
+                :pref_hash, cast(:scores as jsonb),
+                :pref_clean, :guard_version, :tag_status, :prompt_version, :validator_version,
+                cast(:recommended as jsonb), :catalog_version_id)
         on conflict (recipient_user_id) do update set
             source_version       = excluded.source_version,
-            preferred_tags       = excluded.preferred_tags,
-            disliked_tags        = excluded.disliked_tags,
+            preferred_tags       = excluded.preferred_tags,             -- 0006: 축 · 출처가 붙은 모양(DR-040)
             disliked_categories  = excluded.disliked_categories,
             gift_preference_hash = excluded.gift_preference_hash,
             category_scores      = excluded.category_scores,
+            gift_preference_clean   = excluded.gift_preference_clean,      -- 0006: 정리본 · 상태 · 30개 — 최신 한 벌로 덮는다
+            guard_version           = excluded.guard_version,
+            tag_status              = excluded.tag_status,
+            prompt_version          = excluded.prompt_version,
+            validator_version       = excluded.validator_version,
+            recommended_product_ids = excluded.recommended_product_ids,
+            catalog_version_id      = excluded.catalog_version_id,
             updated_at           = now()
         where {PROFILES_TABLE}.source_version <= excluded.source_version
         returning recipient_user_id
@@ -340,23 +362,27 @@ _PROFILE_SAVE = sa.text(f"""
         where r.recipient_user_id = p.recipient_user_id and r.product_id <> all(cast(:pids as bigint[]))
     ),
     u as (
-        insert into {REVIEWS_TABLE} (recipient_user_id, product_id, rating, review_hash, position)
-        select p.recipient_user_id, i.product_id, i.rating, i.review_hash, i.position from p cross join incoming i
+        insert into {REVIEWS_TABLE} (recipient_user_id, product_id, rating, review_hash, position, review_text_clean)
+        select p.recipient_user_id, i.product_id, i.rating, i.review_hash, i.position, i.review_text_clean from p cross join incoming i
         on conflict (recipient_user_id, product_id) do update set
             rating      = excluded.rating,
             review_hash = excluded.review_hash,
             position    = excluded.position,
+            review_text_clean = excluded.review_text_clean,
             updated_at  = now()
     )
     select count(*) from p""")
 
 # 프로필 + 리뷰를 한 번에 읽는다(왕복 1). 리뷰는 자리 순서로 json 배열에 담는다 — 없으면 []
 _PROFILE_GET = sa.text(f"""
-    select p.recipient_user_id, p.source_version, p.preferred_tags, p.disliked_tags, p.disliked_categories,
-           p.gift_preference_hash, p.category_scores, p.updated_at, coalesce(r.reviews, '[]'::json) as reviews
+    select p.recipient_user_id, p.source_version, p.preferred_tags, p.disliked_categories,
+           p.gift_preference_hash, p.category_scores, p.updated_at, coalesce(r.reviews, '[]'::json) as reviews,
+           p.gift_preference_clean, p.guard_version, p.tag_status, p.prompt_version, p.validator_version,
+           p.recommended_product_ids, p.catalog_version_id
     from {PROFILES_TABLE} p
     left join lateral (
-        select json_agg(json_build_object('product_id', product_id, 'rating', rating, 'review_hash', review_hash, 'position', position)
+        select json_agg(json_build_object('product_id', product_id, 'rating', rating, 'review_hash', review_hash, 'position', position,
+                                          'text_clean', review_text_clean)
                         order by position) as reviews
         from {REVIEWS_TABLE} where recipient_user_id = p.recipient_user_id
     ) r on true
@@ -377,13 +403,17 @@ class DbRecipientProfileStore:
         rv = profile.reviews
         params = {
             "rid": profile.recipient_user_id, "sv": profile.source_version,
-            "preferred": json.dumps(profile.preferred_tags, ensure_ascii=False),
-            "disliked": json.dumps(profile.disliked_tags, ensure_ascii=False),
+            "preferred": json.dumps([t.model_dump() for t in profile.preferred_tags], ensure_ascii=False),
             "categories": json.dumps([c.model_dump() for c in profile.disliked_categories], ensure_ascii=False),
             "pref_hash": profile.gift_preference_hash,
             "scores": json.dumps([c.model_dump() for c in profile.category_scores]),
             "pids": [r.product_id for r in rv], "ratings": [r.rating for r in rv],
             "hashes": [r.review_hash for r in rv], "positions": [r.position for r in rv],
+            "texts": [r.text_clean for r in rv],
+            "pref_clean": profile.gift_preference_clean, "guard_version": profile.guard_version,
+            "tag_status": profile.tag_status, "prompt_version": profile.prompt_version, "validator_version": profile.validator_version,
+            "recommended": json.dumps(profile.recommended_product_ids),
+            "catalog_version_id": profile.catalog_version_id,
         }
         written = _one(self._engine, _PROFILE_SAVE, params, lambda r: r.scalar_one(), write=True)   # count(*) 는 늘 한 행
         if written == 0:   # 가드에 걸림 = 기존 행이 더 새 버전 (순서 역전). 리뷰도 건드리지 않았다
@@ -400,11 +430,15 @@ class DbRecipientProfileStore:
             return None
         return RecipientProfile(
             recipient_user_id=row["recipient_user_id"], source_version=row["source_version"],
-            preferred_tags=list(row["preferred_tags"]), disliked_tags=list(row["disliked_tags"]),
+            preferred_tags=[ProfileTag(**t) for t in row["preferred_tags"]],
             disliked_categories=[DislikedCategory(**c) for c in row["disliked_categories"]],
             gift_preference_hash=row["gift_preference_hash"],
             category_scores=[CategoryScore(**c) for c in row["category_scores"]],
             reviews=[ReviewRecord(**r) for r in row["reviews"]],
+            gift_preference_clean=row["gift_preference_clean"], guard_version=row["guard_version"],
+            tag_status=row["tag_status"],
+            prompt_version=row["prompt_version"], validator_version=row["validator_version"],
+            recommended_product_ids=list(row["recommended_product_ids"]), catalog_version_id=row["catalog_version_id"],
             updated_at=row["updated_at"],
         )
 

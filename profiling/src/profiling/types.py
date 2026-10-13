@@ -21,6 +21,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from profiling import guard
+
 # ---------------------------------------------------------------------------
 # 7.6 요청의 내부 형 — api/에서 ProfileExtractRequest → ProfileRequest로 변환
 # ---------------------------------------------------------------------------
@@ -162,8 +164,9 @@ class ValidationResult(BaseModel):
     likes: list[ValidatedTag]
     key_features: list[ValidatedTag]
     dislikes: list[ValidatedTag]
-    preferred_tags: list[str] = Field(description="likes + key_features 병합, 확정 우선, 상한 max_preferred_tags")
-    disliked_tags: list[str] = Field(description="Backend 비선호 카테고리명이 앞, 상한 max_disliked_tags")
+    preferred_tags: list[str] = Field(description="검증기 통과 태그 글자(keep 순서) — 메모리에서만 쓴다. DB 의 preferred_tags 는 축 · 출처가 붙은 "
+                                                  "모양(RecipientProfile.preferred_tags · profile_tags)")
+    disliked_tags: list[str] = Field(description="Backend 비선호 카테고리 이름 — 메모리에서만(DB 엔 disliked_categories 로, DR-040)")
     log: list[Decision]
 
 
@@ -234,6 +237,8 @@ class ProfileOutcome(BaseModel):
     callback_attempts: int = 0          # 7.7 시도 횟수. run_and_callback이 콜백 뒤 +1 해서 저장
     prompt_version: str | None = None
     validator_version: str | None = None
+    tag_status: str | None = None       # 태그 단계 결과 — ok · empty · bad_json · fail:<종류> · skip_no_signal · off · skip (0006)
+    llm_cost_usd: float | None = None   # 외부 API 실제 청구액(OpenRouter usage.cost). 로컬 · 끔이면 None (0006)
     updated_at: datetime | None = None  # **읽을 때만** 채운다 (store.get_run). save()는 무시하고 DB가 now()로 쓴다.
                                         # 접수 단계 중복 판정이 "이 RUNNING이 아직 살아 있나"를 이 값으로 본다
 
@@ -311,10 +316,10 @@ def preference_hash(text: str | None) -> str | None:
 
 
 class ReviewRecord(BaseModel):
-    """ai_profile.recipient_reviews 한 행(0005) — 수신자 한 사람의 리뷰 ≤10, 상품당 최신 1건. 분석마다 행 전체를 교체한다(스냅샷).
+    """ai_profile.recipient_reviews 한 행(0005 · 0006) — 수신자 한 사람의 리뷰 ≤10, 상품당 최신 1건. 분석마다 행 전체를 교체한다(스냅샷).
 
-    **리뷰 글(원문)은 저장하지 않는다**(10-11 결정 B) — 위키 데이터-컨텍스트 보강 설계: 7.6 입력은 "그 실행에서만 쓰고 저장하지 않습니다".
-    원문은 Backend 가 정본으로 갖고 있다. 캐시 판정은 review_hash 로 충분하다(같으면 저장된 추출 결과 재사용 — extraction 열은 0006).
+    **리뷰 글은 가드레일 정리본만 저장한다**(10-13 DR-039 — 결정 C 의 구현). 정리본 = guard.clean(개인정보 · 욕설 가림, 의미 없는 글 ·
+    인젝션 의심 글은 None). 원문 그대로는 저장하지 않는다 — 원문 정본은 Backend. review_hash 는 원문 기준(바뀜 판정 · 캐시 키).
     """
 
     product_id: int
@@ -322,6 +327,7 @@ class ReviewRecord(BaseModel):
     review_hash: str = Field(min_length=64, max_length=64, description="review_hash() — 캐시 키 (상품·별점·정규화 글)")
     position: int = Field(ge=0, le=9, description="7.6 reviews 배열에서의 자리(0이 가장 최신, 7.6 상한 10개 → 0~9 · DB CHECK 와 같음). "
                                                    "건너뛴 중복이 있으면 번호가 빌 수 있다")
+    text_clean: str | None = Field(default=None, description="리뷰 글 정리본(guard.clean) — 글 없음 · 의미 없음 · 인젝션 의심이면 None (0006)")
 
 
 def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
@@ -332,7 +338,8 @@ def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
         if r.product_id in seen:
             continue
         seen.add(r.product_id)
-        out.append(ReviewRecord(product_id=r.product_id, rating=r.rating, review_hash=review_hash(r), position=pos))
+        out.append(ReviewRecord(product_id=r.product_id, rating=r.rating, review_hash=review_hash(r), position=pos,
+                                text_clean=guard.clean(r.review_text).text))
     return out
 
 
@@ -342,8 +349,13 @@ def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
 # 열 구성과 v3 계획은 docs/코드_안내서.md
 # ---------------------------------------------------------------------------
 
-MAX_PREFERRED_TAGS = 12
-MAX_DISLIKED_TAGS = 8
+class ProfileTag(BaseModel):
+    """검증기 통과 선호 태그 하나 — recipient_profiles.preferred_tags 의 원소(0006 · DR-040). 챗봇 조회 API 가 그대로 내준다."""
+
+    axis: str = Field(description="태그 규격의 축 — tag3: 카테고리 · IP · 브랜드(tag4 는 + 특징)")
+    tag: str
+    source: Literal["preference", "review_text"] = Field(description="근거가 취향 문장인지 리뷰인지")
+    ref: str | None = Field(default=None, description="근거 자리 — pref · r1 · r2 … (여러 개면 'pref, r1')")
 
 
 class RecipientProfile(BaseModel):
@@ -352,13 +364,18 @@ class RecipientProfile(BaseModel):
     recipient_user_id: int
     source_version: int
     profile_run_id: str | None = None
-    preferred_tags: list[str] = Field(default_factory=list, max_length=MAX_PREFERRED_TAGS)
-    disliked_tags: list[str] = Field(default_factory=list, max_length=MAX_DISLIKED_TAGS)
+    preferred_tags: list[ProfileTag] = Field(default_factory=list,
+                                             description="선호 태그(축 · 출처 · 근거 자리) — 추천 30개를 고를 때 쓴 태그 그대로, 자르지 않는다 (0006 · DR-040). "
+                                                         "ValidationResult.preferred_tags(글자 목록, 메모리)와 이름만 같다")
     axes: dict[str, list[ValidatedTag]] = Field(default_factory=lambda: {"likes": [], "key_features": [], "dislikes": []})
-    disliked_categories: list[DislikedCategory] = Field(default_factory=list)   # 7.6에서 받은 명시 비선호 — 분석 시점 사본 (테이블 열과 같은 이름)
+    disliked_categories: list[DislikedCategory] = Field(default_factory=list)   # 7.6 의 명시 비선호(번호 + 이름) 사본 — 비선호는 이것 하나(DR-040)
     recommended_product_ids: list[int] = Field(default_factory=list, max_length=30)
     gift_preference_hash: str | None = Field(default=None, min_length=64, max_length=64,
-                                             description="7.6 giftPreference 의 지문(preference_hash) — 원문은 저장 안 함(10-11 결정 B). 없거나 공백이면 None (0005)")
+                                             description="7.6 giftPreference 원문의 지문(preference_hash) — 바뀜 판정용. 없거나 공백이면 None (0005)")
+    gift_preference_clean: str | None = Field(default=None, description="취향 문장 정리본(guard.clean) — 원문은 저장하지 않음(DR-039). "
+                                                                        "없거나 의미 없음 · 인젝션 의심이면 None (0006)")
+    guard_version: str | None = Field(default=None, description="정리 규칙 판(guard.GUARD_VERSION) (0006)")
+    tag_status: str | None = Field(default=None, description="태그 단계 결과 — ProfileOutcome.tag_status (0006)")
     category_scores: list[CategoryScore] = Field(default_factory=list, description="소분류별 별점 누적 — 편향 = score_sum ÷ (n + 2) (0005)")
     reviews: list[ReviewRecord] = Field(default_factory=list, max_length=10, description="이번 분석에 쓴 리뷰 ≤10 — recipient_reviews 자식 행, 스냅샷 교체 (0005)")
     catalog_version_id: UUID | None = None
@@ -371,12 +388,15 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
                  category_scores: list[CategoryScore] | None = None) -> RecipientProfile:
     """ProfileOutcome(+요청) → RecipientProfile 한 행. pipeline.profile()이 RESULT_READY 저장 직후 부른다.
 
-    - preferred/disliked 태그: outcome.validation의 2필드를 상한(12·8)으로 자른다. v1은 disliked = 비선호 카테고리 이름뿐.
+    - preferred_tags: 판정 로그의 keep 결정에서 축(axis4) · 출처(ref)를 붙여(profile_tags) — 추천 30개를 고를 때 쓴 태그 그대로, 자르지 않는다
+      (DR-040 — 12개로 자르던 때는 저장된 태그와 추천에 쓴 태그가 달랐다). 챗봇이 축별로 읽는다. tag_status 는 태그 단계 결과(실패면 태그는 [] ·
+      상태로 구분 — 옛 태그를 남기지 않는다: 입력이 바뀐 새 번호에 옛 태그가 붙어 보이지 않게).
     - axes: ValidationResult의 3축 원형(v1은 전부 []).
     - disliked_categories: 요청(rq)에서 그대로 — "분석 시점 사본"이라 Backend가 이후 바꿔도 다음 7.6까지 모른다(설계서 §1.7).
+      이름만 옮긴 disliked_tags 는 두지 않는다(DR-040).
     - recommended_product_ids · catalog_version_id: outcome.search에서(콜백과 같은 30개).
-    - gift_preference_hash · reviews: 요청(rq)에서 — **원문은 남기지 않고 지문만**(10-11 결정 B, 위키 "7.6 입력은 저장하지 않음").
-      리뷰는 to_review_records()로 행(상품·별점·해시·자리)이 된다.
+    - gift_preference_hash · reviews: 요청(rq)에서. 원문 그대로는 남기지 않는다 — 취향 문장 · 리뷰 글은 **가드레일 정리본**만
+      (gift_preference_clean · ReviewRecord.text_clean, 10-13 DR-039), 지문(해시)은 원문 기준. 리뷰는 to_review_records()로 행이 된다.
     - category_scores: 호출자가 넘긴다(score_categories — 카탈로그가 필요해 pipeline이 만든다). 안 넘기면 [].
     """
     v = outcome.validation
@@ -385,19 +405,35 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
         recipient_user_id=rq.recipient_user_id,
         source_version=rq.source_version,
         profile_run_id=profile_run_id,
-        preferred_tags=cap_tags(v.preferred_tags, MAX_PREFERRED_TAGS) if v else [],
-        disliked_tags=cap_tags(v.disliked_tags, MAX_DISLIKED_TAGS) if v else [],
+        preferred_tags=profile_tags(v),
         axes={"likes": list(v.likes), "key_features": list(v.key_features), "dislikes": list(v.dislikes)} if v
              else {"likes": [], "key_features": [], "dislikes": []},
         disliked_categories=list(rq.disliked_categories),
         recommended_product_ids=list(s.product_ids) if s else [],
         gift_preference_hash=preference_hash(rq.gift_preference),
+        gift_preference_clean=guard.clean(rq.gift_preference).text,
+        guard_version=guard.GUARD_VERSION,
+        tag_status=outcome.tag_status,
         category_scores=list(category_scores or []),
         reviews=to_review_records(rq.reviews),
         catalog_version_id=s.catalog_version_id if s else None,
         prompt_version=outcome.prompt_version,
         validator_version=outcome.validator_version,
     )
+
+
+def profile_tags(validation: ValidationResult | None) -> list[ProfileTag]:
+    """판정 로그의 keep → ProfileTag(축 · 글자 · 출처 · 근거 자리). 축이 없는 옛 결과는 likes = 카테고리 · key_features = 특징으로 본다."""
+    if validation is None:
+        return []
+    out: list[ProfileTag] = []
+    for d in validation.log:
+        if d.decision != "keep":
+            continue
+        axis = getattr(d, "axis4", None) or ("특징" if d.axis == "key_features" else "카테고리")
+        ref = d.ref or None
+        out.append(ProfileTag(axis=axis, tag=d.tag, source="preference" if ref and "pref" in ref else "review_text", ref=ref))
+    return out
 
 
 def should_replace(current: RecipientProfile | None, incoming: RecipientProfile) -> bool:
@@ -407,23 +443,6 @@ def should_replace(current: RecipientProfile | None, incoming: RecipientProfile)
     동시에 써도 DB가 최종 심판. 이 함수는 호출자의 사전 판단용(테스트 가짜 저장소도 이 규칙을 따른다).
     """
     return current is None or current.source_version <= incoming.source_version
-
-
-def merge_explicit_dislikes(profile: RecipientProfile, category_names: list[str]) -> RecipientProfile:
-    """Backend 명시 비선호를 disliked_tags 앞에 병합 (중복 제거·상한)."""
-    raise NotImplementedError
-
-
-def cap_tags(tags: list[str], limit: int) -> list[str]:
-    """중복 제거(앞의 것을 남김 — 검증기가 확정 우선으로 정렬해 두었으므로) 후 앞에서 limit개. 빈 문자열·공백은 버린다."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for tag in tags:
-        t = tag.strip()
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out[:limit]
 
 
 def to_search_hint(profile: RecipientProfile) -> dict:

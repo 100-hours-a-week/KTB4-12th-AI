@@ -371,7 +371,7 @@ def test_profile_with_reviews_applies_bias_and_stores_scores(caplog) -> None:
     row = rstore.get(9073)
     assert row.category_scores == [CategoryScore(category_id=21, n=2, score_sum=4)]
     assert row.gift_preference_hash == preference_hash("휴대용") and [r.product_id for r in row.reviews] == [3, 4]
-    assert "좋아요" not in row.model_dump_json()                                 # 원문은 저장하지 않는다(10-11 결정 B)
+    assert [r.text_clean for r in row.reviews] == ["좋아요", None] and row.tag_status == "off"   # 정리본만 저장(DR-039) · 추출기 꺼짐
     assert any("scores=1" in r.message and selection.POOL_RULE_D in r.message for r in caplog.records)
     assert not any("좋아요" in r.message for r in caplog.records)               # 리뷰 원문은 로그에 남지 않는다
 
@@ -439,7 +439,7 @@ def test_profile_upserts_recipient_profile() -> None:
     row = rstore.get(9073)
     assert out.status is RunStatus.RESULT_READY and row is not None
     assert row.source_version == 3 and [c.category_name for c in row.disliked_categories] == ["뷰티"]
-    assert row.disliked_tags == ["뷰티"] and row.preferred_tags == [] and row.recommended_product_ids == out.search.product_ids
+    assert row.preferred_tags == [] and row.recommended_product_ids == out.search.product_ids
 
 
 def test_profile_recipient_store_failure_is_failed_no_callback() -> None:

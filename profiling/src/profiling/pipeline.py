@@ -348,6 +348,7 @@ def profile(
         tags: list[selection.Tag] = []
         prompt_version, validator_version = None, VALIDATOR_VERSION_V1
         tag_status = "skip" if not needs_model(rq) else "off"   # 글 · 취향 없음 → skip, 추출기 꺼짐 → off
+        llm_cost: float | None = None
         if needs_model(rq) and tagger is None:
             log.info("profile recipient=%s: 취향/리뷰(%d개) 있음 — 태그 추출기 꺼짐(TAGGER=none), 별점 편향 소분류 %d개만 반영",
                      rid, len(rq.reviews), len(scores))
@@ -355,6 +356,7 @@ def profile(
             spec = tag_spec or tagging.SPEC
             tag_run = _extract_tags(rq, products, tagger, disliked_names, spec)
             validation, tags, prompt_version, tag_status = tag_run.validation, tag_run.tags, tag_run.prompt_version, tag_run.status
+            llm_cost = tag_run.usage.cost_usd if tag_run.usage else None
             validator_version = spec.validator_version
 
         # 3) 풀 30개 — 입력이 전부 비면 추천 0개 (10-09 결정 C). 0개 콜백은 성공이다: Backend 는 0행을 저장하고 인기순으로 대체한다.
@@ -378,6 +380,7 @@ def profile(
             recipient_user_id=rid, source_version=sv, status=RunStatus.RESULT_READY, input_hash=h,
             validation=validation, search=search,
             prompt_version=prompt_version, validator_version=validator_version,
+            tag_status=tag_status, llm_cost_usd=llm_cost,
         )
     except Exception as e:  # 업무 단계의 어떤 오류도 FAILED로 기록 — 백그라운드에서 조용히 죽지 않게
         log.exception("profile recipient=%s source_version=%s 실패", rid, sv)

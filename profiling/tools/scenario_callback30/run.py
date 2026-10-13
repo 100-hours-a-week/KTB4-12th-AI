@@ -12,7 +12,7 @@
   엑셀  tools/scenario_callback30/out/시나리오_결과_<시각>.xlsx — 요약 · 점수_책정 · 추천30(점수 내역) · 비선호_위치 · 태그 · 콜백_원문 · 검사 · 입력
   JSON  같은 이름 .json
 검사는 두 갈래다. **자동 검사**(모든 실행): 콜백 수신 · 본문 계약 · 개수 · 카탈로그·재고 · 재현성 · 비선호 · 점수 공식 독립 재계산 ·
-점수 저장 · 리뷰 행 · 원문 미저장 · 실행 기록. **시나리오 기대**: 엑셀 '기대' 시트. 하나라도 실패하면 종료 코드 1.
+점수 저장 · 리뷰 행 · 원문 그대로는 없고 정리본만(DR-039) · 실행 기록. **시나리오 기대**: 엑셀 '기대' 시트. 하나라도 실패하면 종료 코드 1.
 """
 
 from __future__ import annotations
@@ -213,7 +213,7 @@ def run_mode(mode: str, users: list[User], engine: sa.Engine, model_env: dict[st
                             "pool": pool, "rule": rule, "strategy": strategy, "tags": tags, "verify": verify,
                             "config": {"tagger": get_settings().TAGGER, "model": get_settings().TAGGER_MODEL if get_settings().TAGGER != "none" else "",
                                        "strategy": strategy.value, "tag_spec": app.state.tag_spec.name if app.state.tag_spec else ""},
-                            "prompt_version": prompt_version, "stored_tags": list(prof.preferred_tags) if prof else None,
+                            "prompt_version": prompt_version, "stored_tags": [(t.axis, t.tag) for t in prof.preferred_tags] if prof else None,
                             "usage": usage, "llm_prompt": llm_prompt, "warnings": app_warnings})
     plog.removeHandler(collector)
     plog.propagate = propagate
@@ -346,7 +346,7 @@ def check_run(r: dict[str, Any], engine: sa.Engine, other: dict[str, Any] | None
     """(종류, 검사, 통과, 내용) 목록."""
     from pydantic import ValidationError
 
-    from profiling import pipeline
+    from profiling import guard, pipeline
     from profiling.backend import CALLBACK_PATH
     from profiling.pipeline import BIAS_WEIGHT, DISLIKED_CATEGORY_SCORE
     from profiling.schemas import ProfileCallbackRequest
@@ -397,8 +397,9 @@ def check_run(r: dict[str, Any], engine: sa.Engine, other: dict[str, Any] | None
     for name, ok, detail in r.get("verify", []):
         add(name, ok, detail)
     if r["prompt_version"]:
-        add("저장된 선호 태그 = 같은 원출력을 검증기로 다시 만든 태그", r["stored_tags"] == [t.text for t in r["tags"]],
-            f"저장 {r['stored_tags']} · 재생성 {[t.text for t in r['tags']]}")
+        add("저장된 선호 태그(축 · 글자) = 같은 원출력을 검증기로 다시 만든 태그 — 추천에 쓴 태그 그대로(DR-040)",
+            r["stored_tags"] == [(t.axis, t.text) for t in r["tags"]],
+            f"저장 {r['stored_tags']} · 재생성 {[(t.axis, t.text) for t in r['tags']]}")
     if r["strategy"] is pipeline.PoolStrategy.D:
         from collections import Counter
 
@@ -443,12 +444,13 @@ def check_run(r: dict[str, Any], engine: sa.Engine, other: dict[str, Any] | None
 
     prof = DbRecipientProfileStore(engine).get(rid)
     add("저장된 category_scores = 코드 점수", prof is not None and prof.category_scores == r["scores"], "")
-    seen, want_rows = set(), []
+    seen, want_rows, want_clean = set(), [], []
     for pos, rv in enumerate(u.reviews):
         if rv["productId"] in seen:
             continue
         seen.add(rv["productId"])
         want_rows.append((rv["productId"], rv["rating"], pos, review_hash(Review(product_id=rv["productId"], rating=rv["rating"], review_text=rv["reviewText"]))))
+        want_clean.append(guard.clean(rv["reviewText"]).text)
     have_rows = [(x.product_id, x.rating, x.position, x.review_hash) for x in (prof.reviews if prof else [])]
     add("리뷰 행(중복 제거 · 자리 · 지문) 저장", have_rows == want_rows, f"{len(have_rows)}행(기대 {len(want_rows)})")
     texts = [rv["reviewText"] for rv in u.reviews if rv["reviewText"]] + ([u.preference] if u.preference else [])
@@ -457,8 +459,12 @@ def check_run(r: dict[str, Any], engine: sa.Engine, other: dict[str, Any] | None
             "select coalesce((select row_to_json(p)::text from ai_profile.recipient_profiles p where p.recipient_user_id=:r),'')"
             " || coalesce((select json_agg(x)::text from ai_profile.recipient_reviews x where x.recipient_user_id=:r),'')"
             " || coalesce((select json_agg(x)::text from ai_profile.profile_runs x where x.recipient_user_id=:r),'')"), {"r": rid}).scalar()
-    leaked = [t for t in texts if t in dump]
-    add("원문 미저장(리뷰 글 · 취향 문장이 DB 어디에도 없음)", not leaked, f"검사 문자열 {len(texts)}개 · 발견 {len(leaked)}")
+    changed = [t for t in texts if guard.clean(t).text != t]          # 가드레일이 바꾼 원문(개인정보 · 욕설 · 의미 없는 글 · 인젝션) — 그대로는 없어야
+    leaked = [t for t in changed if t in dump]
+    have_clean = (prof.gift_preference_clean, [x.text_clean for x in prof.reviews]) if prof else (None, [])
+    clean_ok = have_clean == (guard.clean(u.preference).text, want_clean)
+    add("원문 그대로는 없고 정리본만 있음(취향 문장 · 리뷰 글 — DR-039)", not leaked and clean_ok,
+        f"가드레일이 바꾼 원문 {len(changed)}개 중 DB 에서 발견 {len(leaked)} · 정리본 {'일치' if clean_ok else '불일치'}")
     run = r["run"] or {}
     add("실행 기록 DELIVERED · 콜백 시도 1", run.get("status") == "DELIVERED" and run.get("callback_attempts") == 1, f"{run.get('status')} · {run.get('callback_attempts')}")
 
@@ -641,7 +647,8 @@ def write_files(results, checks_by, out_dir: Path, scenarios: Path) -> tuple[Pat
     tags = [[r["user"].no, r["mode"], " · ".join(f"{t.axis}:{t.text}" for t in r["tags"]) or "[]",
              json.dumps([n for _, n in r["user"].disliked], ensure_ascii=False), r["prompt_version"] or "태그 추출 꺼짐 또는 입력 없음",
              r["user"].preference or ""] for r in results]
-    sheet("태그", ["사용자", "모드", "preferred_tags(축:태그)", "disliked_tags", "프롬프트@모델", "취향 문장(입력, 저장 안 함)"], tags, [7, 9, 50, 30, 30, 40])
+    sheet("태그", ["사용자", "모드", "preferred_tags(축:태그)", "disliked_categories(이름)", "프롬프트@모델", "취향 문장(입력, 저장 안 함)"], tags,
+          [7, 9, 50, 30, 30, 40])
     sheet("콜백_원문", ["사용자", "모드", "경로", "Authorization", "본문"], [[r["user"].no, r["mode"], c["path"], c["auth"], json.dumps(c["body"], ensure_ascii=False)]
                                                                          for r in results for c in r["calls"]], [7, 9, 44, 24, 120])
     crow = [[no, mode, k, n, "통과" if ok else "실패", d] for (no, mode), ch in checks_by.items() for k, n, ok, d in ch]

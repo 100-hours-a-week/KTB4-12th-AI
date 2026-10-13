@@ -100,7 +100,7 @@ def test_profile_extracts_tags_stores_them_and_drives_embedding_pool(caplog) -> 
     with caplog.at_level("INFO", logger="profiling.pipeline"):
         out, row = _profile(rq, products, tagger=tagger, embedding=FakeEmbedding({p.productId: p.categoryId for p in products}))
     assert out.status is RunStatus.RESULT_READY and tagger.calls == 1
-    assert out.validation.preferred_tags == ["소분류 3"] and row.preferred_tags == ["소분류 3"]
+    assert out.validation.preferred_tags == ["소분류 3"] and [(t.axis, t.tag, t.ref) for t in row.preferred_tags] == [("카테고리", "소분류 3", "pref")]
     assert out.prompt_version == f"{tagging.PROMPT_VERSION}@fake-llm" and out.validator_version == pipeline.VALIDATOR_VERSION_TAG4
     assert out.search.query_text == "소분류 3" and any(pid > 100 for pid in out.search.product_ids)   # 조회수 낮은 태그 소분류가 들어옴
     assert any(selection.POOL_RULE_D_EMBED in r.message for r in caplog.records)

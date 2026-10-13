@@ -42,8 +42,8 @@ def bench_store(n: int = 1000) -> dict[str, list[float]]:
     from profiling.types import RecipientProfile, ReviewRecord
 
     eng = sa.create_engine(get_settings().DATABASE_URL, future=True)
-    txn = [sa.text("""insert into ai_profile.recipient_profiles (recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories,
-               gift_preference_hash, category_scores) values (:rid, :sv, '[]', '[]', '[]', :ph, '[]'::jsonb)
+    txn = [sa.text("""insert into ai_profile.recipient_profiles (recipient_user_id, source_version, preferred_tags, disliked_categories,
+               gift_preference_hash, category_scores) values (:rid, :sv, '[]', '[]', :ph, '[]'::jsonb)
                on conflict (recipient_user_id) do update set source_version=excluded.source_version, gift_preference_hash=excluded.gift_preference_hash,
                category_scores=excluded.category_scores, updated_at=now()
                where ai_profile.recipient_profiles.source_version <= excluded.source_version returning recipient_user_id"""),

@@ -25,6 +25,7 @@ from profiling.types import (
     ErrorCode,
     ProfileOutcome,
     ProfileRequest,
+    ProfileTag,
     RecipientProfile,
     Review,
     ReviewRecord,
@@ -131,17 +132,20 @@ def test_run_store_requires_input_hash(stores) -> None:
 
 def test_profile_store_upsert_get_delete_and_version_guard(stores) -> None:
     _, profiles = stores
-    p3 = RecipientProfile(recipient_user_id=RID, source_version=3, disliked_tags=["도서·음반"],
-                          disliked_categories=[DislikedCategory(category_id=701, category_name="도서·음반")])
+    def dis(cid: int, name: str) -> list[DislikedCategory]:
+        return [DislikedCategory(category_id=cid, category_name=name)]
+
+    p3 = RecipientProfile(recipient_user_id=RID, source_version=3, disliked_categories=dis(701, "도서·음반"),
+                          preferred_tags=[ProfileTag(axis="IP", tag="산리오 한교동", source="preference", ref="pref")])
     profiles.upsert(p3)
     got = profiles.get(RID)
-    assert got.source_version == 3 and got.disliked_tags == ["도서·음반"] and got.disliked_categories == p3.disliked_categories
-    assert got.updated_at is not None and got.preferred_tags == []
+    assert got.source_version == 3 and got.disliked_categories == p3.disliked_categories and got.preferred_tags == p3.preferred_tags
+    assert got.updated_at is not None
 
-    profiles.upsert(RecipientProfile(recipient_user_id=RID, source_version=2, disliked_tags=["옛것"]))     # 순서 역전 → 무시
-    assert profiles.get(RID).disliked_tags == ["도서·음반"]
-    profiles.upsert(RecipientProfile(recipient_user_id=RID, source_version=4, disliked_tags=["새것"]))     # 더 새 버전 → 덮음
-    assert profiles.get(RID).disliked_tags == ["새것"]
+    profiles.upsert(RecipientProfile(recipient_user_id=RID, source_version=2, disliked_categories=dis(1, "옛것")))   # 순서 역전 → 무시
+    assert profiles.get(RID).disliked_categories == dis(701, "도서·음반")
+    profiles.upsert(RecipientProfile(recipient_user_id=RID, source_version=4, disliked_categories=dis(2, "새것")))   # 더 새 버전 → 덮음
+    assert profiles.get(RID).disliked_categories == dis(2, "새것") and profiles.get(RID).preferred_tags == []
 
     assert profiles.delete(RID) is True and profiles.get(RID) is None and profiles.delete(RID) is False
 
@@ -259,7 +263,7 @@ def test_pipeline_writes_both_tables(stores, engine) -> None:
     run = runs.get(RID + 1)
     assert run.status is RunStatus.RESULT_READY and run.search.product_ids == out.search.product_ids and run.input_hash == out.input_hash
     prof = profiles.get(RID + 1)
-    assert prof.source_version == 3 and [c.category_id for c in prof.disliked_categories] == [802] and prof.disliked_tags == ["출산·육아용품"]
+    assert prof.source_version == 3 and [(c.category_id, c.category_name) for c in prof.disliked_categories] == [(802, "출산·육아용품")]
 
 
 def test_pipeline_with_reviews_writes_scores_and_review_rows(stores, engine) -> None:
@@ -272,11 +276,9 @@ def test_pipeline_with_reviews_writes_scores_and_review_rows(stores, engine) -> 
     prof = profiles.get(RID + 2)
     assert {(s.category_id, s.n, s.score_sum) for s in prof.category_scores} == {(802, 1, 2), (305, 1, -1)}
     assert [r.product_id for r in prof.reviews] == [13006, 21416] and prof.gift_preference_hash == preference_hash("육아용품 좋아요")
-    with engine.connect() as c:
-        dumped = c.execute(sa.text(
-            "select row_to_json(p)::text || coalesce((select json_agg(r)::text from ai_profile.recipient_reviews r where r.recipient_user_id = p.recipient_user_id), '')"
-            " from ai_profile.recipient_profiles p where p.recipient_user_id = :rid"), {"rid": RID + 2}).scalar()
-    assert "아기가 좋아해요" not in dumped and "육아용품 좋아요" not in dumped
+    # 원문 그대로는 없고 정리본만(10-13 DR-039) — 이 글들은 가릴 것이 없어 정리본 = 원문이므로 정리본 칸에 그대로 있다
+    assert prof.gift_preference_clean == "육아용품 좋아요" and [r.text_clean for r in prof.reviews] == ["아기가 좋아해요", None]
+    assert prof.tag_status == "off" and len(prof.recommended_product_ids) == len(out.search.product_ids) and prof.guard_version == "g4"
 
 
 # ---------------------------------------------------------------- 앱 전체 (진짜 DB)
@@ -476,3 +478,36 @@ def test_run_lock_connection_is_reused_for_store_calls(engine) -> None:
         sa.event.remove(engine, "checkout", on_checkout)
         runs.delete_recipient(rid)
         profiles.delete(rid)
+
+
+def test_pipeline_with_tagger_stores_chatbot_profile_data(stores, engine) -> None:
+    """0006 — 챗봇 조회용 데이터가 DB 까지: 정리본 · 축이 붙은 태그 · 태그 상태 · 판 · 30개, 실행 기록에도 상태 · 판 · 비용(10-13)."""
+    from profiling import tagging
+    from profiling.ports import TagReply, TokenUsage
+
+    class Tagger:
+        model = "fake-llm"
+
+        def extract(self, system, prompt, schema):
+            body = '{"tags": [{"axis": "카테고리", "tag": "출산선물세트", "ref": "pref", "evidence": "x"},' \
+                   ' {"axis": "특징", "tag": "부드러움", "ref": "pref", "evidence": "x"}]}'
+            return TagReply(body, TokenUsage(input_tokens=700, output_tokens=60, cost_usd=0.000412))
+
+    runs, profiles = stores
+    t3 = tagging.load_spec("tag3")
+    rq = ProfileRequest(recipient_user_id=RID + 3, source_version=2, gift_preference="010-1234-5678 로 연락 주세요 아기 선물 좋아요",
+                        disliked_categories=[], reviews=[Review(product_id=13006, rating=5, review_text="ㅋㅋㅋㅋㅋㅋ")])
+    out = pipeline.profile(rq, catalog=FileCatalogReader(FIXTURE), store=runs, recipient_store=profiles, tagger=Tagger(), tag_spec=t3)
+    assert out.status is RunStatus.RESULT_READY
+    prof = profiles.get(RID + 3)
+    assert prof.gift_preference_clean == "[연락처] 로 연락 주세요 아기 선물 좋아요" and [r.text_clean for r in prof.reviews] == [None]
+    assert [(t.axis, t.tag, t.source, t.ref) for t in prof.preferred_tags] == [("카테고리", "출산선물세트", "preference", "pref")]   # 3축 — 특징은 '축 밖'
+    assert prof.tag_status == "ok" and prof.prompt_version == f"{t3.version}@fake-llm" and prof.validator_version == "tag3-v1"
+    assert prof.recommended_product_ids == out.search.product_ids and prof.catalog_version_id == out.search.catalog_version_id
+    run = runs.get_run(RID + 3, 2)
+    assert (run.tag_status, run.prompt_version, run.validator_version) == ("ok", f"{t3.version}@fake-llm", "tag3-v1")
+    assert run.llm_cost_usd == pytest.approx(0.000412)
+    with engine.connect() as c:
+        dumped = c.execute(sa.text("select row_to_json(p)::text from ai_profile.recipient_profiles p where p.recipient_user_id = :rid"),
+                           {"rid": RID + 3}).scalar()
+    assert "010-1234-5678" not in dumped                                             # 원문의 개인정보는 DB 어디에도 없다

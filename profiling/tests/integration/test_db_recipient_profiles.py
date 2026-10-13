@@ -1,6 +1,8 @@
 """로컬 PostgreSQL(docker compose) 통합 시험 — ai_profile.recipient_profiles·recipient_reviews·profile_runs 가 마이그레이션대로 있고 upsert·상태 규칙이 도는지.
 DB가 안 떠 있으면 skip (단위 테스트와 섞이지 않게). 실행: docker compose up -d && uv run alembic upgrade head && uv run pytest tests/integration"""
 
+import json
+
 import pytest
 import sqlalchemy as sa
 
@@ -31,8 +33,12 @@ def test_schema_applied(conn, alembic_head) -> None:
         select column_name, data_type, column_default from information_schema.columns
         where table_schema='ai_profile' and table_name='recipient_profiles' order by ordinal_position""")).all()
     names = [c[0] for c in cols]
-    assert names == ["recipient_user_id", "source_version", "preferred_tags", "disliked_tags", "disliked_categories", "created_at", "updated_at",
-                     "gift_preference_hash", "category_scores"]                 # 0005: ADD COLUMN 은 뒤에 붙는다
+    assert names == ["recipient_user_id", "source_version", "preferred_tags", "disliked_categories", "created_at", "updated_at",
+                     "gift_preference_hash", "category_scores",                 # 0005: ADD COLUMN 은 뒤에 붙는다
+                     "gift_preference_clean", "guard_version", "tag_status", "prompt_version", "validator_version",
+                     "recommended_product_ids", "catalog_version_id"]          # 0006: 챗봇 조회용(정리본 · 상태 · 30개). disliked_tags 는 지움(DR-040)
+    idx = {r[0] for r in conn.execute(sa.text("select indexname from pg_indexes where schemaname='ai_profile' and tablename='recipient_profiles'"))}
+    assert "ix_recipient_profiles_preferred_tags" in idx and "ix_recipient_profiles_disliked_tags" not in idx
     assert {c[0]: c[2] for c in cols}["category_scores"].startswith("'[]'::jsonb")
     assert cols[0][2] is None                                       # PK는 Backend 값 — 시퀀스 없음
     assert conn.execute(sa.text("select 1 from pg_extension where extname='vector'")).scalar() == 1
@@ -40,21 +46,25 @@ def test_schema_applied(conn, alembic_head) -> None:
 
 
 UPSERT = sa.text("""
-    insert into ai_profile.recipient_profiles (recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories)
-    values (:rid, :sv, cast(:pref as jsonb), cast(:dis as jsonb), cast(:cats as jsonb))
+    insert into ai_profile.recipient_profiles (recipient_user_id, source_version, preferred_tags, disliked_categories)
+    values (:rid, :sv, cast(:pref as jsonb), cast(:cats as jsonb))
     on conflict (recipient_user_id) do update
       set source_version = excluded.source_version, preferred_tags = excluded.preferred_tags,
-          disliked_tags = excluded.disliked_tags, disliked_categories = excluded.disliked_categories, updated_at = now()
+          disliked_categories = excluded.disliked_categories, updated_at = now()
       where ai_profile.recipient_profiles.source_version <= excluded.source_version""")
 
 
+def _tag(tag: str) -> str:
+    return json.dumps([{"axis": "카테고리", "tag": tag, "source": "preference", "ref": "pref"}], ensure_ascii=False)
+
+
 def test_upsert_keeps_newer_version(conn) -> None:
-    conn.execute(UPSERT, {"rid": 1, "sv": 3, "pref": '["휴대용"]', "dis": '["도서·음반"]', "cats": '[{"category_id":701,"category_name":"도서·음반"}]'})
-    conn.execute(UPSERT, {"rid": 1, "sv": 2, "pref": '["옛것"]', "dis": "[]", "cats": "[]"})       # 순서 역전 → 무시
-    row = conn.execute(sa.text("select source_version, preferred_tags from ai_profile.recipient_profiles where recipient_user_id=1")).one()
-    assert row == (3, ["휴대용"])
-    conn.execute(UPSERT, {"rid": 1, "sv": 4, "pref": '["새것"]', "dis": "[]", "cats": "[]"})       # 더 새 버전 → 덮어씀
-    assert conn.execute(sa.text("select preferred_tags from ai_profile.recipient_profiles where recipient_user_id=1")).scalar() == ["새것"]
+    conn.execute(UPSERT, {"rid": 1, "sv": 3, "pref": _tag("휴대용"), "cats": '[{"category_id":701,"category_name":"도서·음반"}]'})
+    conn.execute(UPSERT, {"rid": 1, "sv": 2, "pref": _tag("옛것"), "cats": "[]"})                 # 순서 역전 → 무시
+    row = conn.execute(sa.text("select source_version, preferred_tags -> 0 ->> 'tag' from ai_profile.recipient_profiles where recipient_user_id=1")).one()
+    assert row == (3, "휴대용")
+    conn.execute(UPSERT, {"rid": 1, "sv": 4, "pref": _tag("새것"), "cats": "[]"})                 # 더 새 버전 → 덮어씀
+    assert conn.execute(sa.text("select preferred_tags -> 0 ->> 'tag' from ai_profile.recipient_profiles where recipient_user_id=1")).scalar() == "새것"
 
 
 # ---- recipient_reviews · 리뷰 신호 열 (0005) — 원문은 저장하지 않는다(10-11 결정 B) ---------------------------------------
@@ -71,7 +81,8 @@ def test_recipient_reviews_schema(conn) -> None:
     cols = conn.execute(sa.text("""
         select column_name, col_description(('ai_profile.' || table_name)::regclass, ordinal_position)
         from information_schema.columns where table_schema='ai_profile' and table_name='recipient_reviews' order by ordinal_position""")).all()
-    assert [c[0] for c in cols] == ["recipient_user_id", "product_id", "rating", "review_hash", "position", "created_at", "updated_at"]
+    assert [c[0] for c in cols] == ["recipient_user_id", "product_id", "rating", "review_hash", "position", "created_at", "updated_at",
+                                    "review_text_clean"]                       # 0006: 리뷰 글 정리본
     assert all(c[1] for c in cols if c[0] not in ("created_at", "updated_at"))   # 업무 열마다 주석 (팀 규칙)
     pk = conn.execute(sa.text("""
         select string_agg(a.attname, ',' order by array_position(i.indkey, a.attnum))
@@ -114,7 +125,8 @@ def test_profile_runs_schema(conn) -> None:
         select column_name from information_schema.columns
         where table_schema='ai_profile' and table_name='profile_runs' order by ordinal_position""")).all()]
     assert names == ["id", "recipient_user_id", "source_version", "input_hash", "status", "attempt", "catalog_version_id",
-                     "callback_payload", "callback_hash", "callback_attempts", "error", "created_at", "updated_at"]
+                     "callback_payload", "callback_hash", "callback_attempts", "error", "created_at", "updated_at",
+                     "tag_status", "prompt_version", "validator_version", "llm_cost_usd"]   # 0006
     idx = conn.execute(sa.text("select indexdef from pg_indexes where schemaname='ai_profile' and indexname='unique_profile_source'")).scalar()
     assert idx and "UNIQUE" in idx and "(recipient_user_id, source_version)" in idx
 

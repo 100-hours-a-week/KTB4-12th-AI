@@ -89,7 +89,7 @@ def test_v1_request_end_to_end(engine, cleanup) -> None:
         assert saved.status is RunStatus.DELIVERED and saved.callback_attempts == 1
         assert saved.search.product_ids == outcome.search.product_ids
         prof = app.state.recipient_store.get(RID)          # 수신자 프로필도 같은 실행에서 upsert
-        assert prof.source_version == 3 and prof.disliked_tags == ["출산·육아용품"]
+        assert prof.source_version == 3 and [c.category_name for c in prof.disliked_categories] == ["출산·육아용품"]
         _, products = app.state.catalog.active()
         by_id = {p.productId: p for p in products}
         assert all(by_id[i].categoryName != "출산·육아용품" for i in outcome.search.product_ids)
