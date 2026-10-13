@@ -179,8 +179,9 @@ def test_store_calls_inside_run_lock_reuse_the_lock_connection() -> None:
         profiles.upsert(RecipientProfile(recipient_user_id=1, source_version=1))
     assert engine.connects == 1                                              # 잠금 커넥션 하나뿐
     sql = [c for c in engine.conn.calls if c not in ("execution_options", "commit")]
-    assert "profile_runs" in sql[1] and "insert into" in sql[2] and "recipient_profiles" in sql[3]   # LOCK · get_run · save · upsert · UNLOCK
-    assert sql[0].startswith("select pg_try_advisory_lock") and sql[-1].startswith("select pg_advisory_unlock")
+    assert "profile_runs" in sql[1] and "insert into" in sql[2]                # LOCK · get_run · save · (저장 잠금 · upsert · 해제) · UNLOCK
+    assert sql[3].startswith("select pg_advisory_lock") and "recipient_profiles" in sql[4] and sql[5].startswith("select pg_advisory_unlock")
+    assert sql[0].startswith("select pg_try_advisory_lock") and sql[-1].startswith("select pg_advisory_unlock") and len(sql) == 7
     assert _lock_conn() is None                                              # 나가면서 비운다
 
 

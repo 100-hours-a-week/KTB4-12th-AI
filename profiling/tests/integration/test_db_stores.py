@@ -3,6 +3,7 @@ DB가 안 떠 있으면 skip. 실행: docker compose up -d && uv run alembic upg
 
 adapter가 트랜잭션을 스스로 열므로(engine.begin) 테스트를 트랜잭션으로 감쌀 수 없다 → 시험용 수신자 ID(99xxxx)를 쓰고 끝에 지운다."""
 
+import threading
 import time
 from uuid import UUID
 
@@ -11,6 +12,7 @@ import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
 from profiling import intake, pipeline
+from profiling import stores as stores_mod
 from profiling.catalog import (
     FILE_CATALOG_VERSION_ID,
     FileCatalogReader,
@@ -243,6 +245,29 @@ def test_profile_store_inside_run_lock_is_one_atomic_statement(stores) -> None:
         profiles.upsert(_prof(3, [_rec(9, 4, 0)], rid=RID + 4))                                          # 실패 뒤에도 같은 커넥션 사용 가능
     got = profiles.get(RID + 4)
     assert got.source_version == 3 and [r.product_id for r in got.reviews] == [9] and got.gift_preference_hash is None
+
+
+def test_profile_store_overlapping_versions_leave_no_stale_review(stores, engine) -> None:
+    """이슈 2026-10-13_1706 — v3 저장이 커밋되기 전에 v4 저장이 시작돼도, v4 가 v3 가 새로 넣은 리뷰(상품 1)를 지운다.
+    v3 를 '저장 도중'으로 붙잡아 두려고 다른 커넥션에서 upsert() 와 같은 순서(수신자 잠금 → 저장 문장)를 밟되 커밋을 늦춘다.
+    수신자 잠금이 없던 때는 v4 의 저장 문장이 v3 커밋 전 스냅샷으로 시작해 리뷰가 [1, 2] 로 남았다."""
+    _, profiles = stores
+    profiles.upsert(_prof(2, [_rec(2, 5, 0)]))
+    key = stores_mod._profile_lock_key(RID + 3)
+    holder = engine.connect()
+    holder.execute(stores_mod._PROFILE_LOCK, {"k": key})
+    holder.execute(stores_mod._PROFILE_SAVE, stores_mod.save_params(_prof(3, [_rec(1, 5, 0), _rec(2, 5, 1)])))   # 커밋 전
+    done = threading.Event()
+    t = threading.Thread(target=lambda: (profiles.upsert(_prof(4, [_rec(2, 5, 0)])), done.set()))
+    t.start()
+    time.sleep(0.5)
+    assert not done.is_set()                                               # v4 는 수신자 잠금에서 기다린다
+    holder.commit()
+    holder.execute(stores_mod._PROFILE_UNLOCK, {"k": key})
+    holder.close()
+    t.join(10)
+    assert done.is_set()
+    assert profiles.get(RID + 3).source_version == 4 and [r[0] for r in _review_rows(engine, RID + 3)] == [2]
 
 
 def test_profile_store_delete_cascades_reviews(stores, engine) -> None:

@@ -15,6 +15,7 @@
     upsert 실패 시 pipeline 이 실행 기록을 FAILED 로 되돌리는 보상이 그 역할을 한다(DB_전환_설명 §6).
   - 프로필 + 리뷰 두 표는 **CTE 한 문장**(_PROFILE_SAVE)으로 쓴다(10-11) — 잠금 커넥션(AUTOCOMMIT)에서도 한 문장이라 원자적이고
     왕복 1번, 풀에서 커넥션을 더 꺼내지 않는다(슬롯당 커넥션 1개 유지). 트랜잭션 세 문장(BEGIN·3·COMMIT)이면 왕복 5번 + 커넥션 1개 더.
+    그 문장 앞뒤로 수신자 잠금을 건다(10-13, _PROFILE_LOCK) — 같은 수신자의 두 번호 저장이 겹쳐 지운 리뷰가 남지 않게. 왕복 1 → 3.
 """
 
 from __future__ import annotations
@@ -319,7 +320,8 @@ REVIEWS_TABLE = "ai_profile.recipient_reviews"
 
 # 프로필 + 리뷰 스냅샷을 한 문장으로 (0005 · v2 4단계). 덩어리 셋:
 #   p  프로필 upsert. 버전 가드(기존 <= 새)에 막히면 RETURNING 이 0행 → 아래 d·u 가 p 를 조건으로 걸어 아무것도 하지 않는다
-#      (옛 분석이 새 분석의 리뷰를 덮지 않게). **p 가 첫 덩어리**라 같은 수신자의 다른 버전이 동시에 와도 프로필 행 잠금에서 줄을 선다
+#      (옛 분석이 새 분석의 리뷰를 덮지 않게). **p 가 첫 덩어리**라 같은 수신자의 다른 버전이 동시에 와도 프로필 행 잠금에서 줄을 선다.
+#      다만 줄을 선 뒤에도 d 의 스냅샷은 문장 시작 때 것이다 — 그래서 upsert() 가 이 문장 **앞에** 수신자 잠금을 건다(_PROFILE_LOCK)
 #   d  이번에 안 온 상품의 리뷰 삭제. pids 가 빈 배열이면 전부 삭제(<> all('{}') 는 참)
 #   u  이번에 온 리뷰 upsert (incoming = 배열 넷을 unnest 한 행들). d 와 u 의 대상은 겹치지 않는다(안 온 상품 / 온 상품) —
 #      한 문장에서 같은 행을 두 번 건드리면 PostgreSQL 이 거부하므로 이 성질이 필요하다
@@ -373,6 +375,52 @@ _PROFILE_SAVE = sa.text(f"""
     )
     select count(*) from p""")
 
+# 같은 수신자의 저장끼리 줄 세우기(이슈 2026-10-13_1706). _PROFILE_SAVE 의 d 는 문장 시작 때 스냅샷으로 리뷰를 훑는다 — 앞선 저장이
+# 커밋되기 전에 문장이 시작되면 그 저장이 새로 넣은 리뷰 행을 못 보고 남긴다(프로필은 v4 인데 리뷰에 v3 상품). 잠금을 **먼저** 얻고 나서
+# 문장을 시작하면 스냅샷이 앞선 저장의 커밋 뒤가 된다. 세션 잠금 · 문장 셋(잠금 · 저장 · 해제) — 트랜잭션을 열지 않아 잠금 커넥션(AUTOCOMMIT)
+# 에서 그대로 돈다. 기다리는 시간은 lock_timeout 이 상한(main._connect_db). 키는 run_lock 의 (수신자, 버전) 키와 다른 글자에서 만든다.
+_PROFILE_LOCK = sa.text("select pg_advisory_lock(:k)")
+_PROFILE_UNLOCK = sa.text("select pg_advisory_unlock(:k)")
+
+
+def _profile_lock_key(recipient_user_id: int) -> int:
+    """수신자 → 저장 잠금 키(부호 있는 64비트). run_lock 의 키(`"<수신자>:<버전>"`)와 겹치지 않게 접두를 붙여 해시한다."""
+    digest = hashlib.sha256(f"profile:{recipient_user_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+def _save_locked(conn: sa.Connection, key: int, params: dict[str, Any]) -> int:
+    """잠금 → _PROFILE_SAVE → 해제. 저장이 실패해도(CHECK 등) 해제한다. 해제에 실패한 커넥션은 버린다 — 풀에 돌아가면 그 수신자가 영영 막힌다."""
+    conn.execute(_PROFILE_LOCK, {"k": key})
+    try:
+        return conn.execute(_PROFILE_SAVE, params).scalar_one()      # count(*) 는 늘 한 행
+    finally:
+        try:
+            conn.execute(_PROFILE_UNLOCK, {"k": key})
+        except sa.exc.SQLAlchemyError:
+            log.exception("수신자 저장 잠금 해제 실패 — 이 커넥션을 버린다")
+            conn.invalidate()
+
+
+def save_params(profile: RecipientProfile) -> dict[str, Any]:
+    """RecipientProfile → _PROFILE_SAVE 의 파라미터(배열 다섯 · JSON 문자열). upsert() 와 경합 시험이 같이 쓴다."""
+    rv = profile.reviews
+    return {
+        "rid": profile.recipient_user_id, "sv": profile.source_version,
+        "preferred": json.dumps([t.model_dump() for t in profile.preferred_tags], ensure_ascii=False),
+        "categories": json.dumps([c.model_dump() for c in profile.disliked_categories], ensure_ascii=False),
+        "pref_hash": profile.gift_preference_hash,
+        "scores": json.dumps([c.model_dump() for c in profile.category_scores]),
+        "pids": [r.product_id for r in rv], "ratings": [r.rating for r in rv],
+        "hashes": [r.review_hash for r in rv], "positions": [r.position for r in rv],
+        "texts": [r.text_clean for r in rv],
+        "pref_clean": profile.gift_preference_clean, "guard_version": profile.guard_version,
+        "tag_status": profile.tag_status, "prompt_version": profile.prompt_version, "validator_version": profile.validator_version,
+        "recommended": json.dumps(profile.recommended_product_ids),
+        "catalog_version_id": profile.catalog_version_id,
+    }
+
+
 # 프로필 + 리뷰를 한 번에 읽는다(왕복 1). 리뷰는 자리 순서로 json 배열에 담는다 — 없으면 []
 _PROFILE_GET = sa.text(f"""
     select p.recipient_user_id, p.source_version, p.preferred_tags, p.disliked_categories,
@@ -398,24 +446,18 @@ class DbRecipientProfileStore:
     # ---- ports.RecipientProfileStore --------------------------------------------
 
     def upsert(self, profile: RecipientProfile) -> None:
-        """프로필 + 리뷰 스냅샷을 한 문장으로(_PROFILE_SAVE). 버전 가드에 막히면 두 표 모두 그대로 — 경고 로그만(예외 아님).
-        리뷰 하나라도 DB 제약에 걸리면 문장 전체가 실패해 예외가 난다 → pipeline 이 실행 기록을 FAILED 로 되돌린다."""
+        """프로필 + 리뷰 스냅샷을 한 문장으로(_PROFILE_SAVE), 그 앞뒤로 수신자 잠금(_save_locked). 버전 가드에 막히면 두 표 모두 그대로 —
+        경고 로그만(예외 아님). 리뷰 하나라도 DB 제약에 걸리면 문장 전체가 실패해 예외가 난다 → pipeline 이 실행 기록을 FAILED 로 되돌린다.
+        잠금을 lock_timeout 안에 못 얻어도 예외(같은 처리)."""
         rv = profile.reviews
-        params = {
-            "rid": profile.recipient_user_id, "sv": profile.source_version,
-            "preferred": json.dumps([t.model_dump() for t in profile.preferred_tags], ensure_ascii=False),
-            "categories": json.dumps([c.model_dump() for c in profile.disliked_categories], ensure_ascii=False),
-            "pref_hash": profile.gift_preference_hash,
-            "scores": json.dumps([c.model_dump() for c in profile.category_scores]),
-            "pids": [r.product_id for r in rv], "ratings": [r.rating for r in rv],
-            "hashes": [r.review_hash for r in rv], "positions": [r.position for r in rv],
-            "texts": [r.text_clean for r in rv],
-            "pref_clean": profile.gift_preference_clean, "guard_version": profile.guard_version,
-            "tag_status": profile.tag_status, "prompt_version": profile.prompt_version, "validator_version": profile.validator_version,
-            "recommended": json.dumps(profile.recommended_product_ids),
-            "catalog_version_id": profile.catalog_version_id,
-        }
-        written = _one(self._engine, _PROFILE_SAVE, params, lambda r: r.scalar_one(), write=True)   # count(*) 는 늘 한 행
+        params = save_params(profile)
+        key = _profile_lock_key(profile.recipient_user_id)
+        conn = _lock_conn()
+        if conn is not None:                                      # 운영 경로 — run_lock 의 잠금 커넥션(AUTOCOMMIT)에서 왕복 3
+            written = _save_locked(conn, key, params)
+        else:                                                     # 잠금 밖(시험 · 도구) — 풀에서 꺼내 같은 방식으로
+            with _autocommit(self._engine) as c:
+                written = _save_locked(c, key, params)
         if written == 0:   # 가드에 걸림 = 기존 행이 더 새 버전 (순서 역전). 리뷰도 건드리지 않았다
             log.warning("recipient_profiles recipient=%s source_version=%s 는 기존 행보다 낮아 무시(리뷰 포함)",
                         profile.recipient_user_id, profile.source_version)
