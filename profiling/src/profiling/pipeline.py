@@ -427,10 +427,16 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
     원문(리뷰 글 · 취향 문장 · 모델 출력 · 태그 글자)은 로그에 남기지 않는다 — 개수 · 시간 · 모델 · 분류만."""
     rid, sv = rq.recipient_user_id, rq.source_version
     empty = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_tags=disliked_names, log=[])
-    prompt, ratings = tagging.build_prompt(rq, {p.productId: p for p in products})
+    prep = tagging.prepare(rq, {p.productId: p for p in products})       # 가드레일: 개인정보 · 욕설 가림, 의미 없는 글 버림, 인젝션 의심 표시
+    prompt, ratings = prep.prompt, prep.ratings
     pv = f"{tagging.PROMPT_VERSION}@{tagger.model}"
+    g = prep.guard
     head = (f"recipient={rid} source_version={sv} model={tagger.model} prompt={tagging.PROMPT_VERSION} "
-            f"reviews={len(rq.reviews)} pref={'y' if rq.gift_preference else 'n'} prompt_chars={len(prompt)}")
+            f"reviews={len(rq.reviews)} pref={'y' if prep.has_pref else 'n'} prompt_chars={len(prompt)} "
+            f"guard={g['version']}:{_counts(Counter(g['counts']))}")
+    if not tagging.worth_llm(prep):                  # 근거가 될 것(취향 문장 · 4~5점 리뷰)이 없다 — 부르지 않는다(비용 0, 결과는 어차피 빈 태그)
+        log.info("tag_extract skip_no_signal %s — 정리 뒤 취향 문장 없음 · 4~5점 리뷰 없음, LLM 안 부름", head)
+        return TagRun(empty, [], pv, "skip_no_signal")
     t0 = time.perf_counter()
     try:
         reply = tagger.extract(tagging.SYSTEM, prompt, tagging.SCHEMA)
@@ -445,11 +451,13 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
     wall_ms = (time.perf_counter() - t0) * 1000
     raw, usage = (reply.text, reply.usage) if isinstance(reply, TagReply) else (str(reply), None)
     parsed, parse_err = tagging.parse_report(raw)
-    keep, drop = tagging.validate(parsed, ratings, bool(rq.gift_preference))
+    keep, drop = tagging.validate(parsed, ratings, prep.has_pref)
     validation = tagging.to_validation(keep, drop, disliked_names)
     axes = Counter(t["axis"] for t in keep)
     drops = Counter(tagging.drop_reason_key(t.get("drop")) for t in drop)
     status = parse_err if parse_err in ("bad_json", "no_tags_list") else "empty" if not keep else "ok"
+    if "injection_suspect" in g["counts"] and status == "ok":
+        log.warning("tag_extract injection_suspect recipient=%s source_version=%s — 입력에 지시문 꼴, 태그 %d개는 검증기 통과분만", rid, sv, len(keep))
     level = logging.INFO if status == "ok" else logging.WARNING  # 깨진 출력 · 전부 버림은 품질 장애 — 경고로 올린다
     log.log(level, "tag_extract %s %s wall_ms=%.0f %s out_chars=%d parsed=%d kept=%d dropped=%d axes=%s drops=%s%s", status, head, wall_ms,
             _usage_fields(usage), len(raw), len(parsed), len(keep), len(drop), _counts(axes), _counts(drops),

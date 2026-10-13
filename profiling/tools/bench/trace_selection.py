@@ -76,8 +76,8 @@ def main() -> int:
     # 4) 태그
     logs = sorted(DEFAULT_OUT.glob(f"태그추출_{re.sub(r'[^\w.-]', '_', a.tagger)}_2*.json"))
     raw = json.loads(logs[-1].read_text())["users"][u.no]["raw"]
-    _, ratings = tagging.build_prompt(rq, by_id)
-    keep, drop = tagging.validate(tagging.parse(raw), ratings, bool(u.preference))
+    prep = tagging.prepare(rq, by_id)
+    keep, drop = tagging.validate(tagging.parse(raw), prep.ratings, prep.has_pref)
     tags = tagging.tags_of(tagging.to_validation(keep, drop, []))
     P(f"4) 태그({a.tagger}): " + (" · ".join(f"{t.axis}:{t.text}" for t in tags) or "없음 → 순위대로"))
     out["tags"] = [[t.axis, t.text] for t in tags]

@@ -201,6 +201,7 @@ def run_mode(mode: str, users: list[User], engine: sa.Engine, model_env: dict[st
             prof = app.state.recipient_store.get(rid)
             tags, prompt_version = _tags_from_spy(spy, rq, products)
             usage = _usage_from_spy(spy, rq, products)
+            llm_prompt = _prompt_sent(spy, rq, products)          # LLM 에 실제로 보낸 프롬프트(없으면 None — 안 불렀음)
             search, rule = pipeline.make_pool(rq, products, 30, cv, dislike_mode=pipeline.DislikeMode(mode), scores=scores,
                                               pool_strategy=strategy, tags=tags, embedding=app.state.embedding)
             at = {s.product.productId: (k, s) for k, s in enumerate(ranked, start=1)}
@@ -212,7 +213,7 @@ def run_mode(mode: str, users: list[User], engine: sa.Engine, model_env: dict[st
                             "config": {"tagger": get_settings().TAGGER, "model": get_settings().TAGGER_MODEL if get_settings().TAGGER != "none" else "",
                                        "strategy": strategy.value},
                             "prompt_version": prompt_version, "stored_tags": list(prof.preferred_tags) if prof else None,
-                            "usage": usage, "warnings": app_warnings})
+                            "usage": usage, "llm_prompt": llm_prompt, "warnings": app_warnings})
     plog.removeHandler(collector)
     plog.propagate = propagate
     return results
@@ -265,11 +266,12 @@ def _tags_from_spy(spy, rq, products) -> tuple[list, str | None]:
 
     if spy is None:
         return [], None
-    prompt, ratings = tagging.build_prompt(rq, {p.productId: p for p in products})
+    prep = tagging.prepare(rq, {p.productId: p for p in products})
+    prompt, ratings = prep.prompt, prep.ratings
     raw = spy.raws.get(prompt)
     if raw is None:
         return [], None
-    keep, drop = tagging.validate(tagging.parse(raw), ratings, bool(rq.gift_preference))
+    keep, drop = tagging.validate(tagging.parse(raw), ratings, prep.has_pref)
     return tagging.tags_of(tagging.to_validation(keep, drop, [])), f"{tagging.PROMPT_VERSION}@{spy.model}"
 
 
@@ -280,6 +282,16 @@ def _usage_from_spy(spy, rq, products):
     if spy is None:
         return None
     return spy.usages.get(tagging.build_prompt(rq, {p.productId: p for p in products})[0])
+
+
+def _prompt_sent(spy, rq, products) -> str | None:
+    """그 요청에 LLM 으로 보낸 프롬프트 — 가드레일 정리 뒤의 글. 추출기가 꺼졌거나 부르지 않았으면 None."""
+    from profiling import tagging
+
+    if spy is None:
+        return None
+    prompt = tagging.prepare(rq, {p.productId: p for p in products}).prompt
+    return prompt if prompt in spy.raws else None
 
 
 def usage_summary(results) -> dict[str, Any] | None:
@@ -483,6 +495,12 @@ def check_run(r: dict[str, Any], engine: sa.Engine, other: dict[str, Any] | None
             out.append(("기대", name, ok, f"태그 {texts or '[]'} · 맞은 것 {hit or '-'}"))
         elif e.kind == "태그_없음":
             out.append(("기대", name, not texts, f"태그 {texts or '[]'}"))
+        elif e.kind == "LLM_호출_없음":                      # 가드레일: 근거가 될 것이 없으면 LLM 을 부르지 않는다(10-13)
+            out.append(("기대", name, r.get("llm_prompt") is None, "호출 없음" if r.get("llm_prompt") is None else "호출됨"))
+        elif e.kind == "프롬프트_제외":                       # 가드레일: LLM 으로 보낸 글에 대상(정규식)이 없어야 한다 — 개인정보 · 욕설
+            sent = r.get("llm_prompt") or ""
+            hit = re.findall(e.target, sent)
+            out.append(("기대", name, not hit, f"보낸 프롬프트 {len(sent)}자 · 발견 {len(hit)}" + ("" if sent else " (호출 없음)")))
         elif e.kind == "이름_최소":
             topn, k = (int(x) for x in e.value.split(":"))
             cnt = sum(1 for p in prods[:topn] if re.search(e.target, p.name))

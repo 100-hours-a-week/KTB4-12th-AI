@@ -40,10 +40,16 @@ AXES, PROMO, SYSTEM, SCHEMA, validate = tagging.AXES, tagging.PROMO, tagging.SYS
 
 
 def user_prompt(u, info: dict[int, ProductRecord]) -> tuple[str, dict[str, int]]:
-    """시나리오 사용자 하나 → (프롬프트, ref → 별점). 코어 tagging.build_prompt 그대로."""
+    """시나리오 사용자 하나 → (프롬프트, ref → 별점). 코어 tagging.build_prompt 그대로(가드레일 정리 포함)."""
     rq = ProfileRequest(recipient_user_id=1, source_version=1, gift_preference=u.preference, disliked_categories=[],
                         reviews=[Review(product_id=r["productId"], rating=r["rating"], review_text=r["reviewText"]) for r in u.reviews])
     return tagging.build_prompt(rq, info)
+
+
+def _has_pref(u, info) -> bool:
+    """가드레일 정리 뒤 취향 문장이 남았나(의미 없는 글이면 False) — 코어와 같은 기준으로 검증."""
+    rq = ProfileRequest(recipient_user_id=1, source_version=1, gift_preference=u.preference, disliked_categories=[], reviews=[])
+    return tagging.prepare(rq, info).has_pref
 
 
 def extract(model: str, users, info) -> dict[str, Any]:
@@ -68,7 +74,7 @@ def extract(model: str, users, info) -> dict[str, Any]:
                 tags = json.loads(raw).get("tags", [])
             except json.JSONDecodeError:
                 tags = []
-            keep, drop = validate(tags, ratings, bool(u.preference))
+            keep, drop = validate(tags, ratings, _has_pref(u, info))
             out["users"][u.no] = {"seconds": round(dt, 3), "eval_tokens": body.get("eval_count"), "prompt": prompt, "raw": raw,
                                   "tags": keep, "dropped": drop}
             print(f"  {model} {u.no} {dt:5.1f}s · 태그 {len(keep)} · 버림 {len(drop)} | " + " · ".join(f"{t['axis']}:{t['tag']}" for t in keep))
@@ -98,7 +104,7 @@ def extract_openrouter(model: str, users, info, repeat: int = 1) -> dict[str, An
                 except TagExtractError as e:
                     runs.append({"error": e.kind, "usage": e.usage._asdict() if e.usage else None})
                     continue
-                keep, drop = validate(tagging.parse(reply.text), ratings, bool(u.preference))
+                keep, drop = validate(tagging.parse(reply.text), ratings, _has_pref(u, info))
                 runs.append({"raw": reply.text, "keep": keep, "drop": drop, "usage": reply.usage._asdict() if reply.usage else None})
             ok = [r for r in runs if "error" not in r]
             first = ok[0] if ok else {"raw": "", "keep": [], "drop": []}
@@ -129,7 +135,7 @@ def from_responses(path: Path, users, info) -> dict[str, Any]:
     for u in users:
         prompt, ratings = user_prompt(u, info)
         raw = doc["responses"].get(u.no, {"tags": []})
-        keep, drop = validate(raw.get("tags", []), ratings, bool(u.preference))
+        keep, drop = validate(raw.get("tags", []), ratings, _has_pref(u, info))
         out["users"][u.no] = {"seconds": None, "eval_tokens": None, "prompt": prompt, "raw": json.dumps(raw, ensure_ascii=False),
                               "tags": keep, "dropped": drop}
         print(f"  {doc['model']} {u.no} 태그 {len(keep)} · 버림 {len(drop)} | " + " · ".join(f"{t['axis']}:{t['tag']}" for t in keep)
