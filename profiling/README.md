@@ -9,8 +9,8 @@ Backend 가 받는 사람의 **비선호 카테고리 · 취향 문장 · 최근
 | 동작 범위 | **v2 코어** — 리뷰 별점 편향 + LLM 태그(가드레일 · 검증기) + 30개 고르기 D(비선호 하드 제외 · 리뷰한 상품 제외 · 소분류 상한 10 · 같은 모델 하나 · 태그가 있으면 임베딩 검색 + MMR). 입력 세 칸이 전부 비면 추천 0개(결정 C) |
 | 태그 추출 | **v2 = 외부 API(OpenRouter) · 3축 규격 `tag3`**(카테고리 · IP · 브랜드) — DR-037 · DR-038. 로컬 LLM(Ollama)은 v3. 추출기를 끄면(`TAGGER=none`) 별점 편향 + D 만 돈다. LLM 이 실패해도 요청은 실패하지 않는다(태그 없이 30개) |
 | BE 연동 | 실물 BE `develop`(10-13 `55dc526`)와 v2 설정으로 처음부터 끝까지 확인 — 디바운스 → 7.6 → 태그 → 30개 → 7.7 → BE `COMPLETED`, BE 30 = AI 30(집합 · 순서) · 비선호 0 · 리뷰한 상품 0. BE 통합 수정점 v0.7 동작(틱마다 `/health` 핑 · 복구 전송 · PENDING 중 새 번호)은 10-11 여섯 시나리오 통과 |
-| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `recipient_profiles`(수신자 프로필) · `recipient_reviews`(리뷰 지문, `0005`) · `ai_catalog`(상품 · 카테고리 · 적재 버전). DB 없이 뜨는 모드는 없다 |
-| 시험 | `uv run pytest -q` → **399 passed, 2 skipped**(단위 333 · 통합 66, DB 꺼져 있으면 통합 skip) |
+| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록 · 태그 상태 · 판 · LLM 비용) · `recipient_profiles`(수신자 프로필 — 취향 문장 정리본 · 축이 붙은 태그 · 태그 상태 · 추천 30개, `0006`) · `recipient_reviews`(리뷰 · 글 정리본) · `ai_catalog`(상품 · 카테고리 · 적재 버전). **원문 그대로는 저장하지 않고 가드레일 정리본만**(DR-039). 앱은 앱 전용 계정 `ai_app`(`0007` — `ai_profile` 읽기·쓰기, `ai_catalog` 읽기만)으로 접속한다. DB 없이 뜨는 모드는 없다 |
+| 시험 | `uv run pytest -q` → **420 passed, 1 skipped**(단위 339 · 통합 81, DB 꺼져 있으면 통합 skip) |
 | 문서 | **비공개(10-13).** 설계 · 시험 결과 · 결정 기록은 팀 비공개 폴더에서 관리하고 이 저장소에는 코드 · 시험 · 이 README · `이름_대조표.md` 만 둔다. 아래에 링크 없이 나오는 문서 이름은 그 비공개 문서다 |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat · Search · Runtime 은 팀원 |
 
@@ -22,8 +22,8 @@ Backend 가 받는 사람의 **비선호 카테고리 · 취향 문장 · 최근
 cd profiling
 uv sync                                       # .venv + 의존성 (uv.lock 그대로)
 docker compose up -d ai-db                    # 로컬 PostgreSQL 16 + pgvector (Docker Desktop)
-uv run alembic upgrade head                   # 0001 ~ 0005
-uv run pytest -q                              # 399 passed, 2 skipped
+uv run alembic upgrade head                   # 0001 ~ 0007 (0007 앱 계정 ai_app — 아래 '앱 계정')
+uv run pytest -q                              # 420 passed, 1 skipped
 uv run ruff check src tests tools alembic
 ```
 
@@ -49,7 +49,7 @@ uv run uvicorn profiling.main:app --port 8000
 ```
 
 기동 로그에서 확인: `카탈로그 로드 source=db … products=4231` · `태그 규격 tag3 축=카테고리·IP·브랜드 판=tag3-…` · `태그 추출기 openrouter model=…` · `임베딩 …`.
-`curl localhost:8000/health` → `status ok` · `catalog.active true` · `store.connected true` · `store.migration "0005"`.
+`curl localhost:8000/health` → `status ok` · `catalog.active true` · `store.connected true` · `store.migration "0007"`.
 
 ### 컨테이너로 (배포와 같은 모양)
 
@@ -75,7 +75,8 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
       판촉 단어 · 욕설/개인정보/문장형 태그 버림 · 중복 제거)
    4. **30개 고르기** — 입력 세 칸이 전부 비면 0개(결정 C). 아니면 D: 비선호 대분류 하드 제외 · 리뷰한 상품 제외 · 소분류 최대 10 · 같은 브랜드+모델 코드 하나 ·
       태그와 임베딩이 있으면 태그마다 비슷한 상품 50개 → 점수(유사도 + 인기 + 편향) → MMR(λ 0.7). 모자라면 감점 모드에서만 비선호로 채움
-   5. 결과 `RESULT_READY` 저장(콜백 본문을 먼저 커밋) → 수신자 프로필 · 리뷰 지문 upsert(낮은 버전은 무시)
+   5. 결과 `RESULT_READY` 저장(콜백 본문 · 태그 상태 · 판 · LLM 비용을 먼저 커밋) → 수신자 프로필 upsert(낮은 버전은 무시) — 취향 문장 · 리뷰 글은
+      **가드레일 정리본**, 태그는 축 · 출처와 함께, 태그 단계 결과(`tag_status`), 추천 30개 번호. 챗봇 조회 API 가 이 한 줄을 읽는다(DR-039)
 4. **콜백** `POST 7.7` → `200 DELIVERED` · `409 SUPERSEDED` · `4xx FAILED` · `5xx/네트워크`는 같은 슬롯에서 최대 3번(0.5초 · 2초 뒤). `FAILED` 는 콜백하지 않는다(Backend 가 복구 전송으로 다시 묻는다).
 
 모든 단계는 원문(리뷰 글 · 취향 문장 · LLM 출력)을 로그에 남기지 않는다 — 태그 단계는 한 줄 `tag_extract <상태> recipient= … prompt=<판> … in_tok= out_tok= llm_ms= cost_usd= kept= dropped= axes= drops=`.
@@ -100,7 +101,7 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 | `catalog.py` · `stores.py` · `backend.py` | 카탈로그(파일 · DB) · PostgreSQL 저장소 · 7.7 HTTP 어댑터 |
 | `schemas.py` · `types.py` · `ports.py` · `settings.py` | HTTP DTO(camelCase) · 내부 타입(snake_case) · 포트 · 설정(`PROFILING_*`) |
 
-`alembic/versions/` — `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog · `0004` 열 주석 · `0005` recipient_reviews.
+`alembic/versions/` — `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog · `0004` 열 주석 · `0005` recipient_reviews · `0006` 챗봇 조회용(정리본 · 축 태그 · 태그 상태 · 30개 · 판 · 실행별 비용) · `0007` 앱 전용 계정 `ai_app`(권한만, 표 변경 없음).
 
 **이름 규칙.** HTTP 경계(`schemas.py`)만 camelCase, 나머지는 snake_case. 변환은 `pipeline.to_internal()`(7.6 → 내부) · `backend.to_callback()`(내부 → 7.7) 두 곳뿐. 세부는 [이름_대조표.md](이름_대조표.md).
 
@@ -115,7 +116,10 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 
 | 설정 | 기본값 | 뜻 |
 |---|---|---|
-| `DATABASE_URL` | 로컬 compose 값 | PostgreSQL. 연결 실패면 앱이 뜨지 않는다 |
+| `DATABASE_URL` | 로컬 compose 값(소유자) | PostgreSQL. 연결 실패면 앱이 뜨지 않는다. 앱은 `ai_app`, 마이그레이션 · 카탈로그 적재는 소유자 계정 |
+| `DB_REFUSE_SUPERUSER` | false | true 면 앱이 슈퍼유저로 접속할 때 기동 거부(compose · 서버는 true). false 면 경고만 |
+| `DB_POOL_SIZE` · `DB_MAX_OVERFLOW` · `DB_POOL_TIMEOUT_S` | 슬롯 + `IO_THREADS` · 2 · 10 | 슬롯마다 커넥션 1개를 분석 내내 쥔다. 합이 슬롯 + `IO_THREADS` 보다 작으면 기동 거부 |
+| `DB_STATEMENT_TIMEOUT_MS` · `DB_LOCK_TIMEOUT_MS` · `DB_IDLE_IN_TX_TIMEOUT_MS` · `DB_CONNECT_TIMEOUT_S` | 5000 · 2000 · 60000 · 5 | 세션마다 거는 시간 상한(접속 옵션). 넘으면 그 문장만 실패 → 실행 기록 FAILED |
 | `CATALOG_SOURCE` | `file` | `db` 가 배포 경로(`ai_catalog`). `file` 은 예시 111건(`tests/fixtures/catalog_sample.json`) |
 | `BACKEND_BASE_URL` · `SERVICE_TOKEN` | fake_backend · 빈 값 | **빈 토큰이면 7.6 토큰 검사를 건너뛴다 — 로컬 전용.** 개발 · 운영 서버는 반드시 넣는다 |
 | `TAGGER` · `TAGGER_MODEL` · `TAGGER_TIMEOUT_S` | `none` · `gemma4:12b` · 120 | 태그 추출기(`none` · `ollama` · `openrouter`). 외부 API 는 상한 30초 권장 |
@@ -137,6 +141,7 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 | 입력이 전부 비면 | 추천 0개 콜백 — BE 는 0행 저장 + 인기순 대체 | 결정 C(10-09) |
 | 비선호 | D 에서 하드 제외(감점 모드는 30개를 못 채울 때만 감점 순서로 채움). 운영 감점 전환은 BE V2 배포 시 | 10-12 · 10-11 |
 | 리뷰한 상품 | 추천하지 않는다(별점 · 태그는 취향 신호로만) | 10-12 |
+| 사용자 입력 보관 | **원문 그대로는 저장하지 않는다** — 취향 문장 · 리뷰 글은 가드레일 정리본(개인정보 · 욕설 가림, 의미 없는 글 · 인젝션 의심은 NULL)만, 바뀜 판정은 원문 지문(sha256). 사람당 최신 한 벌. 회원 탈퇴 시 삭제 방식은 팀 논의 중 | DR-039 · OPEN-13 |
 | 같은 번호 재요청 | 재분석 없이 재전송 · 더 새 번호가 전달되면 옛 미전달 행 `SUPERSEDED` | 통합 수정점 v0.7 |
 | 계약 불일치 | HTTP 코드는 계약대로, 원인은 내부 코드 `ErrorCode`(`CONTRACT_7_6_UNKNOWN_FIELD` · `CONTRACT_7_7_REJECTED` · `CONTRACT_7_9_SCHEMA`) | 09-22 |
 
@@ -164,6 +169,7 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 ## 7. 배포 · 보안 주의
 
 - **토큰.** `SERVICE_TOKEN` 이 비면 토큰 검사를 건너뛰고, compose 기본값 `dev-token` 은 공개된 값이다 — 개발 · 운영 서버는 반드시 다른 값을 넣는다(앱 기동 검사는 다음 할 일).
+- **DB 계정.** 앱은 `ai_app`(0007)으로 접속하고 `PROFILING_DB_REFUSE_SUPERUSER=true` 로 슈퍼유저 접속을 막는다. `ai_app` 비밀번호는 마이그레이션 때 `PROFILING_APP_DB_PASSWORD` 로 넣는다(compose 기본값 `ai_app_password` 는 공개된 값 — 서버는 반드시 다른 값). 이미 0007 이 돈 DB 는 소유자 계정으로 `ALTER ROLE ai_app LOGIN PASSWORD '…'`. 마이그레이션은 표 잠금을 5초까지만 기다린다(`PROFILING_MIGRATE_LOCK_TIMEOUT`).
 - **키 · `.env`.** 저장소에 두지 않는다(`.gitignore`). OpenRouter 키는 헤더로만 보내고 로그 · 예외 · repr 에 남기지 않는다.
 - **외부로 나가는 것.** LLM 에는 가드레일을 거친 프롬프트만 간다. 원문은 로그에 없다. LLM 추적 도구(LangSmith 등)는 로컬 · 개발 전용, 운영 금지(DR-036).
 - **이미지.** 시험 · 문서 · 시험 도구 · 시험 결과물은 넣지 않는다(`.dockerignore`). 비루트(uid 10001).
@@ -178,8 +184,8 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 | 2 | **추천 선택 가중** — IP · 브랜드 · 카테고리 축 가중(또는 IP 몫). 리뷰 상품의 카테고리 태그가 캐릭터 취향을 밀어내는 문제 | `selection.AXIS_WEIGHT` · `_embedding_pick` |
 | 3 | **운영 기동 검사** — `PROFILING_ENV=prod` 에서 빈 토큰 · `dev-token` 이면 기동 실패 | `settings.py` · `main.py` |
 | 4 | **부하 시험(LLM 흉내)** — 외부 API 응답 시간을 흉내 낸 추출기로 슬롯 · 대기열 · 틱 크기 확정 | 브랜치 `test/v2-profiling-loadtest` |
-| 5 | **0006 마이그레이션** — 프롬프트 판 · 축 · 리뷰별 추출 결과 저장(캐시) | `alembic` · `stores.py` · `types.py` |
+| 5 | **태그 재시도 · 리뷰 캐시** — `tag_status` 가 실패면 저장된 정리본으로 AI 가 스스로 다시 뽑기(결정 C), 안 바뀐 리뷰는 LLM 생략 | `pipeline.py` · `stores.py` · `0008` |
 | 6 | 외부 LLM 모델 확정(3축 기준 재비교) · 리뷰 캐시 | 운영 설정 |
 | 7 | BE V2 배포 시 — 7.6 키 규칙 2단계 · 비선호 감점 모드 전환 | `schemas.py` · 운영 설정 |
-| 8 | 챗봇 프로필 조회 API(원문 + 분석 결과, 상품은 번호만) | `intake.py` 또는 별도 라우터 |
+| 8 | **챗봇 프로필 조회 API** — 0006 데이터(정리본 + 축 태그 + 상태 + 30개 번호)를 별도 읽기 토큰으로. 상품 이름은 챗봇이 번호로 | 별도 라우터 · `settings.py` |
 | 9 | 팀원 앱과 합치기 — 라우터 · 어댑터만 옮긴다 | `main.py` · 설정 이름 |
