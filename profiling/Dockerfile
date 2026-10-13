@@ -4,7 +4,8 @@
 #
 # 마이그레이션은 **이 이미지의 다른 명령**으로 돌린다(compose의 ai-migrate) — 앱 시작과 섞지 않는다.
 # 앱이 여러 개로 늘어도 마이그레이션은 한 번만 돌아야 하기 때문이다.
-FROM python:3.12-slim-bookworm
+# Python 3.13 — 팀 개발 환경 통일(09-23 결정, product-search 와 같은 판). 로컬 .python-version · pyproject requires-python 과 같이 바꾼다
+FROM python:3.13-slim-bookworm
 
 # uv — 로컬 개발과 같은 도구·같은 uv.lock 을 쓴다. 태그를 고정해 빌드가 재현되게 한다(로컬 uv 와 같은 판).
 # 빌드에는 레지스트리 두 곳이 필요하다: docker.io(python) · ghcr.io(uv).
