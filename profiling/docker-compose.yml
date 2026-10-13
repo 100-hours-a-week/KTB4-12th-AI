@@ -52,6 +52,8 @@ services:
       PROFILING_CATALOG_SOURCE: db                  # 컨테이너 안에는 카탈로그 파일이 없다
       # Backend 주소·토큰은 배포 환경에서 넣는다. 로컬 기본값은 호스트에서 도는 fake_backend.
       PROFILING_BACKEND_BASE_URL: ${PROFILING_BACKEND_BASE_URL:-http://host.docker.internal:8081}
+      # dev-token 은 로컬 전용 기본값(공개 저장소에 적혀 있음) — 운영 · 개발 서버는 반드시 PROFILING_SERVICE_TOKEN 을 넣는다.
+      # compose 는 파일 전체 변수를 한 번에 검사해 필수(:?)로 두면 로컬 DB 만 켜는 것도 멈춘다 → 운영 차단은 앱 기동 검사로(다음 작업)
       PROFILING_SERVICE_TOKEN: ${PROFILING_SERVICE_TOKEN:-dev-token}
       PROFILING_LOG_LEVEL: ${PROFILING_LOG_LEVEL:-INFO}
     depends_on:

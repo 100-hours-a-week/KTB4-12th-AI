@@ -5,9 +5,9 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | 상태 (2026-10-12 · 브랜치 `feat/v2-profiling(AI-BE)_callback` `093ad6b`) | |
 |---|---|
 | 동작 범위 | **추천 규칙은 v1**(비선호 대분류 제외 · 재고 제외 · 조회수순 30개) + **계약은 v2**(요청서 v1.2): 취향 · 리뷰 두 칸 수신, `dislikedCategories` 키 필수(1단계), 리뷰 11개 400, 입력 세 칸이 전부 비면 추천 0개(결정 C), `/health` 두 필드 핑, 같은 번호 재요청은 재분석 없이 재전송, 더 새 번호가 전달되면 옛 미전달 행 SUPERSEDED(A5). 취향·리뷰를 읽는 단계는 코어 브랜치 |
-| BE 연동 | BE `develop` **`0871187`**(10-11, 멀티 모듈 · 발송 선점)과 여섯 시나리오 **전부 통과** → [docs/BE_연동_시험_결과_2026-10-11.md](docs/BE_연동_시험_결과_2026-10-11.md). 요청서 v1.2 ↔ 코드 대조는 그 §7 — 전환 2단계(`giftPreference` · `reviews` 키 필수)만 BE V2 배포 시(순서: BE 먼저, AI 나중) |
+| BE 연동 | BE `develop` **`0871187`**(10-11, 멀티 모듈 · 발송 선점)과 여섯 시나리오 **전부 통과** → docs/BE_연동_시험_결과_2026-10-11.md. 요청서 v1.2 ↔ 코드 대조는 그 §7 — 전환 2단계(`giftPreference` · `reviews` 키 필수)만 BE V2 배포 시(순서: BE 먼저, AI 나중) |
 | 브랜치 | 이 브랜치 = **BE 연동(콜백) 작업**. 코어(리뷰 신호 · `0005` · stores)는 `feat/v2-profiling-init`에서 따로 — 합류 시 `pipeline.py` 3)단계(0개 분기 ↔ 풀 가중) 수동 병합 한 곳 |
-| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그도 DB(`ai_catalog`, `0003`, 09-23) — 배포는 `CATALOG_SOURCE=db`, 로컬 기본만 파일(`catalog_sample.json`). 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
+| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그도 DB(`ai_catalog`, `0003`, 09-23) — 배포는 `CATALOG_SOURCE=db`, 로컬 기본만 파일(`catalog_sample.json`). 전환 설명: docs/DB_전환_설명.md |
 | 테스트 | 단위 162개(외부 의존 없음) + 통합 52개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → **214 passed, 2 skipped**(DB가 이 브랜치 head `0004`에 카탈로그가 적재된 상태일 때. 다른 브랜치가 같은 DB를 `0005`로 올려 두면 schema 비교 2개가 환경 드리프트로 실패 — 임시 Postgres에 `0004`를 올려 돌린다, 10-12) |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
 
@@ -15,13 +15,13 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 ## 1. 구조
 
+> **문서는 비공개(10-13).** 설계 · 시험 결과 · 결정 기록 · 그림(`docs/`)은 공개 저장소에 두지 않고 팀 비공개 폴더에서 관리한다. 아래에서 문서 이름이 링크 없이 나오면 그 비공개 문서를 뜻한다. 저장소에는 코드 · 시험 · 이 README · `이름_대조표.md`만 둔다.
+
 **Ports & Adapters(헥사고날).** 업무 코드는 바깥(HTTP·파일·DB)을 모르고, 바깥이 업무의 "포트(모양)"에 맞춰 들어온다. 의존 방향은 항상 안쪽.
 
-![profiling 구조](docs/assets/structure.png)
 
-> 그림 원본: `docs/assets/build_structure.py` → `structure.svg` (PNG는 Chrome 헤드리스). 모듈이 늘거나 포트가 바뀌면 스크립트를 고치고 다시 만든다.
 
-`src/profiling/` 모듈 11개(+`__init__.py`)는 위 그림의 자리(층)와 의존 방향만 보면 된다. 모듈·함수별 역할은 [docs/코드_안내서.md](docs/코드_안내서.md)와 [지도 §1](docs/파이프라인_지도/2026-10-06.md)에 있다. 나머지 폴더는 이렇다.
+`src/profiling/` 모듈 11개(+`__init__.py`)는 위 그림의 자리(층)와 의존 방향만 보면 된다. 모듈·함수별 역할은 docs/코드_안내서.md와 지도 §1에 있다. 나머지 폴더는 이렇다.
 
 | 폴더 · 파일 | 내용 |
 |---|---|
@@ -30,7 +30,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | `tools/embed_compare/` | **임베딩 비교 실험** `run.py` — 같은 시나리오(+ '태그' 시트)로 지금 점수식(S0)과 임베딩 네 방식(A · B · C · **D 비선호를 빼고 검색**)의 30개를 나란히. product-search 상품 벡터 · Node 질의 임베딩(로컬, 유료 API 없음). 절차는 [tools/embed_compare/README.md](tools/embed_compare/README.md) |
 | `tools/bench/` | **시간 백분위** `percentiles.py` — 저장 3방식 1,000회 · 앱만 7.6 200건(GC 기본 / `gc.freeze()` / 끔, 모드마다 새 프로세스) · 30개 콜백 하네스 10회 · 임베딩 질의 · D 순위 · 로컬 LLM 추출 기록 → p75 · p90 · p95 · p99 (`docs/assets/report/percentiles.json`). 서버 · LLM 호출 없음 |
 | `tools/loadtest/` | **부하 시험 하네스** `run.py` — 7.6 동시 N건 · `/health` 지연 · `profile_runs` 시각 · `pg_stat_activity` · 정리 · BE 구동 SQL 3종. 절차는 [tools/loadtest/README.md](tools/loadtest/README.md), 결과는 `docs/부하_시험_결과_2026-09-29.md`(팀 공유용 before/after) · `…_2026-09-28.md`(기준선) |
-| `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버 `drive_v07.py`** — 사용자 행동(로그인 · 비선호 저장)과 관찰(BE MySQL · AI Postgres)만 하고 서버는 바깥에서 켜고 끈다. 명령 `reset` · `s1`(정상) · `s2-observe/recover`(AI 꺼짐) · `s34-start/finish`(콜백 불통 → PENDING 중 새 번호 → 복구 전송 · A5) · `s5-start/finish`(401 → 재시작 1회 → 접음) · `s6-observe/recover`(AI DB만 꺼짐) · `report`. 10-11 결과와 왜는 [docs/BE_연동_시험_결과_2026-10-11.md](docs/BE_연동_시험_결과_2026-10-11.md). `drive.py`는 09-27 첫 드라이버(보관) |
+| `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버 `drive_v07.py`** — 사용자 행동(로그인 · 비선호 저장)과 관찰(BE MySQL · AI Postgres)만 하고 서버는 바깥에서 켜고 끈다. 명령 `reset` · `s1`(정상) · `s2-observe/recover`(AI 꺼짐) · `s34-start/finish`(콜백 불통 → PENDING 중 새 번호 → 복구 전송 · A5) · `s5-start/finish`(401 → 재시작 1회 → 접음) · `s6-observe/recover`(AI DB만 꺼짐) · `report`. 10-11 결과와 왜는 docs/BE_연동_시험_결과_2026-10-11.md. `drive.py`는 09-27 첫 드라이버(보관) |
 | `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
 | `tools/catalog/load_catalog.py` | Backend 전달 패키지 → `ai_catalog` 적재 · 회신 반영(`--id-map` · `--metrics`) |
 | `tools/catalog/import_be_ids.py` | Backend 회신 xlsx 2종 → id-map · metrics jsonl (이름으로 매칭, 1:1 보장). 결과는 `tools/catalog/returned/날짜/` |
@@ -40,30 +40,7 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 | `tests/integration/` | 진짜 PostgreSQL — 마이그레이션 결과 · upsert · 상태 규칙 · 앱 e2e. DB 꺼져 있으면 skip |
 | `alembic/versions/` | `0001` recipient_profiles(수신자 프로필) · `0002` profile_runs(실행 기록) · `0003` ai_catalog(상품·카테고리·적재 버전) · `0004` profile_runs 열 주석 정정(동작 변경 없음) |
 | `docker-compose.yml` | `ai-db`(pgvector/pg16 · `ai_chat` · 5432) · `ai-migrate`(alembic 한 번) · `ai-app`(:8000) |
-| `Dockerfile` · `.dockerignore` | 앱 이미지 — python 3.12-slim + uv(`uv.lock` 그대로) · 비루트(uid 10001) · 시험·문서는 넣지 않는다 |
-| [docs/학습_가이드/](docs/학습_가이드/) | **학습 가이드 — 처음 보는 사람은 여기부터.** 기술 스택·아키텍처·디자인 패턴·통신·동시성·병목·DB·테스트·운영·용어집·실습·패턴 유래와 판단 12장. 항목마다 개념 → 우리 코드(파일:줄) → 왜 → 대안 → 확인해 보기 |
-| [docs/코드_안내서.md](docs/코드_안내서.md) | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
-| [docs/FE_연동_시험_시나리오.md](docs/FE_연동_시험_시나리오.md) | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
-| [docs/BE_연동_시험_가이드.md](docs/BE_연동_시험_가이드.md) | **BE 실물 연동을 혼자 돌리는 절차** — DB·AI·BE 켜기, 초기화, 자동 드라이버·수동 한 바퀴·콜백 오류 응답·장애 재현, 확인 SQL, 정상값. §7에 10-08·10-11 갱신(BE는 멀티 모듈이라 `./gradlew :main-backend:bootRun`) |
-| [docs/BE_연동_시험_결과_2026-09-27.md](docs/BE_연동_시험_결과_2026-09-27.md) | **BE `develop` 실물 연동 시험** — 7.6·202·대분류 제외 정상, 7.7은 PR3 전이라 401, AI 다운 시 새 번호 반복·PENDING 고착 실측. §7 재현 절차 |
-| [docs/BE_연동_시험_결과_2026-10-08.md](docs/BE_연동_시험_결과_2026-10-08.md) | **BE `develop` v0.7 반영판 실물 시험(10-08)** — AI 꺼짐·콜백 불통·PENDING 중 재변경·7.6 401 다섯 시나리오 통과, D1·D2 해소. `/health` 두 필드가 BE 계약, 같은 번호 재전송 실측 |
-| [docs/BE_연동_시험_결과_2026-10-11.md](docs/BE_연동_시험_결과_2026-10-11.md) | **BE `develop` 멀티 모듈 · 발송 선점판 실물 시험(10-11)** — AI `624f91c` × BE `0871187`, 여섯 시나리오 전부 통과 · 결과표(어느 판을 썼나 §0) · 드라이버 결함 2 고침 · 실행 명령 `:main-backend:bootRun` |
-| [docs/FE_연동_시험_결과_2026-09-25.md](docs/FE_연동_시험_결과_2026-09-25.md) | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
-| [docs/부하_시험_결과_2026-09-29.md](docs/부하_시험_결과_2026-09-29.md) | **부하 시험 재측정 보고(팀 공유용)** — 무엇을 어디서 어떻게 왜 바꿨나(Supervisor 워커+상한 큐 · DB 왕복 34→8 · 슬롯 env) + 시나리오 9종 before/after: 느린 콜백에서 `/health` 실패 15 → 0, 굶는 동안 접수 34.5초 → 6.5ms, 300건은 큐 200에서 503, BE 실물 p50 17.5 → 6.8ms. 하네스 keep-alive 한계와 `--no-keepalive` |
-| [docs/부하_시험_결과_2026-09-28.md](docs/부하_시험_결과_2026-09-28.md) | **부하 시험 기준선과 after** — 동시 100·300 · 슬롯 1·4 · 느린 콜백(500·timeout)에서 `/health` 150초·접수 34.5초 굶음 재현(§4) → 왕복 34→8(§10·§11) → Supervisor 수정 뒤 `/health` 최대 57ms·추가 접수 13ms(§12) · BE 실물 200건. 하네스 [tools/loadtest/README.md](tools/loadtest/README.md) |
-| [docs/시퀀스_전체.md](docs/시퀀스_전체.md) | **구현된 프로파일링 전체 시퀀스** — 기동 · 성공 전체 · 접수 거절 · 분석 실패(침묵) · 콜백 4갈래 · 슬롯 (그림 6장) |
-| [docs/DB_ERD.md](docs/DB_ERD.md) | **AI가 소유한 표 구조(ERD) — 처음 보는 사람용** — 표마다 왜 생겼나·역할·어느 코드가 언제 읽고 쓰나 · 코드 ↔ 표 그림 · 키·인덱스·제약 · FK인 것과 아닌 것 · 바깥 ID 대응 · 자주 헷갈리는 것 (그림 3장) |
-| [docs/DB_전환_설명.md](docs/DB_전환_설명.md) | 메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림) |
-| [docs/BE_전달_2026-09-27.md](docs/BE_전달_2026-09-27.md) | **BE 담당자 전달본** — 이 한 장으로 연동 구현 가능 (필드·상태·재전송·트랜잭션·확인 요청) |
-| [docs/BE_연동_필드표.md](docs/BE_연동_필드표.md) | BE 전달본 색인 — v1(7.6 세 필드 · 7.7 · `profileStatus` 생애주기 · 시퀀스 5장) · v2(7.9 export) · v3(취향·리뷰) |
-| [docs/프로파일링_코어_시험_결과보고서_2026-10-12.md](docs/프로파일링_코어_시험_결과보고서_2026-10-12.md) | **시험 결과 보고서(10-12)** — 자동 시험 269 · 30개 콜백 검증 300/300 · 성능 · 독차지 원인 · 임베딩 대안(S0 vs A~D) 비교와 확정안(λ 0.7 · 소분류 ≤ 10) · 태그 추출 모델 비교(claude-opus-5-5 · gemma4:12b · qwen3.5:9b) · 시간 백분위(p75~p99) · GC 꼬리 지연 해결(gc.freeze) · **이상 결과 27건과 원인** · 타당성 위협 (그래프 11장) |
-| [docs/로컬LLM_서비스경로_시험결과_2026-10-12.md](docs/로컬LLM_서비스경로_시험결과_2026-10-12.md) | **로컬 LLM 서비스 경로 시험(10-12)** — 7.6 → LLM 태그 추출(Ollama) → 풀 고르기 D(임베딩) → 7.7 을 앱 전체로. gemma4:12b 368/368 · qwen3.5:9b 기대 6개 실패 · 서버 처리 p95 15초/6초 · 0006(prompt_version · 축 저장) 필요 |
-| [docs/하네스_구조와_결과_2026-10-12.md](docs/하네스_구조와_결과_2026-10-12.md) | **30개 콜백 검증 하네스 — 구조와 결과(10-12)** — 구조 · 판정 방식 그림 · 검사 목록 · D 독립 판정(명세 수식, 버그를 심어 10/10 · 7/7 확인) · 기대값 조건 · 등급 · 설정별 결과(태그 끔 448 · gemma 462 + 관찰 44/44 · qwen 462 + 관찰 28/44) · 남은 한계 |
-| [docs/파이프라인_지도/](docs/파이프라인_지도/README.md) | 날짜별 갱신 기록 — 그림 스냅샷 · 단계별 함수 · 바뀐 것 · **다음 해야 할 일(인수인계)**. 규칙은 그 폴더 README |
-| [docs/문서_목록.md](docs/문서_목록.md) | **문서 검토 트리 + 최신성** — README 에서 링크로 닿는 순서(스크립트가 만듦)와 문서마다 코드와 맞는지 |
-| [docs/issues/](docs/issues/README.md) | 발견한 문제 기록 — 발견 시각별 폴더(문서 + 그림). 이슈·트러블슈팅으로 그대로 옮긴다 |
-| [docs/환경_설정.md](docs/환경_설정.md) | uv · Python 3.12 · 의존성 규칙 |
-| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 10장) · `seq/`(전체 시퀀스 6장) · `erd/`(DB 표 구조 3장) · `loadtest/`(부하 보고 그림 4장 — 왕복 전/후는 HTML 표 → `build_roundtrips.py`). 각각 `build_*.py`가 만든다 |
+| `Dockerfile` · `.dockerignore` | 앱 이미지 — python 3.12-slim + uv(`uv.lock` 그대로) · 비루트(uid 10001) · 시험 · 문서 · 시험 도구는 넣지 않는다(`tools/` 는 운영 CLI `tools/catalog` 만) |
 | [이름_대조표.md](이름_대조표.md) | 같은 뜻 · 다른 이름 정리 (camelCase ↔ snake_case) |
 
 
@@ -75,13 +52,12 @@ Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 
 
 ### 요청 한 건의 흐름 (이 브랜치)
 
-![파이프라인 지도](docs/assets/pipeline-map.png)
 
-(4단계 · 포트 · 구현 · 바깥의 연결만 그렸다(10-07 단순화). 단계마다 부르는 함수 목록은 [지도 10-06 §1](docs/파이프라인_지도/2026-10-06.md), 시퀀스 형태는 [v1-flow.png](docs/assets/v1-flow.png))
+(단계마다 부르는 함수 목록은 지도 10-06 §1, 시퀀스 형태는 v1-flow.png)
 
 1. `POST 7.6` → Pydantic 검증(위반 400 `INVALID_REQUEST`) → 서비스 토큰(401) → 활성 카탈로그 없으면 503(Retry-After 300) → Supervisor 큐에 넣기(가득이면 503, Retry-After 30) → **202 `PENDING`** (HTTP 끝)
 2. Supervisor 워커 스레드에서 `dispatch`(잠금·판정) → `run_and_callback`: `to_internal` → `profile()` — `store.save(RUNNING, input_hash)` → `catalog.active()` 한 번(같은 버전 유지) → 비선호 이름만 담은 `ValidationResult`(취향·리뷰가 실려 있으면 '모델 단계 미구현' 경고만 남기고 v1 경로) → 입력 세 칸이 전부 비면 풀을 만들지 않고 **빈 배열**(`has_no_input`, 결정 C 10-09), 아니면 `build_pool`(재고 없음(`unavailable`)만 제외 · 비선호 **대분류**의 하위 소분류 전체 제외 · 조회수 내림차순 · 30개) → `ProfileOutcome(RESULT_READY)` → `store.save`(콜백 본문을 DB에 먼저 커밋) → `recipient_store.upsert(from_outcome)`
-3. `RESULT_READY`면 `backend.send_profile_callback` → `POST 7.7` → 응답을 `RunStatus`로: `200→DELIVERED`, `409→SUPERSEDED`, `4xx→FAILED`, `5xx·네트워크→RESULT_READY`(같은 슬롯에서 첫 전송 포함 **모두 3번** — 0.5초 · 2초 뒤) → `store.save(마지막 상태, callback_attempts + 시도 수)`. `FAILED` 결과는 콜백 없음(AI는 침묵, Backend가 판정). DB에 무엇이 언제 남는지: [docs/DB_전환_설명.md](docs/DB_전환_설명.md)
+3. `RESULT_READY`면 `backend.send_profile_callback` → `POST 7.7` → 응답을 `RunStatus`로: `200→DELIVERED`, `409→SUPERSEDED`, `4xx→FAILED`, `5xx·네트워크→RESULT_READY`(같은 슬롯에서 첫 전송 포함 **모두 3번** — 0.5초 · 2초 뒤) → `store.save(마지막 상태, callback_attempts + 시도 수)`. `FAILED` 결과는 콜백 없음(AI는 침묵, Backend가 판정). DB에 무엇이 언제 남는지: docs/DB_전환_설명.md
 
 ### 지금 정해진 규칙과 미결
 | 규칙 | 값 | 출처 |
@@ -119,7 +95,7 @@ uv run pytest -q                            # 214 passed, 2 skipped (DB 꺼져 �
 uv run ruff check src tests tools alembic   # lint
 ```
 
-**팀원 골격과의 차이 (합칠 때 바꿀 것)** — 팀원 골격은 아직 없다(09-18 초기 골격 `app/`·pip·3.11 은 같은 날 되돌려졌다). 팀원 `product-search/` 는 uv · Python ≥3.13 · 헬스 `/readyz` · 포트 4326(origin/main 기준 — 이 브랜치의 사본은 09-22 판). 지금은 각자 로컬로 개발하고, 합칠 위치·env 이름·루트 단일 `pyproject` 는 [할 일 2-7](docs/할_일_목록_2026-09-28.md)(레이아웃·CI 정렬)에서 정한다(환경 PR 초안은 미푸시 브랜치 `chore/uv-environment`). 근거·규칙은 [docs/환경_설정.md](docs/환경_설정.md).
+**팀원 골격과의 차이 (합칠 때 바꿀 것)** — 팀원 골격은 아직 없다(09-18 초기 골격 `app/`·pip·3.11 은 같은 날 되돌려졌다). 팀원 `product-search/` 는 uv · Python ≥3.13 · 헬스 `/readyz` · 포트 4326(origin/main 기준 — 이 브랜치의 사본은 09-22 판). 지금은 각자 로컬로 개발하고, 합칠 위치·env 이름·루트 단일 `pyproject` 는 할 일 2-7(레이아웃·CI 정렬)에서 정한다(환경 PR 초안은 미푸시 브랜치 `chore/uv-environment`). 근거·규칙은 docs/환경_설정.md.
 
 ---
 
@@ -178,14 +154,14 @@ curl -s -X POST localhost:8000/api/internal/v1/ai/profile/extract-and-pool \
 curl -s localhost:8081/received | python3 -m json.tool | head -30
 ```
 
-**실물 BE와 붙이기** — 절차는 [docs/BE_연동_시험_가이드.md](docs/BE_연동_시험_가이드.md), 자동 시나리오는 `uv run python tools/be_integration/drive_v07.py reset` → `s1` → …(위 표). BE 쪽은 멀티 모듈이라 `./gradlew :main-backend:bootRun`, 로컬 디바운스는 10s · 60s · 10s로 줄인다. BE 담당자용 처음부터 끝까지 안내는 팀 폴더 「BE 로컬 AI 세팅 가이드 v0.2」(10-12 전달).
+**실물 BE와 붙이기** — 절차는 docs/BE_연동_시험_가이드.md, 자동 시나리오는 `uv run python tools/be_integration/drive_v07.py reset` → `s1` → …(위 표). BE 쪽은 멀티 모듈이라 `./gradlew :main-backend:bootRun`, 로컬 디바운스는 10s · 60s · 10s로 줄인다. BE 담당자용 처음부터 끝까지 안내는 팀 폴더 「BE 로컬 AI 세팅 가이드 v0.2」(10-12 전달).
 
 카탈로그 적재(배포 경로) — Backend 전달 패키지를 `ai_catalog` 에 넣는다:
 ```bash
 uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1     # 적재 (트랜잭션 하나, 활성 버전 교체)
 uv run python -m tools.catalog.load_catalog --id-map … --category-id-map … --metrics …            # 09-25 회신(Backend 번호·재고·조회수) 반영
 ```
-`fetch_export` 는 **7.9 계약 점검·파일 카탈로그용**이다(`--base-url … --out data/catalog_export.json`, 종료 코드 0 일치 · 1 계약 위반 · 2 차이 · 3 연결 실패. `--compare-db` 의 대조 대상은 팀원 옛 표 — [할 일 2-6 ②](docs/할_일_목록_2026-09-28.md)). **7.9 export JSON 을 `ai_catalog` 에 넣는 경로는 아직 없다** — BE 7.9 가 나오고 검색 연결(v2)을 팀원과 맞출 때 같이 만든다([할 일 2-10](docs/할_일_목록_2026-09-28.md)).
+`fetch_export` 는 **7.9 계약 점검·파일 카탈로그용**이다(`--base-url … --out data/catalog_export.json`, 종료 코드 0 일치 · 1 계약 위반 · 2 차이 · 3 연결 실패. `--compare-db` 의 대조 대상은 팀원 옛 표 — 할 일 2-6 ②). **7.9 export JSON 을 `ai_catalog` 에 넣는 경로는 아직 없다** — BE 7.9 가 나오고 검색 연결(v2)을 팀원과 맞출 때 같이 만든다(할 일 2-10).
 
 DB에 남은 것 확인:
 ```bash
@@ -232,7 +208,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 
 ## 5. 다음 순서와 건드리는 곳
 
-인수인계용 전체 목록은 [docs/파이프라인_지도/2026-10-06.md §5](docs/파이프라인_지도/2026-10-06.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 10-06 이후의 연동 변화와 후속은 [docs/BE_연동_시험_결과_2026-10-11.md §5](docs/BE_연동_시험_결과_2026-10-11.md). 여기는 요약이다.
+인수인계용 전체 목록은 docs/파이프라인_지도/2026-10-06.md §5에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 10-06 이후의 연동 변화와 후속은 docs/BE_연동_시험_결과_2026-10-11.md §5. 여기는 요약이다.
 
 | # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
 |---|---|---|---|
@@ -241,7 +217,7 @@ docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_i
 | 3 | ~~상품 카탈로그 DB~~ **완료(09-23)** — `0003` + `load_catalog.py`로 4,231건·67분류 적재, `DbCatalogReader`로 읽기까지. `PROFILING_CATALOG_SOURCE=db`가 배포 경로다. Backend 번호가 없는 동안은 임시 번호로 돌고 `/health`가 `provisional_ids`로 표시한다(2번이 끝나면 사라짐) | — | `pipeline.py`·`ports.py` |
 | 4 | ~~접수 단계 중복 판정~~ **완료(09-25)** — Backend가 같은 `sourceVersion`으로 최대 2회 재전송하기로 해서 필수가 됐다. `decide()`가 analyze/resend/skip으로 가른다 | — | 어댑터·ports |
 | 5 | ~~7.7 재시도(5xx 최대 3회) · 재시작 복구(RUNNING→FAILED 정리)~~ **완료(09-26·27)** — `intake._send_and_record`가 0.5초·2초 뒤 최대 3회(`CALLBACK_MAX_ATTEMPTS`·`CALLBACK_BACKOFF_S`), `recover_stale_runs`가 시작 시 정리 | — | 포트 시그니처 |
-| 6 | ~~배포 파일~~ **파일 완료** — `Dockerfile` · compose(`ai-migrate`·`ai-app`) 있음(§3). 남은 것: 로컬 빌드 검증(Docker 프록시) · 토큰 fallback 제거 → [할 일 2-3·2-4](docs/할_일_목록_2026-09-28.md) | `docker-compose.yml` · `Dockerfile` | |
+| 6 | ~~배포 파일~~ **파일 완료** — `Dockerfile` · compose(`ai-migrate`·`ai-app`) 있음(§3). 남은 것: 로컬 빌드 검증(Docker 프록시) · 토큰 fallback 제거 → 할 일 2-3·2-4 | `docker-compose.yml` · `Dockerfile` | |
 | 7 | **v3** 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) + **팀원 Search 호출** | `pipeline.profile` 2)단계 · `model.py` · `ports.py`에 `SearchPort`·`ProfileModel` 추가 | 접수·저장·콜백 |
 | 7′ | **v3 마이그레이션** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/000N_*.py` (`add_column`) · `types.RecipientProfile` 필드 · 통합 테스트 | 기존 마이그레이션 |
 | 8 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
