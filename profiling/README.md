@@ -127,7 +127,7 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 | `OPENROUTER_API_KEY` · `OPENROUTER_URL` · `OLLAMA_URL` | — | 키는 `.env` 에만(SecretStr — 로그 · repr 에 안 찍힘) |
 | `EMBEDDING_DIR` | 없음 | product-search 폴더. 주면 D 의 임베딩 단계가 켜진다 |
 | `DISLIKE_MODE` · `POOL_STRATEGY` · `POOL_SIZE` | `exclude` · `d` · 30 | 비선호 제외/감점 · 고르기 방식 · 개수 |
-| `PROFILING_SLOTS` · `QUEUE_MAX` | 1 · 200 | 동시 분석 수 · 대기열 상한(넘으면 503). LLM 을 켜면 건당 시간 × 대기열이 BE 의 '분석 중' 시간 초과보다 짧아야 한다 |
+| `PROFILING_SLOTS` · `QUEUE_MAX` | 1(코드) · **8(`docker-compose.yml` 배포 기본)** · 200 | 동시 분석 수 · 대기열 상한(넘으면 503). 8 은 10-14 부하 시험 근거 — BE 틱 최대(분당 150명)를 503 없이 받는다(분당 처리 ≈ 슬롯 × 60 ÷ 건당 초). LLM 을 켜면 건당 시간 × 대기열이 BE 의 '분석 중' 시간 초과보다 짧아야 한다 |
 | `CALLBACK_MAX_ATTEMPTS` · `RUNNING_STALE_S` | 3 · 300 | 7.7 재시도 · 끊긴 실행 정리 기준 |
 
 ---

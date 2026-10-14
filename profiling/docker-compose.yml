@@ -56,6 +56,9 @@ services:
       PROFILING_DATABASE_URL: postgresql+psycopg://ai_app:${PROFILING_APP_DB_PASSWORD:-ai_app_password}@ai-db:5432/ai_chat
       PROFILING_DB_REFUSE_SUPERUSER: "true"
       PROFILING_CATALOG_SOURCE: db                  # 컨테이너 안에는 카탈로그 파일이 없다
+      # 동시 분석 수(슬롯). 배포 기본 8 — 10-14 부하 시험에서 BE 틱 최대(분당 150명) · 1만 명 재분석을 503 없이 받음(DR-041).
+      # 코드 기본값(settings.py)은 1 그대로 — 로컬 개발 · 단위 시험용. 커넥션 풀은 슬롯 + IO_THREADS(=12)로 자동
+      PROFILING_SLOTS: ${PROFILING_SLOTS:-8}
       # Backend 주소·토큰은 배포 환경에서 넣는다. 로컬 기본값은 호스트에서 도는 fake_backend.
       PROFILING_BACKEND_BASE_URL: ${PROFILING_BACKEND_BASE_URL:-http://host.docker.internal:8081}
       # dev-token 은 로컬 전용 기본값(공개 저장소에 적혀 있음) — 운영 · 개발 서버는 반드시 PROFILING_SERVICE_TOKEN 을 넣는다.
