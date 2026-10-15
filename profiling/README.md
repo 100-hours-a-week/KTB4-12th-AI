@@ -4,13 +4,13 @@ Backend 가 받는 사람의 **비선호 카테고리 · 취향 문장 · 최근
 ① 리뷰 별점으로 소분류 선호를 계산하고 ② LLM 으로 취향 태그를 뽑아 검증한 뒤 ③ 상품 30개를 골라 **7.7 콜백**으로 돌려준다.
 태그 · 리뷰 지문은 AI DB 가 보관하고, Backend 에는 상품 번호만 보낸다(DR-035).
 
-| 상태 (2026-10-13 · 브랜치 `feat/v2-profiling-merge`) | |
+| 상태 (2026-10-15 · 브랜치 `feat/v2-profiling-merge`) | |
 |---|---|
 | 동작 범위 | **v2 코어** — 리뷰 별점 편향 + LLM 태그(가드레일 · 검증기) + 30개 고르기 D(비선호 하드 제외 · 리뷰한 상품 제외 · 소분류 상한 10 · 같은 모델 하나 · 태그가 있으면 임베딩 검색 + MMR). 입력 세 칸이 전부 비면 추천 0개(결정 C) |
 | 태그 추출 | **v2 = 외부 API(OpenRouter) · 3축 규격 `tag3`**(카테고리 · IP · 브랜드) — DR-037 · DR-038. 로컬 LLM(Ollama)은 v3. 추출기를 끄면(`TAGGER=none`) 별점 편향 + D 만 돈다. LLM 이 실패해도 요청은 실패하지 않는다(태그 없이 30개) |
 | BE 연동 | 실물 BE `develop`(10-13 `55dc526`)와 v2 설정으로 처음부터 끝까지 확인 — 디바운스 → 7.6 → 태그 → 30개 → 7.7 → BE `COMPLETED`, BE 30 = AI 30(집합 · 순서) · 비선호 0 · 리뷰한 상품 0. BE 통합 수정점 v0.7 동작(틱마다 `/health` 핑 · 복구 전송 · PENDING 중 새 번호)은 10-11 여섯 시나리오 통과 |
-| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록 · 태그 상태 · 판 · LLM 비용) · `recipient_profiles`(수신자 프로필 — 취향 문장 정리본 · 축이 붙은 태그 · 태그 상태 · 추천 30개, `0006`) · `recipient_reviews`(리뷰 · 글 정리본) · `ai_catalog`(상품 · 카테고리 · 적재 버전). **원문 그대로는 저장하지 않고 가드레일 정리본만**(DR-039). 앱은 앱 전용 계정 `ai_app`(`0007` — `ai_profile` 읽기·쓰기, `ai_catalog` 읽기만)으로 접속한다. DB 없이 뜨는 모드는 없다 |
-| 시험 | `uv run pytest -q` → **420 passed, 1 skipped**(단위 339 · 통합 81, DB 꺼져 있으면 통합 skip) |
+| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록 · 태그 상태 · 판 · LLM 비용) · `recipient_profiles`(수신자 프로필 — 취향 문장 정리본 · 축이 붙은 태그 · 태그 상태 · 추천 30개, `0006`) · `recipient_reviews`(리뷰 · 글 정리본) · `ai_catalog`(상품 · 카테고리 · 적재 버전 — **키가 Backend 번호**, `0008`). **원문 그대로는 저장하지 않고 가드레일 정리본만**(DR-039). 앱은 앱 전용 계정 `ai_app`(`0007` — `ai_profile` 읽기·쓰기, `ai_catalog` 읽기만)으로 접속한다. DB 없이 뜨는 모드는 없다 |
+| 시험 | `uv run pytest -q` → **452 passed, 1 skipped**(단위 370 · 통합 82, DB 꺼져 있거나 카탈로그가 없으면 통합 일부 skip) |
 | 문서 | **비공개(10-13).** 설계 · 시험 결과 · 결정 기록은 팀 비공개 폴더에서 관리하고 이 저장소에는 코드 · 시험 · 이 README · `이름_대조표.md` 만 둔다. 아래에 링크 없이 나오는 문서 이름은 그 비공개 문서다 |
 | 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat · Search · Runtime 은 팀원 |
 
@@ -23,7 +23,8 @@ cd profiling
 uv sync                                       # .venv + 의존성 (uv.lock 그대로)
 docker compose up -d ai-db                    # 로컬 PostgreSQL 16 + pgvector (Docker Desktop)
 uv run alembic upgrade head                   # 0001 ~ 0008 (0007 앱 계정 ai_app — 아래 '앱 계정' · 0008 카탈로그 키 = Backend 번호)
-uv run pytest -q                              # 420 passed, 1 skipped
+uv run python -m tools.catalog.load_catalog --bundle <카탈로그 합본 경로>.json.gz --if-empty   # 상품 4,231 · 카테고리 67 (합본은 담당자에게 — 팀 내부 자료)
+uv run pytest -q                              # 452 passed, 1 skipped
 uv run ruff check src tests tools alembic
 ```
 
