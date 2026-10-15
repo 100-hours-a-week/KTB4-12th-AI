@@ -59,7 +59,7 @@ def _tag(tag: str) -> str:
 
 
 def test_upsert_keeps_newer_version(conn) -> None:
-    conn.execute(UPSERT, {"rid": 1, "sv": 3, "pref": _tag("휴대용"), "cats": '[{"category_id":701,"category_name":"도서·음반"}]'})
+    conn.execute(UPSERT, {"rid": 1, "sv": 3, "pref": _tag("휴대용"), "cats": '[{"category_id":9040,"category_name":"도서·음반"}]'})
     conn.execute(UPSERT, {"rid": 1, "sv": 2, "pref": _tag("옛것"), "cats": "[]"})                 # 순서 역전 → 무시
     row = conn.execute(sa.text("select source_version, preferred_tags -> 0 ->> 'tag' from ai_profile.recipient_profiles where recipient_user_id=1")).one()
     assert row == (3, "휴대용")

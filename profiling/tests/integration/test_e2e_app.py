@@ -74,7 +74,7 @@ def test_v1_request_end_to_end(engine, cleanup) -> None:
         fake = RecordingBackend()
         app.state.backend = fake                        # 진짜 HTTP 대신 기록만 (ports 모양이면 교체 가능)
         body = {"recipientUserId": RID, "sourceVersion": 3,
-                "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품"}],
+                "dislikedCategories": [{"categoryId": 9047, "categoryName": "출산·육아용품"}],
                 "giftPreference": None, "reviews": []}
         res = client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body)
         assert res.status_code == 202
@@ -106,7 +106,7 @@ def test_unknown_fields_are_accepted_and_logged(engine, cleanup, caplog) -> None
     with TestClient(app) as client:
         app.state.backend = RecordingBackend()
         body = {"recipientUserId": RID_UNKNOWN, "sourceVersion": 1,
-                "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품", "weight": 1}],
+                "dislikedCategories": [{"categoryId": 9047, "categoryName": "출산·육아용품", "weight": 1}],
                 "giftPreference": None, "reviews": [], "extraTop": "x"}
         with caplog.at_level("WARNING", logger="profiling.intake"):
             res = client.post("/api/internal/v1/ai/profile/extract-and-pool", json=body)
@@ -184,7 +184,7 @@ def test_same_version_resend_does_not_reanalyze(engine, cleanup) -> None:
         return httpx.Response(200, json={"message": "ok", "data": {"recipientUserId": RID, "sourceVersion": 21,
                                                                   "profileStatus": "COMPLETED"}})
 
-    body = {"recipientUserId": RID, "sourceVersion": 21, "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품"}],
+    body = {"recipientUserId": RID, "sourceVersion": 21, "dislikedCategories": [{"categoryId": 9047, "categoryName": "출산·육아용품"}],
             "giftPreference": None, "reviews": []}                                   # 입력이 있어야 30개 (전부 비면 0개 — 결정 C)
     with TestClient(app) as client:
         app.state.backend = HttpBackendPort("http://backend.test", "t", 5.0, transport=httpx.MockTransport(handler))

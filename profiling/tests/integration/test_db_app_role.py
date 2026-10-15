@@ -99,8 +99,8 @@ def test_app_path_runs_as_app_role(app_engine, engine) -> None:
     runs, profiles = DbProfileRunStore(app_engine), DbRecipientProfileStore(app_engine)
     assert _q(app_engine, "select current_user") == ROLE
     rq = ProfileRequest(recipient_user_id=RID, source_version=1, gift_preference="향수 좋아해요",
-                        disliked_categories=[DislikedCategory(category_id=802, category_name="출산·육아용품")],
-                        reviews=[Review(product_id=13006, rating=5, review_text="향이 좋아요"), Review(product_id=13007, rating=2)])
+                        disliked_categories=[DislikedCategory(category_id=9047, category_name="출산·육아용품")],
+                        reviews=[Review(product_id=900001, rating=5, review_text="향이 좋아요"), Review(product_id=899999, rating=2)])
     with runs.run_lock(RID, 1) as got:
         assert got
         out = pipeline.profile(rq, catalog=FileCatalogReader(FIXTURE), store=runs, recipient_store=profiles)

@@ -62,7 +62,7 @@ def stores(engine):
         profiles.delete(rid)
 
 
-def _rq(rid=RID, sv=3, disliked=((802, "출산·육아용품"),)) -> ProfileRequest:
+def _rq(rid=RID, sv=3, disliked=((9047, "출산·육아용품"),)) -> ProfileRequest:
     return ProfileRequest(recipient_user_id=rid, source_version=sv, gift_preference=None,
                           disliked_categories=[DislikedCategory(category_id=i, category_name=n) for i, n in disliked], reviews=[])
 
@@ -137,7 +137,7 @@ def test_profile_store_upsert_get_delete_and_version_guard(stores) -> None:
     def dis(cid: int, name: str) -> list[DislikedCategory]:
         return [DislikedCategory(category_id=cid, category_name=name)]
 
-    p3 = RecipientProfile(recipient_user_id=RID, source_version=3, disliked_categories=dis(701, "도서·음반"),
+    p3 = RecipientProfile(recipient_user_id=RID, source_version=3, disliked_categories=dis(9040, "도서·음반"),
                           preferred_tags=[ProfileTag(axis="IP", tag="산리오 한교동", source="preference", ref="pref")])
     profiles.upsert(p3)
     got = profiles.get(RID)
@@ -145,7 +145,7 @@ def test_profile_store_upsert_get_delete_and_version_guard(stores) -> None:
     assert got.updated_at is not None
 
     profiles.upsert(RecipientProfile(recipient_user_id=RID, source_version=2, disliked_categories=dis(1, "옛것")))   # 순서 역전 → 무시
-    assert profiles.get(RID).disliked_categories == dis(701, "도서·음반")
+    assert profiles.get(RID).disliked_categories == dis(9040, "도서·음반")
     profiles.upsert(RecipientProfile(recipient_user_id=RID, source_version=4, disliked_categories=dis(2, "새것")))   # 더 새 버전 → 덮음
     assert profiles.get(RID).disliked_categories == dis(2, "새것") and profiles.get(RID).preferred_tags == []
 
@@ -288,19 +288,19 @@ def test_pipeline_writes_both_tables(stores, engine) -> None:
     run = runs.get(RID + 1)
     assert run.status is RunStatus.RESULT_READY and run.search.product_ids == out.search.product_ids and run.input_hash == out.input_hash
     prof = profiles.get(RID + 1)
-    assert prof.source_version == 3 and [(c.category_id, c.category_name) for c in prof.disliked_categories] == [(802, "출산·육아용품")]
+    assert prof.source_version == 3 and [(c.category_id, c.category_name) for c in prof.disliked_categories] == [(9047, "출산·육아용품")]
 
 
 def test_pipeline_with_reviews_writes_scores_and_review_rows(stores, engine) -> None:
     """리뷰가 든 요청 한 건 → 실행 기록 · 프로필(점수 · 지문) · 리뷰 행까지 실제 DB 에 들어간다(2·3·4단계 한 줄). 원문은 어디에도 없다."""
     runs, profiles = stores
     rq = ProfileRequest(recipient_user_id=RID + 2, source_version=1, gift_preference="육아용품 좋아요", disliked_categories=[],
-                        reviews=[Review(product_id=13006, rating=5, review_text="아기가 좋아해요"), Review(product_id=21416, rating=2)])
+                        reviews=[Review(product_id=900001, rating=5, review_text="아기가 좋아해요"), Review(product_id=900004, rating=2)])
     out = pipeline.profile(rq, catalog=FileCatalogReader(FIXTURE), store=runs, recipient_store=profiles)
     assert out.status is RunStatus.RESULT_READY
     prof = profiles.get(RID + 2)
-    assert {(s.category_id, s.n, s.score_sum) for s in prof.category_scores} == {(802, 1, 2), (305, 1, -1)}
-    assert [r.product_id for r in prof.reviews] == [13006, 21416] and prof.gift_preference_hash == preference_hash("육아용품 좋아요")
+    assert {(s.category_id, s.n, s.score_sum) for s in prof.category_scores} == {(9047, 1, 2), (9016, 1, -1)}
+    assert [r.product_id for r in prof.reviews] == [900001, 900004] and prof.gift_preference_hash == preference_hash("육아용품 좋아요")
     # 원문 그대로는 없고 정리본만(10-13 DR-039) — 이 글들은 가릴 것이 없어 정리본 = 원문이므로 정리본 칸에 그대로 있다
     assert prof.gift_preference_clean == "육아용품 좋아요" and [r.text_clean for r in prof.reviews] == ["아기가 좋아해요", None]
     assert prof.tag_status == "off" and len(prof.recommended_product_ids) == len(out.search.product_ids) and prof.guard_version == "g4"
@@ -333,7 +333,7 @@ def test_app_end_to_end_with_db(engine, monkeypatch, alembic_head) -> None:
 
             fake = RecordingBackend()
             app.state.backend = fake
-            body = {"recipientUserId": rid, "sourceVersion": 7, "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품"}],
+            body = {"recipientUserId": rid, "sourceVersion": 7, "dislikedCategories": [{"categoryId": 9047, "categoryName": "출산·육아용품"}],
                     "giftPreference": None, "reviews": []}
             res = client.post(intake.EXTRACT_AND_POOL_PATH, json=body)
             assert res.status_code == 202
@@ -346,7 +346,7 @@ def test_app_end_to_end_with_db(engine, monkeypatch, alembic_head) -> None:
             assert run.status is RunStatus.DELIVERED and run.callback_attempts == 1 and run.source_version == 7
             assert isinstance(run.search.catalog_version_id, UUID) and len(run.search.product_ids) == 30
             prof = app.state.recipient_store.get(rid)
-            assert prof.source_version == 7 and prof.disliked_categories == [DislikedCategory(category_id=802, category_name="출산·육아용품")]
+            assert prof.source_version == 7 and prof.disliked_categories == [DislikedCategory(category_id=9047, category_name="출산·육아용품")]
     finally:
         DbProfileRunStore(engine).delete_recipient(rid)
         DbRecipientProfileStore(engine).delete(rid)
@@ -521,7 +521,7 @@ def test_pipeline_with_tagger_stores_chatbot_profile_data(stores, engine) -> Non
     runs, profiles = stores
     t3 = tagging.load_spec("tag3")
     rq = ProfileRequest(recipient_user_id=RID + 3, source_version=2, gift_preference="010-1234-5678 로 연락 주세요 아기 선물 좋아요",
-                        disliked_categories=[], reviews=[Review(product_id=13006, rating=5, review_text="ㅋㅋㅋㅋㅋㅋ")])
+                        disliked_categories=[], reviews=[Review(product_id=900001, rating=5, review_text="ㅋㅋㅋㅋㅋㅋ")])
     out = pipeline.profile(rq, catalog=FileCatalogReader(FIXTURE), store=runs, recipient_store=profiles, tagger=Tagger(), tag_spec=t3)
     assert out.status is RunStatus.RESULT_READY
     prof = profiles.get(RID + 3)
