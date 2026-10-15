@@ -440,3 +440,41 @@ def test_profile_recipient_store_failure_is_failed_no_callback() -> None:
     out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore(fail=True))
     assert out.status is RunStatus.FAILED and "프로필 저장 실패" in out.failure_reason
     assert store.history[-1] is RunStatus.FAILED                                  # 실행 기록도 FAILED로 되돌림
+
+
+# ---------------------------------------------------------------- 바뀐 내용 로그(profile_change, 10-15 C안)
+
+
+class _GetFails(FakeRecipientStore):
+    def get(self, rid):
+        raise RuntimeError("profiles down")
+
+
+def test_profile_change_log_first_then_update_without_text(caplog) -> None:
+    """같은 사람의 두 번째 분석은 이전 프로필과 비교한 한 줄을 남긴다 — 번호 · 개수만, 취향 · 리뷰 글은 없다."""
+    products = BIAS_PRODUCTS + [_product(5, 21, "여성의류", views=1)]
+    rstore = FakeRecipientStore()
+    first = _rq(pref="휴대용 선물", reviews=[Review(product_id=3, rating=5, review_text="좋아요")])
+    with caplog.at_level("INFO", logger="profiling.pipeline"):
+        pipeline.profile(first, catalog=FakeCatalog(products), store=FakeStore(), recipient_store=rstore)
+    line = next(r.message for r in caplog.records if r.message.startswith("profile_change"))
+    assert "source_version=3 first=yes" in line and "pref=new" in line and "reviews_added=3" in line
+    caplog.clear()
+    second = ProfileRequest(recipient_user_id=9073, source_version=4, gift_preference=None,
+                            disliked_categories=[DislikedCategory(category_id=99, category_name="관계없는 대분류")],
+                            reviews=[Review(product_id=3, rating=1, review_text="별로예요"), Review(product_id=4, rating=5)])
+    with caplog.at_level("INFO", logger="profiling.pipeline"):
+        out = pipeline.profile(second, catalog=FakeCatalog(products), store=FakeStore(), recipient_store=rstore)
+    assert out.status is RunStatus.RESULT_READY
+    line = next(r.message for r in caplog.records if r.message.startswith("profile_change"))
+    assert "first=no prev_version=3" in line and "input_changed=yes" in line and "pref=removed" in line
+    assert "reviews=+1/-0/~1" in line and "reviews_added=4" in line and "rating_changed=3" in line and "dislikes_added=99" in line
+    assert not any(w in r.message for r in caplog.records for w in ("휴대용", "좋아요", "별로예요"))   # 글은 로그에 없다
+
+
+def test_profile_change_log_get_failure_does_not_block_profile(caplog) -> None:
+    """이전 프로필을 못 읽으면 비교만 건너뛰고 저장 · 결과는 그대로."""
+    with caplog.at_level("WARNING", logger="profiling.pipeline"):
+        out = pipeline.profile(_rq(pref="휴대용"), catalog=FakeCatalog(PRODUCTS), store=FakeStore(), recipient_store=_GetFails())
+    assert out.status is RunStatus.RESULT_READY
+    assert any("이전 프로필 조회 실패" in r.message for r in caplog.records)

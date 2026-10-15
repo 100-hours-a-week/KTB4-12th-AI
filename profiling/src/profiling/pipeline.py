@@ -21,6 +21,7 @@ v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.anal
                             4) ProfileOutcome(RESULT_READY)
                             5) store.save(outcome)         실행 기록 갱신 — callback_payload·hash가 여기서 DB에 먼저 커밋된다 (§16.4)
                             6) recipient_store.upsert()    수신자 프로필 (recipient_profiles, category_scores 포함) — 낮은 버전이면 DB가 무시
+                               profile_change 로그     저장 직전 이전 프로필과 비교한 바뀐 내용 한 줄(changes.py, 글 없음 — 10-15)
                           ◀── outcome  (RESULT_READY면 api가 7.7 콜백, FAILED면 침묵)
 """
 
@@ -36,7 +37,7 @@ from enum import StrEnum
 from typing import NamedTuple
 from uuid import UUID
 
-from profiling import selection, status, tagging
+from profiling import changes, selection, status, tagging
 from profiling.ports import (
     CatalogReader,
     EmbeddingIndex,
@@ -55,6 +56,7 @@ from profiling.types import (
     ErrorCode,
     ProfileOutcome,
     ProfileRequest,
+    RecipientProfile,
     Review,
     RunStatus,
     SearchResult,
@@ -394,8 +396,10 @@ def profile(
 
     # 6) 수신자 프로필 — 한 사람당 한 행. 낮은 버전이 늦게 오면 DB가 무시한다(should_replace와 같은 규칙을 SQL로).
     #    실패하면 FAILED로 되돌린다: 콜백은 나갔는데 Chat이 읽을 프로필이 없는 상태를 만들지 않기 위해.
+    new_profile = from_outcome(rq, outcome, category_scores=scores)
+    _log_change(recipient_store, new_profile)
     try:
-        recipient_store.upsert(from_outcome(rq, outcome, category_scores=scores))
+        recipient_store.upsert(new_profile)
     except Exception as e:
         log.exception("profile recipient=%s 수신자 프로필 저장 실패", rid)
         return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {type(e).__name__}: {e}")
@@ -403,6 +407,18 @@ def profile(
     log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d scores=%d tags=%d tagger=%s catalog_version=%s rule=%s",
              rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), len(scores), len(tags), tag_status, catalog_version_id, rule)
     return outcome
+
+
+def _log_change(recipient_store: RecipientProfileStore, new: RecipientProfile) -> None:
+    """이전 프로필과 비교한 바뀐 내용을 한 줄로(changes.py — 번호 · 개수 · 축만, 글 없음). 이전 프로필을 못 읽어도 분석은 그대로 간다."""
+    try:
+        prev = recipient_store.get(new.recipient_user_id)
+    except Exception as e:  # noqa: BLE001 — 기록용 조회. 실패해도 저장 · 콜백을 막지 않는다
+        log.warning("profile_change recipient=%s source_version=%s 이전 프로필 조회 실패 — 비교 생략: %s",
+                    new.recipient_user_id, new.source_version, type(e).__name__)
+        return
+    log.info("profile_change recipient=%s source_version=%s %s", new.recipient_user_id, new.source_version,
+             changes.log_fields(changes.summarize(prev, new)))
 
 
 class TagRun(NamedTuple):
