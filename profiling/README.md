@@ -51,6 +51,14 @@ uv run uvicorn profiling.main:app --port 8000
 기동 로그에서 확인: `카탈로그 로드 source=db … products=4231` · `태그 규격 tag3 축=카테고리·IP·브랜드 판=tag3-…` · `태그 추출기 openrouter model=…` · `임베딩 …`.
 `curl localhost:8000/health` → `status ok` · `catalog.active true` · `store.connected true` · `store.migration "0008"`.
 
+| 경로 | 누가 보나 | 뜻 |
+|---|---|---|
+| `GET /health` | **BE**(7.6 보내기 전 매번) | 상태 전부. BE 는 `catalog.active` · `store.connected` 두 키만 본다 — **이름 · 뜻을 바꾸지 않는다**. `llm`(외부 LLM: `off` · `unknown` · `ok` · `degraded` · `down`, 실패 종류만) · `embedding`(켜짐 · 상품 매칭 수) 칸도 여기 |
+| `GET /healthz` | ECS Liveness | 프로세스가 살아 있으면 늘 200(DB · LLM 안 봄) |
+| `GET /readyz` | ECS Readiness | 카탈로그 · DB · 마이그레이션 판이 맞으면 200, 아니면 503. **외부 LLM 은 안 본다** — LLM 이 죽어도 태그 없이 30개를 보내므로 트래픽에서 빼지 않는다 |
+
+검색 · 챗봇과 같은 이름(`/healthz` · `/readyz`)이다(10-15).
+
 ### 컨테이너로 (배포와 같은 모양)
 
 ```bash
@@ -131,6 +139,7 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 | `DISLIKE_MODE` · `POOL_STRATEGY` · `POOL_SIZE` | `exclude` · `d` · 30 | 비선호 제외/감점 · 고르기 방식 · 개수 |
 | `PROFILING_SLOTS` · `QUEUE_MAX` | 1(코드) · **8(`docker-compose.yml` 배포 기본)** · 200 | 동시 분석 수 · 대기열 상한(넘으면 503). 8 은 10-14 부하 시험 근거 — BE 틱 최대(분당 150명)를 503 없이 받는다(분당 처리 ≈ 슬롯 × 60 ÷ 건당 초). LLM 을 켜면 건당 시간 × 대기열이 BE 의 '분석 중' 시간 초과보다 짧아야 한다 |
 | `CALLBACK_MAX_ATTEMPTS` · `RUNNING_STALE_S` | 3 · 300 | 7.7 재시도 · 끊긴 실행 정리 기준 |
+| `STRICT_STARTUP` | false | **서버(개발 · 운영)는 true.** 마이그레이션 판이 코드(`main.EXPECTED_MIGRATION`)와 다름 · 토큰이 비었거나 `dev-token` · DB 비밀번호가 공개 기본값 · BE 주소가 로컬 가짜 BE · `CATALOG_SOURCE` 가 `db` 아님 → 기동 거부. 로컬 · compose · 시험은 false |
 
 ---
 
@@ -170,7 +179,9 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 
 ## 7. 배포 · 보안 주의
 
-- **토큰.** `SERVICE_TOKEN` 이 비면 토큰 검사를 건너뛰고, compose 기본값 `dev-token` 은 공개된 값이다 — 개발 · 운영 서버는 반드시 다른 값을 넣는다(앱 기동 검사는 다음 할 일).
+- **토큰.** `SERVICE_TOKEN` 이 비면 토큰 검사를 건너뛰고, compose 기본값 `dev-token` 은 공개된 값이다 — 개발 · 운영 서버는 반드시 다른 값을 넣고 `PROFILING_STRICT_STARTUP=true` 로 기본값이면 기동을 막는다.
+- **마이그레이션 판.** 새 마이그레이션을 더하면 `main.EXPECTED_MIGRATION` 도 올린다(단위 시험이 alembic head 와 대조). 서버(엄격 모드)는 판이 다르면 뜨지 않는다 — 배포는 마이그레이션 Task 성공 뒤 앱.
+- **이미지 재현.** 베이스 python · uv 를 다이제스트로 고정했다(검색과 같은 python). 보안 패치는 다이제스트를 일부러 올려 받는다.
 - **DB 계정.** 앱은 `ai_app`(0007)으로 접속하고 `PROFILING_DB_REFUSE_SUPERUSER=true` 로 슈퍼유저 접속을 막는다. `ai_app` 비밀번호는 마이그레이션 때 `PROFILING_APP_DB_PASSWORD` 로 넣는다(compose 기본값 `ai_app_password` 는 공개된 값 — 서버는 반드시 다른 값). 이미 0007 이 돈 DB 는 소유자 계정으로 `ALTER ROLE ai_app LOGIN PASSWORD '…'`. 마이그레이션은 표 잠금을 5초까지만 기다린다(`PROFILING_MIGRATE_LOCK_TIMEOUT`).
 - **키 · `.env`.** 저장소에 두지 않는다(`.gitignore`). OpenRouter 키는 헤더로만 보내고 로그 · 예외 · repr 에 남기지 않는다.
 - **외부로 나가는 것.** LLM 에는 가드레일을 거친 프롬프트만 간다. 원문은 로그에 없다. LLM 추적 도구(LangSmith 등)는 로컬 · 개발 전용, 운영 금지(DR-036).
@@ -184,7 +195,7 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 |---|---|---|
 | 1 | **카테고리 태그 사전 확인** — 3축에서 막연한 말('실용적인 선물')이 카테고리로 나오는 것을 막고 운영에 3축을 켠다(DR-038 조건) | `tagging.validate` · 카탈로그 소분류 · 상품 종류 |
 | 2 | **추천 선택 가중** — IP · 브랜드 · 카테고리 축 가중(또는 IP 몫). 리뷰 상품의 카테고리 태그가 캐릭터 취향을 밀어내는 문제 | `selection.AXIS_WEIGHT` · `_embedding_pick` |
-| 3 | **운영 기동 검사** — `PROFILING_ENV=prod` 에서 빈 토큰 · `dev-token` 이면 기동 실패 | `settings.py` · `main.py` |
+| 3 | ~~운영 기동 검사~~ — `STRICT_STARTUP`(10-15) | `settings.py` · `main.py` |
 | 4 | **부하 시험(LLM 흉내)** — 외부 API 응답 시간을 흉내 낸 추출기로 슬롯 · 대기열 · 틱 크기 확정 | 브랜치 `test/v2-profiling-loadtest` |
 | 5 | **태그 재시도 · 리뷰 캐시** — `tag_status` 가 실패면 저장된 정리본으로 AI 가 스스로 다시 뽑기(결정 C), 안 바뀐 리뷰는 LLM 생략 | `pipeline.py` · `stores.py` · `0008` |
 | 6 | 외부 LLM 모델 확정(3축 기준 재비교) · 리뷰 캐시 | 운영 설정 |

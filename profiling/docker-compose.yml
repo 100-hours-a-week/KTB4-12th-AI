@@ -72,7 +72,7 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status == 200 else 1)"]
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]   # Liveness(10-15). 준비 여부는 /readyz
       interval: 10s
       timeout: 5s
       retries: 5

@@ -5,11 +5,13 @@
 # 마이그레이션은 **이 이미지의 다른 명령**으로 돌린다(compose의 ai-migrate) — 앱 시작과 섞지 않는다.
 # 앱이 여러 개로 늘어도 마이그레이션은 한 번만 돌아야 하기 때문이다.
 # Python 3.13 — 팀 개발 환경 통일(09-23 결정, product-search 와 같은 판). 로컬 .python-version · pyproject requires-python 과 같이 바꾼다
-FROM python:3.13-slim-bookworm
+# 베이스 · uv 를 다이제스트로 고정 — 같은 커밋이면 같은 이미지(인프라 요구 §4). 검색(product-search) Dockerfile 과 같은 python 다이제스트.
+# 보안 패치를 받으려면 다이제스트를 일부러 올린다(태그만 쓰면 같은 이름에 다른 내용이 덮여 재현이 안 된다)
+FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
 
 # uv — 로컬 개발과 같은 도구·같은 uv.lock 을 쓴다. 태그를 고정해 빌드가 재현되게 한다(로컬 uv 와 같은 판).
 # 빌드에는 레지스트리 두 곳이 필요하다: docker.io(python) · ghcr.io(uv).
-COPY --from=ghcr.io/astral-sh/uv:0.11.15 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.11.15@sha256:e590846f4776907b254ac0f44b5b380347af5d90d668138ca7938d1b0c2f98d3 /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \

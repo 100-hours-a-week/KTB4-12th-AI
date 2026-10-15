@@ -28,7 +28,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from profiling import intake
+from profiling import intake, status
 from profiling.backend import HttpBackendPort
 from profiling.catalog import DbCatalogReader, FileCatalogReader
 from profiling.ports import NoActiveCatalog
@@ -42,6 +42,27 @@ from profiling.supervisor import Supervisor
 
 log = logging.getLogger(__name__)
 
+# 이 코드가 기대하는 DB 마이그레이션 판 — alembic head 와 같아야 한다(tests/unit/test_ops_endpoints.py 가 지킨다).
+# 새 마이그레이션을 더하면 여기도 올린다. /readyz 와 STRICT_STARTUP 이 이 값과 DB 의 alembic_version 을 비교한다(10-15).
+EXPECTED_MIGRATION = "0008"
+_DEFAULT_SECRETS = ("dev-token",)
+_DEFAULT_DB_PASSWORDS = (":ai_password@", ":ai_app_password@")
+_DEFAULT_BACKEND = "http://localhost:8081"
+
+
+def strict_problems(settings: Settings) -> list[str]:
+    """STRICT_STARTUP 에서 기동을 막을 문제 목록(빈 목록이면 통과). 값 자체는 담지 않는다 — 어느 설정이 문제인지만."""
+    problems = []
+    if not settings.SERVICE_TOKEN.strip() or settings.SERVICE_TOKEN in _DEFAULT_SECRETS:
+        problems.append("PROFILING_SERVICE_TOKEN 이 비었거나 공개 기본값")
+    if any(p in settings.DATABASE_URL for p in _DEFAULT_DB_PASSWORDS):
+        problems.append("PROFILING_DATABASE_URL 의 비밀번호가 공개 기본값")
+    if settings.BACKEND_BASE_URL.rstrip("/") == _DEFAULT_BACKEND:
+        problems.append("PROFILING_BACKEND_BASE_URL 이 로컬 가짜 BE 기본값")
+    if settings.CATALOG_SOURCE != "db":
+        problems.append("PROFILING_CATALOG_SOURCE 가 db 가 아님(서버 이미지에는 카탈로그 파일이 없다)")
+    return problems
+
 
 # ---------------------------------------------------------------------------
 # 시작·종료 — adapter 생성은 여기서 1회. 요청마다 만들지 않는다.
@@ -52,6 +73,8 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     logging.basicConfig(level=settings.LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if settings.STRICT_STARTUP and (problems := strict_problems(settings)):
+        raise RuntimeError("STRICT_STARTUP 기동 거부 — " + " · ".join(problems))
 
     # 저장소 — PostgreSQL 하나뿐. 연결이 안 되면 여기서 앱이 죽는다(기록 없이 콜백만 나가는 상태를 만들지 않으려고).
     app.state.engine = _connect_db(settings)
@@ -65,12 +88,18 @@ async def lifespan(app: FastAPI):
         log.info("카탈로그 로드 source=%s version=%s products=%d (%s)", settings.CATALOG_SOURCE, version_id, len(products),
                  f"ai_catalog poll_ttl_s={settings.CATALOG_POLL_TTL_S}" if settings.CATALOG_SOURCE == "db" else settings.CATALOG_FILE)
     except NoActiveCatalog as e:
-        log.error("활성 카탈로그 없음: %s — 7.6은 503을 반환합니다", e)
-        app.state.catalog = _NoCatalog(str(e))
+        if settings.CATALOG_SOURCE == "db":
+            # DB 카탈로그는 1초마다 활성 버전을 다시 묻는다 — 기동 뒤에 적재해도 재시작 없이 살아난다(10-15: 대역으로 바꾸면 영영 503 이었다)
+            log.error("활성 카탈로그 없음: %s — 적재될 때까지 7.6 은 503 · /readyz 503(적재되면 재시작 없이 회복)", e)
+        else:
+            log.error("활성 카탈로그 없음: %s — 7.6은 503을 반환합니다", e)
+            app.state.catalog = _NoCatalog(str(e))
     app.state.store = DbProfileRunStore(app.state.engine)
 
     # 태그 추출기 · 임베딩 — 설정으로 켤 때만(기본 꺼짐). 만들다 실패하면 끈 채로 뜬다: 태그 없이 D 가 돈다(요청은 실패하지 않음)
     app.state.tagger = app.state.embedding = app.state.tag_spec = None
+    app.state.embedding_status = {"enabled": False, "reason": "not_configured"}
+    tagger_reason: str | None = None
     if settings.TAGGER != "none":
         from profiling import tagging
 
@@ -86,6 +115,7 @@ async def lifespan(app: FastAPI):
     elif settings.TAGGER == "openrouter":
         if settings.OPENROUTER_API_KEY is None or not settings.OPENROUTER_API_KEY.get_secret_value().strip():
             log.error("TAGGER=openrouter 인데 PROFILING_OPENROUTER_API_KEY 가 없음 — 태그 추출기 끈 채로 진행")
+            tagger_reason = "no_api_key"
         else:
             from profiling.llm import OpenRouterTagExtractor
             app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, settings.OPENROUTER_API_KEY.get_secret_value(),
@@ -95,9 +125,16 @@ async def lifespan(app: FastAPI):
         try:
             from profiling.embedding import ProductSearchEmbedding
             app.state.embedding = ProductSearchEmbedding(Path(settings.EMBEDDING_DIR), app.state.engine)
-            log.info("임베딩 %s (%s)", app.state.embedding.version, settings.EMBEDDING_DIR)
-        except Exception:
+            emb = app.state.embedding
+            matched, total = getattr(emb, "matched", None), getattr(emb, "total", None)      # 매칭 수는 임베딩 수정(fix 브랜치) 뒤에 생긴다
+            app.state.embedding_status = {"enabled": True, "version": emb.version, "matched": matched, "total": total}
+            log.info("임베딩 %s (%s) 상품 매칭 %s/%s", emb.version, settings.EMBEDDING_DIR, matched, total)
+        except Exception as e:
             log.exception("임베딩을 켜지 못함 — 끈 채로 진행(태그가 있어도 임베딩 단계 없이 D)")
+            app.state.embedding_status = {"enabled": False, "reason": type(e).__name__}
+    status.LLM.reset()
+    status.LLM.configure(requested=settings.TAGGER, enabled=app.state.tagger is not None,
+                         model=settings.TAGGER_MODEL if settings.TAGGER != "none" else None, reason=tagger_reason)
     app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
 
     # 끊긴 실행 정리 — 프로세스가 죽으면 그 행은 RUNNING 인 채 남는다. 남겨 두면 중복 판정이 "이미 분석 중"으로
@@ -171,6 +208,12 @@ def _connect_db(settings: Settings) -> sa.Engine:
     except sa.exc.ProgrammingError as e:    # alembic_version 없음(마이그레이션 안 됨) · 읽을 권한 없음(ai_app 인데 0007 이 안 됨)
         engine.dispose()
         raise RuntimeError(f"DB는 있으나 마이그레이션 장부를 못 읽음({type(e.orig).__name__}) → uv run alembic upgrade head") from e
+    if version != EXPECTED_MIGRATION:
+        msg = f"DB 마이그레이션 판 {version} ≠ 코드가 기대하는 {EXPECTED_MIGRATION} — 마이그레이션(alembic upgrade head)을 먼저 돌린다"
+        if settings.STRICT_STARTUP:
+            engine.dispose()
+            raise RuntimeError(msg)
+        log.warning("%s (로컬 — STRICT_STARTUP 이 아니라 계속 뜬다. /readyz 는 503)", msg)
     if superuser:
         if settings.DB_REFUSE_SUPERUSER:
             engine.dispose()
@@ -246,6 +289,40 @@ async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "INTERNAL_SERVER_ERROR", "서버 오류가 발생했습니다.")
 
 
+@app.get("/healthz", tags=["ops"])
+async def healthz() -> dict:
+    """**Liveness**(ECS) — 프로세스가 살아 있으면 늘 200. DB · 카탈로그 · 외부 LLM 을 보지 않는다(그것들이 죽어도 재시작으로 안 고쳐진다).
+    검색 · 챗봇이 이미 쓰는 이름을 따랐다(10-15 프로파일링 담당 선택). BE 핑은 /health — 그대로 둔다."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz", tags=["ops"])
+async def readyz(request: Request) -> JSONResponse:
+    """**Readiness**(ECS) — 7.6 을 받아 처리할 준비가 됐나. 활성 카탈로그 · DB 연결 · 마이그레이션 판(EXPECTED_MIGRATION)이 다 맞으면 200,
+    하나라도 아니면 503. **외부 LLM 은 보지 않는다** — LLM 이 죽어도 태그 없이 30개를 보내므로 트래픽에서 빼면 안 된다(10-15 프로파일링 담당 선택).
+    LLM 상태는 /health 의 `llm` 칸."""
+    state = request.app.state
+    checks = await anyio.to_thread.run_sync(_ready_checks, state, limiter=state.io_limiter)
+    ready = all(checks.values())
+    return JSONResponse(status_code=200 if ready else 503, content={"ready": ready, "checks": checks})
+
+
+def _ready_checks(state) -> dict[str, bool]:
+    try:
+        state.catalog.active()
+        catalog = True
+    except NoActiveCatalog:
+        catalog = False
+    try:
+        with state.engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT")
+            version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
+        db, migration = True, version == EXPECTED_MIGRATION
+    except sa.exc.SQLAlchemyError:
+        db = migration = False
+    return {"catalog": catalog, "db": db, "migration": migration}
+
+
 @app.get("/health", tags=["ops"])
 async def health(request: Request) -> dict:
     """살아 있는지 + 활성 카탈로그가 있는지. 카탈로그가 없어도 200 — 프로세스는 살아 있으므로(7.6은 503).
@@ -266,7 +343,8 @@ def _health_sync(state) -> dict:
         catalog = {"active": True, "version": str(version_id), "products": len(products)}
     except NoActiveCatalog as e:
         catalog = {"active": False, "reason": str(e)}
-    return {"status": "ok", "catalog": catalog, "store": _store_health(state), "supervisor": state.supervisor.stats()}
+    return {"status": "ok", "catalog": catalog, "store": _store_health(state), "supervisor": state.supervisor.stats(),
+            "llm": status.LLM.snapshot(), "embedding": getattr(state, "embedding_status", {"enabled": False})}
 
 
 def _store_health(state) -> dict:
@@ -277,7 +355,7 @@ def _store_health(state) -> dict:
             conn.execution_options(isolation_level="AUTOCOMMIT")     # 읽기 한 문장 — BEGIN/ROLLBACK 없이
             version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
         # 결과는 만들었는데 Backend 에 전달하지 못한 행. 늘어나면 콜백 경로에 문제가 있다는 뜻이라 운영이 바로 봐야 한다.
-        return {"backend": "db", "connected": True, "migration": version,
+        return {"backend": "db", "connected": True, "migration": version, "migration_expected": EXPECTED_MIGRATION,
                 "undelivered": state.store.undelivered_count()}
     except sa.exc.SQLAlchemyError as e:      # 연결 끊김·테이블 없음 등 DB 쪽 오류만 — 그 외는 500으로 드러나야 한다
         return {"backend": "db", "connected": False, "reason": type(e).__name__}

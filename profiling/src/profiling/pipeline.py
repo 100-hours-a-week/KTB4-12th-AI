@@ -36,7 +36,7 @@ from enum import StrEnum
 from typing import NamedTuple
 from uuid import UUID
 
-from profiling import selection, tagging
+from profiling import selection, status, tagging
 from profiling.ports import (
     CatalogReader,
     EmbeddingIndex,
@@ -348,12 +348,13 @@ def profile(
         tag_status = "skip" if not needs_model(rq) else "off"   # 글 · 취향 없음 → skip, 추출기 꺼짐 → off
         llm_cost: float | None = None
         if needs_model(rq) and tagger is None:
-            log.info("profile recipient=%s: 취향/리뷰(%d개) 있음 — 태그 추출기 꺼짐(TAGGER=none), 별점 편향 소분류 %d개만 반영",
+            log.info("profile recipient=%s: 취향/리뷰(%d개) 있음 — 태그 추출기 없음(꺼짐 또는 키 없음 — /health 의 llm 칸), 별점 편향 소분류 %d개만 반영",
                      rid, len(rq.reviews), len(scores))
         elif needs_model(rq):
             spec = tag_spec or tagging.SPEC
             tag_run = _extract_tags(rq, products, tagger, disliked_names, spec)
             validation, tags, prompt_version, tag_status = tag_run.validation, tag_run.tags, tag_run.prompt_version, tag_run.status
+            status.LLM.record(tag_status)          # /health 의 llm 칸 — 외부 LLM 장애를 프로세스 장애와 구분(10-15)
             llm_cost = tag_run.usage.cost_usd if tag_run.usage else None
             validator_version = spec.validator_version
 

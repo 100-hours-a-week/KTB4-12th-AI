@@ -174,6 +174,13 @@ class Settings(BaseSettings):
                     "복구 전송). compose 종료 유예 10초보다 짧게",
     )
     LOG_LEVEL: str = Field(default="INFO", description="logging 레벨 이름")
+    STRICT_STARTUP: bool = Field(
+        default=False,
+        description="서버(개발 · 운영 ECS) 기동 검사 — true 면 다음일 때 **기동을 거부**한다: DB 마이그레이션 판이 코드가 기대하는 판"
+                    "(main.EXPECTED_MIGRATION)과 다름 · SERVICE_TOKEN 이 비었거나 공개 기본값(dev-token) · DATABASE_URL 비밀번호가 "
+                    "공개 기본값(ai_password · ai_app_password) · BACKEND_BASE_URL 이 로컬 가짜 BE 기본값 · CATALOG_SOURCE 가 db 가 아님. "
+                    "로컬 개발 · compose · 시험은 false(기본) — 기본값으로 돌기 때문. Task Definition 에서 true(10-15)",
+    )
 
 
 @lru_cache(maxsize=1)
