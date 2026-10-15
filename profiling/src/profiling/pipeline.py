@@ -289,10 +289,9 @@ def category_scores(rq: ProfileRequest, products: list[ProductRecord], catalog: 
 
     catalog.by_id() 를 쓰지 않는 이유: DbCatalogReader.by_id() 는 부를 때마다 활성 버전을 따라잡아(catalog.py) 요청 도중 새 카탈로그가
     활성화되면 풀과 소분류 사전이 서로 다른 버전이 된다 — "한 요청 안에서 한 번만 잡아 끝까지 같은 버전" 원칙(가이드 10-11 보강 B).
-    catalog 는 임시 번호 여부(provisional_ids)를 경고에 싣는 데만 쓴다.
+    catalog 인자는 호출 모양을 지키려고 남겼다(쓰지 않는다).
 
-    리뷰 상품이 카탈로그에 없으면 그 리뷰는 건너뛴다. BE 번호 회신(--id-map) 전에는 카탈로그가 수집처 숫자를 **임시 번호**로 써서
-    BE 번호인 리뷰가 하나도 안 맞는다 — 오류 없이 편향만 비므로 원인까지 경고에 찍는다(보강 C). 원문은 남기지 않는다(번호·개수만).
+    리뷰 상품이 카탈로그에 없으면 그 리뷰는 건너뛴다 — 오류 없이 편향만 비므로 경고에 개수를 찍는다(보강 C). 원문은 남기지 않는다(번호·개수만).
     """
     reviewed = {r.product_id for r in rq.reviews}
     if not reviewed:
@@ -300,9 +299,8 @@ def category_scores(rq: ProfileRequest, products: list[ProductRecord], catalog: 
     category_of = {p.productId: p.categoryId for p in products}
     category_by_product = {pid: category_of[pid] for pid in reviewed if pid in category_of}
     if len(category_by_product) < len(reviewed):
-        hint = " — 카탈로그가 임시 번호 사용 중(BE id-map 전)" if getattr(catalog, "provisional_ids", False) else ""
-        log.warning("profile recipient=%s 리뷰 상품 %d/%d개만 카탈로그에 있음%s", rq.recipient_user_id,
-                    len(category_by_product), len(reviewed), hint)
+        log.warning("profile recipient=%s 리뷰 상품 %d/%d개만 카탈로그에 있음", rq.recipient_user_id,
+                    len(category_by_product), len(reviewed))
     return score_categories(rq.reviews, category_by_product)
 
 

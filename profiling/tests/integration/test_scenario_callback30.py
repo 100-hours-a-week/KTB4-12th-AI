@@ -18,7 +18,7 @@ def db_catalog_ready():
     try:
         with eng.connect() as c:
             active = c.execute(sa.text("select count(*) from ai_catalog.catalog_versions where is_active")).scalar()
-            products = c.execute(sa.text("select count(*) from ai_catalog.products where backend_product_id is not null")).scalar()
+            products = c.execute(sa.text("select count(*) from ai_catalog.products")).scalar()
     except sa.exc.SQLAlchemyError as e:
         pytest.skip(f"PostgreSQL·카탈로그를 읽을 수 없음: {type(e).__name__}")
     finally:

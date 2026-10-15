@@ -2,7 +2,7 @@
 
   상품 벡터  product-search/data/vectors.f32 · manifest.json (Jina v5 nano retrieval q4f16, 768차원, 4,231개) — 읽기만
   질의       product-search/embedding/service.mjs(Node, onnxruntime) 를 한 번 띄워 한 줄씩 — product-search Encoder 와 같은 규약('Query: ')
-  번호 연결  manifest 의 source_product_id → ai_catalog.products.backend_product_id (BE 번호)
+  번호 연결  manifest 의 수집처 상품 ID → ai_catalog.products.source_product_id 로 찾아 products.id (BE 번호)
 
 `version` = 모델 해시 앞 8 + 벡터 해시 앞 8 — 같은 입력 = 같은 결과를 지키려면 실행 기록에 남긴다.
 모델 라이선스 CC BY-NC 4.0(비상업) — 서비스 반영 전 확인 필요. 그래서 설정 EMBEDDING_DIR 이 없으면 꺼져 있다.
@@ -33,8 +33,8 @@ class ProductSearchEmbedding:
         if model_sha != manifest["model_sha256"]:
             raise RuntimeError("질의 모델과 상품 벡터의 모델이 다름(query_encoder_catalog_mismatch)")
         with engine.connect() as c:
-            back = dict(c.execute(sa.text("select source_product_id, backend_product_id from ai_catalog.products "
-                                          "where backend_product_id is not null")).all())
+            back = dict(c.execute(sa.text("select source_product_id, id from ai_catalog.products "
+                                          "where source_product_id is not null")).all())
         self._row = {back[sid]: i for i, sid in enumerate(manifest["product_ids"]) if sid in back}
         self._V = raw / np.linalg.norm(raw, axis=1, keepdims=True)
         self._dim = manifest["dimensions"]

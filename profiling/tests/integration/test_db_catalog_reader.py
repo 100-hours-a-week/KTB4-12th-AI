@@ -1,7 +1,7 @@
 """catalog.DbCatalogReader — 진짜 PostgreSQL(ai_catalog)에서 활성 버전 한 벌을 읽는지. DB 없거나 적재 전이면 skip.
 
 준비: docker compose up -d && uv run alembic upgrade head
-      uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1
+      uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1 --id-map … --category-id-map … --metrics …
 
 실제 적재분을 읽는 시험이라 **행을 바꾸는 시험은 반드시 되돌린다**(try/finally). 활성 버전 포인터도 원래대로 돌려놓는다.
 """
@@ -54,9 +54,8 @@ def test_reads_active_version_and_maps_fields(engine, active) -> None:
     with engine.connect() as c:
         row = c.execute(sa.text(
             f"select p.name, p.unit_price, p.availability, c.name as cname from {SCHEMA}.products p "
-            f"join {SCHEMA}.categories c on c.source_category_id = p.source_category_id "
-            # Backend 번호가 채워졌으면 그것이 상품 번호, 아직이면 수집처 ID 의 숫자부(임시)
-            "where coalesce(p.backend_product_id, split_part(p.source_product_id, ':', 2)::bigint) = :pid"),
+            f"join {SCHEMA}.categories c on c.id = p.category_id "
+            "where p.id = :pid"),                              # 표의 키가 곧 Backend 상품 번호(0008)
             {"pid": p.productId}).mappings().one()
     assert (p.name, p.price, p.availability, p.categoryName) == (row["name"], row["unit_price"], row["availability"], row["cname"])
     assert cat.by_id(p.productId) is p and cat.by_id(-1) is None
@@ -70,59 +69,13 @@ def test_same_version_is_not_reread(engine) -> None:
     assert second is first
 
 
-def test_provisional_id_gives_way_to_backend_id(engine, active) -> None:
-    """Backend 번호가 있으면 그 번호가 상품 번호. 비어 있는 동안에만 수집처 ID 숫자부(임시)를 쓴다."""
+def test_product_and_category_numbers_are_backend_keys(engine, active) -> None:
+    """상품 번호 · 소분류 번호 · 대분류 번호가 표의 키(Backend 번호)와 같다 — 임시 번호는 없다(0008)."""
     _, package_id, _ = active
+    _, products = DbCatalogReader(engine).active()
     with engine.connect() as c:
-        row = c.execute(sa.text(f"select source_product_id, backend_product_id from {SCHEMA}.products "
-                                "where package_id = :p and backend_product_id is not null "
-                                "order by source_product_id limit 1"), {"p": package_id}).first()
-    if row is None:
-        pytest.skip("Backend 번호가 아직 없음 — import_be_ids + load_catalog --id-map 뒤 실행")
-    sid, backend_id = row
-    provisional = int(sid.split(":")[1])
-
-    cat = DbCatalogReader(engine)
-    cat.active()
-    assert cat.by_id(backend_id) is not None            # Backend 번호로 찾힌다
-    assert cat.by_id(provisional) is None or provisional == backend_id
-    assert cat.provisional_ids is False                 # 전건 채워졌으면 표시가 없다
-
-    with engine.begin() as c:                           # 한 건만 비워 임시 번호 경로를 확인
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = null where source_product_id = :s"), {"s": sid})
-    try:
-        fresh = DbCatalogReader(engine)
-        fresh.active()
-        assert fresh.by_id(provisional) is not None     # 번호가 없으면 임시 번호로
-        assert fresh.by_id(backend_id) is None
-        assert fresh.provisional_ids is True            # 한 건이라도 임시면 표시
-    finally:
-        with engine.begin() as c:
-            c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :b where source_product_id = :s"),
-                      {"b": backend_id, "s": sid})
-
-
-def test_duplicate_product_number_is_refused(engine, active) -> None:
-    """임시 번호와 Backend 번호가 겹치면 다른 상품을 추천하게 된다 — 읽기 자체를 거부한다."""
-    _, package_id, _ = active
-    with engine.connect() as c:
-        row = c.execute(sa.text(f"select source_product_id, source_category_id, "
-                                "coalesce(backend_product_id, split_part(source_product_id, ':', 2)::bigint) "
-                                f"from {SCHEMA}.products where package_id = :p order by source_product_id limit 1"),
-                        {"p": package_id}).one()
-    _sid, cid, taken = row
-    clash = f"DUPTEST:{taken}"                                 # 숫자부가 기존 Backend 번호와 같다 → 임시 번호가 충돌
-    with engine.begin() as c:
-        c.execute(sa.text(f"insert into {SCHEMA}.products (source_product_id, name, brand, source_category_id, product_kind, "
-                          "product_type, description, unit_price, source_provider, source_product_url, source_image_url, package_id) "
-                          "values (:s, '중복시험', 'b', :c, 'k', 'Shipping', 'd', 1000, 'TEST', 'https://x', 'https://x.jpg', :p)"),
-                  {"s": clash, "c": cid, "p": package_id})
-    try:
-        with pytest.raises(NoActiveCatalog, match="겹칩니다"):
-            DbCatalogReader(engine).active()
-    finally:
-        with engine.begin() as c:
-            c.execute(sa.text(f"delete from {SCHEMA}.products where source_product_id = :s"), {"s": clash})
+        keys = dict(c.execute(sa.text(f"select id, category_id from {SCHEMA}.products where package_id = :p"), {"p": package_id}).all())
+    assert {p.productId: p.categoryId for p in products} == keys
 
 
 def test_no_active_version_raises(engine, active) -> None:
@@ -176,10 +129,10 @@ def test_parent_category_is_filled_from_db(engine, active) -> None:
     p = products[0]
     with engine.connect() as c:
         row = c.execute(sa.text(
-            f"select cp.backend_category_id as pid, cp.name as pname from {SCHEMA}.products p "
-            f"join {SCHEMA}.categories c on c.source_category_id = p.source_category_id "
-            f"join {SCHEMA}.categories cp on cp.source_category_id = c.parent_source_category_id "
-            "where coalesce(p.backend_product_id, split_part(p.source_product_id, ':', 2)::bigint) = :pid"),
+            f"select cp.id as pid, cp.name as pname from {SCHEMA}.products p "
+            f"join {SCHEMA}.categories c on c.id = p.category_id "
+            f"join {SCHEMA}.categories cp on cp.id = c.parent_id "
+            "where p.id = :pid"),
             {"pid": p.productId}).mappings().one()
     assert (p.parentCategoryId, p.parentCategoryName) == (row["pid"], row["pname"])
 

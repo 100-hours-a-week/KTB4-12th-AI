@@ -46,8 +46,8 @@ def main() -> int:
     eng = sa.create_engine(get_settings().DATABASE_URL)
     with eng.connect() as c:
         info = {r[0]: (r[1], r[2]) for r in c.execute(sa.text(
-            "select p.backend_product_id, c.name, p.view_count from ai_catalog.products p "
-            "join ai_catalog.categories c on c.source_category_id = p.source_category_id where p.backend_product_id is not null"))}
+            "select p.id, c.name, p.view_count from ai_catalog.products p "
+            "join ai_catalog.categories c on c.id = p.category_id"))}
     views = np.array(sorted(v for _, v in info.values()))
     vpct = lambda v: float(np.searchsorted(views, v, side="left") / (len(views) - 1))
     sets = [load(f) for f in a.files]

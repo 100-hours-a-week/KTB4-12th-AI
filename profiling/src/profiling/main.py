@@ -264,9 +264,6 @@ def _health_sync(state) -> dict:
     try:
         version_id, products = state.catalog.active()
         catalog = {"active": True, "version": str(version_id), "products": len(products)}
-        if getattr(state.catalog, "provisional_ids", False):
-            # Backend 번호가 아직 없어 임시 번호로 도는 상태 — 배포는 되지만 7.7로 내보낸 번호는 Backend에 없다
-            catalog["provisional_ids"] = True
     except NoActiveCatalog as e:
         catalog = {"active": False, "reason": str(e)}
     return {"status": "ok", "catalog": catalog, "store": _store_health(state), "supervisor": state.supervisor.stats()}

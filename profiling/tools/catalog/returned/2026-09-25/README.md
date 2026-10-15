@@ -9,8 +9,8 @@ BE가 보낸 xlsx 두 개를 `tools/catalog/import_be_ids.py`로 바꾼 중간 �
 
 | 만든 파일 | 줄 수 | 쓰는 곳 |
 |---|---|---|
-| `category-id-map.jsonl` | 67 | `load_catalog --category-id-map` → `categories.backend_category_id` |
-| `product-id-map.jsonl` | 4,231 | `load_catalog --id-map` → `products.backend_product_id` |
+| `category-id-map.jsonl` | 67 | `load_catalog --category-id-map` → `categories.id`(표의 키, 0008) |
+| `product-id-map.jsonl` | 4,231 | `load_catalog --id-map` → `products.id`(표의 키, 0008) |
 | `metrics.jsonl` | 4,231 | `load_catalog --metrics` → `products.availability` · `view_count` |
 
 ## 어떻게 이었나
@@ -34,9 +34,11 @@ BE가 보낸 xlsx 두 개를 `tools/catalog/import_be_ids.py`로 바꾼 중간 �
 uv run python -m tools.catalog.import_be_ids \
   --categories ~/Downloads/카테고리_DB_ID_매핑_2026-09-23.xlsx \
   --products   ~/Downloads/v1_상품목록_4231개_2026-09-23.xlsx \
+  --package    ~/Downloads/product-catalog-20260922-v1 \
   --out        tools/catalog/returned/2026-09-25/
 
 uv run python -m tools.catalog.load_catalog \
+  --package         ~/Downloads/product-catalog-20260922-v1 \
   --id-map          tools/catalog/returned/2026-09-25/product-id-map.jsonl \
   --category-id-map tools/catalog/returned/2026-09-25/category-id-map.jsonl \
   --metrics         tools/catalog/returned/2026-09-25/metrics.jsonl

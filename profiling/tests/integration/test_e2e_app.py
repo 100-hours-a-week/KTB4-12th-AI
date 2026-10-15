@@ -130,8 +130,7 @@ def test_health_reports_catalog_and_store(engine) -> None:
 def test_app_boots_on_db_catalog(engine, cleanup, monkeypatch) -> None:
     """배포 모양 — PROFILING_CATALOG_SOURCE=db 로 띄우면 ai_catalog 의 활성 버전으로 돌아야 한다.
 
-    컨테이너 안에는 카탈로그 파일이 없으므로 이 경로가 배포 기본값이다. Backend 번호가 아직 없으면
-    /health 가 provisional_ids 로 그 사실을 드러낸다(임시 번호로 7.7을 보내면 Backend에 없는 번호가 된다).
+    컨테이너 안에는 카탈로그 파일이 없으므로 이 경로가 배포 기본값이다. 표의 키가 Backend 번호라(0008) 임시 번호 표시는 없다.
     """
     monkeypatch.setenv("PROFILING_CATALOG_SOURCE", "db")
     get_settings.cache_clear()
@@ -142,8 +141,6 @@ def test_app_boots_on_db_catalog(engine, cleanup, monkeypatch) -> None:
     version_id, package_id = row
     with engine.connect() as c:
         n = c.execute(sa.text("select count(*) from ai_catalog.products where package_id = :p"), {"p": package_id}).scalar_one()
-        filled = c.execute(sa.text("select count(*) from ai_catalog.products where package_id = :p "
-                                   "and backend_product_id is not null"), {"p": package_id}).scalar_one()
 
     try:
         from profiling.main import app
@@ -151,12 +148,12 @@ def test_app_boots_on_db_catalog(engine, cleanup, monkeypatch) -> None:
             health = client.get("/health").json()
             assert health["catalog"]["active"] is True
             assert health["catalog"]["version"] == str(version_id) and health["catalog"]["products"] == n
-            assert health["catalog"].get("provisional_ids", False) is (filled < n)
+            assert "provisional_ids" not in health["catalog"]
 
             app.state.backend = RecordingBackend()
             res = client.post("/api/internal/v1/ai/profile/extract-and-pool",
                               json={"recipientUserId": RID, "sourceVersion": 9,
-                                    "dislikedCategories": [{"categoryId": 802, "categoryName": "출산·육아용품"}],   # 입력이 있어야 30개 (전부 비면 0개 — 결정 C)
+                                    "dislikedCategories": [{"categoryId": 8, "categoryName": "유아·키즈"}],   # Backend 대분류 번호. 입력이 있어야 30개 (전부 비면 0개 — 결정 C)
                                     "giftPreference": None, "reviews": []})
             assert res.status_code == 202
             assert _until(lambda: _delivered(app.state.store, RID))

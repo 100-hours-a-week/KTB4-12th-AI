@@ -3,9 +3,11 @@
   uv run python -m tools.catalog.import_be_ids \
       --categories ~/Downloads/카테고리_DB_ID_매핑_2026-09-23.xlsx \
       --products   ~/Downloads/v1_상품목록_4231개_2026-09-23.xlsx \
+      --package    ~/Downloads/product-catalog-20260922-v1 \
       --out        tools/catalog/returned/2026-09-25/
 
-**DB에 쓰지 않는다.** 중간 파일을 만들고 끝낸다 — 반영은 `load_catalog`이 하고, 중간 파일이 남아야
+**DB를 읽지도 쓰지도 않는다(0008 부터).** 패키지 파일과 회신 파일만 읽어 중간 파일을 만든다 — 반영은 `load_catalog`이 적재할 때
+이 번호를 표의 키로 붙이고, 중간 파일이 남아야 중간 파일을 만들고 끝낸다 — 반영은 `load_catalog`이 하고, 중간 파일이 남아야
 "무엇을 왜 그렇게 이었나"를 나중에 확인할 수 있다.
 
 BE 회신에는 **수집처 ID(KAKAO_GIFT:… · CAT-01-02)가 없다.** BE가 발급한 번호와 이름·가격뿐이라 이름으로 잇는다.
@@ -13,10 +15,10 @@ BE 회신에는 **수집처 ID(KAKAO_GIFT:… · CAT-01-02)가 없다.** BE가 �
   상품      (이름, 브랜드, 가격, 소분류 이름) 으로. 그래도 남는 중복은 양쪽을 정렬해 1:1로 붙인다
             (BE 표에 이름·브랜드·가격·분류가 완전히 같은 상품이 몇 건 있다 — 구분할 근거가 없다)
 
-한 BE 번호가 두 상품에 붙으면 **즉시 실패**한다. 그대로 넣으면 uq_products_backend_id 에 걸리고,
+한 BE 번호가 두 상품에 붙으면 **즉시 실패**한다. 그대로 넣으면 products PK 에 걸리고,
 설령 통과해도 다른 상품을 추천하게 된다.
 
-종료 코드: 0 성공 · 1 파일·매칭 오류 · 2 DB 오류 · 3 확인만 하고 끝(dry-run)
+종료 코드: 0 성공 · 1 파일·매칭 오류 · 3 확인만 하고 끝(dry-run)
 """
 
 from __future__ import annotations
@@ -29,12 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import sqlalchemy as sa
-
-from profiling.settings import get_settings
 from tools.catalog._xlsx import XlsxError, rows
-
-SCHEMA = "ai_catalog"
+from tools.catalog.load_catalog import PackageError, read_package
 
 ## 두 xlsx 의 열 순서 (2026-09-23 회신). 헤더 문구로 한 번 확인하고 쓴다.
 CATEGORY_HEADER = ("대분류 ID", "대분류 이름", "소분류 ID", "소분류 이름")
@@ -69,18 +67,13 @@ def read_products(path: Path) -> list[dict[str, Any]]:
             for r in _table(path, PRODUCT_HEADER)]
 
 
-def read_ours(engine: sa.Engine) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """지금 ai_catalog 에 있는 상품·카테고리 (활성 버전의 패키지만)."""
-    with engine.connect() as c:
-        package = c.execute(sa.text(f"select package_id from {SCHEMA}.catalog_versions where is_active")).scalar()
-        if package is None:
-            raise RuntimeError(f"{SCHEMA}.catalog_versions 에 활성 버전이 없다 — 먼저 load_catalog 로 적재하세요")
-        products = [dict(r) for r in c.execute(sa.text(
-            f"""select p.source_product_id, p.name, p.brand, p.unit_price, c.name as leaf_name
-                from {SCHEMA}.products p join {SCHEMA}.categories c on c.source_category_id = p.source_category_id
-                where p.package_id = :pkg"""), {"pkg": package}).mappings()]
-        categories = [dict(r) for r in c.execute(sa.text(
-            f"select source_category_id, name, level from {SCHEMA}.categories")).mappings()]
+def read_ours(package: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """전달 패키지의 상품 · 카테고리 (매칭 함수가 쓰는 모양으로)."""
+    pkg = read_package(package)
+    leaf_name = {c["sourceCategoryId"]: c["name"] for c in pkg["categories"]}
+    products = [{"source_product_id": p["sourceProductId"], "name": p["productName"], "brand": p["brandName"],
+                 "unit_price": p["unitPrice"], "leaf_name": leaf_name.get(p["sourceCategoryId"], "")} for p in pkg["products"]]
+    categories = [{"source_category_id": c["sourceCategoryId"], "name": c["name"], "level": c["level"]} for c in pkg["categories"]]
     return products, categories
 
 
@@ -180,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Backend 회신 xlsx → id-map · metrics jsonl")
     ap.add_argument("--categories", type=Path, required=True, help="카테고리 DB ID 매핑 xlsx")
     ap.add_argument("--products", type=Path, required=True, help="v1 상품목록 xlsx")
+    ap.add_argument("--package", type=Path, required=True, help="전달 패키지 폴더 (product-catalog-YYYYMMDD-vN)")
     ap.add_argument("--out", type=Path, required=True, help="jsonl 3개를 쓸 폴더")
     ap.add_argument("--dry-run", action="store_true", help="대조만 하고 쓰지 않는다")
     args = ap.parse_args(argv)
@@ -192,18 +186,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"회신 파일 — 카테고리 {len(be_categories)} · 상품 {len(be_products)}")
 
-    engine = sa.create_engine(get_settings().DATABASE_URL, future=True)
     try:
-        try:
-            our_products, our_categories = read_ours(engine)
-        except (sa.exc.OperationalError, sa.exc.ProgrammingError) as e:
-            print(f"✗ DB 를 읽을 수 없다: {type(e).__name__}\n  → docker compose up -d && uv run alembic upgrade head", file=sys.stderr)
-            return 2
-        except RuntimeError as e:
-            print(f"✗ {e}", file=sys.stderr)
-            return 2
-    finally:
-        engine.dispose()
+        our_products, our_categories = read_ours(args.package)
+    except PackageError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
     print(f"우리 카탈로그 — 카테고리 {len(our_categories)} · 상품 {len(our_products)}")
 
     cat_pairs, cat_problems = match_categories(our_categories, be_categories)
@@ -236,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     write_jsonl(args.out / "category-id-map.jsonl", categories_map)
     write_jsonl(args.out / "metrics.jsonl", metrics)
     print(f"  ✓ {args.out}/ 에 product-id-map({len(products_map)}) · category-id-map({len(categories_map)}) · metrics({len(metrics)})")
-    print("\n다음: uv run python -m tools.catalog.load_catalog --id-map … --category-id-map … --metrics …")
+    print("\n다음: uv run python -m tools.catalog.load_catalog --package … --id-map … --category-id-map … --metrics …")
     return 0
 
 

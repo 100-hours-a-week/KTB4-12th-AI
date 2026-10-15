@@ -104,8 +104,8 @@ def load_vectors(products) -> tuple[np.ndarray, dict[str, Any]]:
     row_of = {sid: i for i, sid in enumerate(manifest["product_ids"])}
     eng = sa.create_engine(get_settings().DATABASE_URL, future=True)
     with eng.connect() as c:
-        src = dict(c.execute(sa.text("select backend_product_id, source_product_id from ai_catalog.products "
-                                     "where backend_product_id is not null")).all())
+        src = dict(c.execute(sa.text("select id, source_product_id from ai_catalog.products "
+                                     "where source_product_id is not null")).all())
     eng.dispose()
     missing = [p.productId for p in products if src.get(p.productId) not in row_of]
     if missing:

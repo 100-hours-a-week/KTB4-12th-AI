@@ -22,7 +22,7 @@ Backend 가 받는 사람의 **비선호 카테고리 · 취향 문장 · 최근
 cd profiling
 uv sync                                       # .venv + 의존성 (uv.lock 그대로)
 docker compose up -d ai-db                    # 로컬 PostgreSQL 16 + pgvector (Docker Desktop)
-uv run alembic upgrade head                   # 0001 ~ 0007 (0007 앱 계정 ai_app — 아래 '앱 계정')
+uv run alembic upgrade head                   # 0001 ~ 0008 (0007 앱 계정 ai_app — 아래 '앱 계정' · 0008 카탈로그 키 = Backend 번호)
 uv run pytest -q                              # 420 passed, 1 skipped
 uv run ruff check src tests tools alembic
 ```
@@ -49,13 +49,15 @@ uv run uvicorn profiling.main:app --port 8000
 ```
 
 기동 로그에서 확인: `카탈로그 로드 source=db … products=4231` · `태그 규격 tag3 축=카테고리·IP·브랜드 판=tag3-…` · `태그 추출기 openrouter model=…` · `임베딩 …`.
-`curl localhost:8000/health` → `status ok` · `catalog.active true` · `store.connected true` · `store.migration "0007"`.
+`curl localhost:8000/health` → `status ok` · `catalog.active true` · `store.connected true` · `store.migration "0008"`.
 
 ### 컨테이너로 (배포와 같은 모양)
 
 ```bash
 docker compose up -d --build                  # ai-db(healthy) → ai-migrate(alembic 한 번) → ai-app(:8000)
-docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --package /경로/product-catalog-...   # 카탈로그 적재(일회성)
+docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --package /경로/product-catalog-... \
+    --id-map tools/catalog/returned/2026-09-25/product-id-map.jsonl --category-id-map tools/catalog/returned/2026-09-25/category-id-map.jsonl \
+    --metrics tools/catalog/returned/2026-09-25/metrics.jsonl   # 카탈로그 적재(일회성) — 표의 키가 Backend 번호라 번호표 두 개가 필수(0008)
 ```
 
 이미지에는 `src/` · `alembic/` · 운영 CLI `tools/catalog` 만 들어간다(`.dockerignore` — 시험 · 문서 · 시험 도구 · 시험 결과물 제외).
@@ -101,7 +103,7 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 | `catalog.py` · `stores.py` · `backend.py` | 카탈로그(파일 · DB) · PostgreSQL 저장소 · 7.7 HTTP 어댑터 |
 | `schemas.py` · `types.py` · `ports.py` · `settings.py` | HTTP DTO(camelCase) · 내부 타입(snake_case) · 포트 · 설정(`PROFILING_*`) |
 
-`alembic/versions/` — `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog · `0004` 열 주석 · `0005` recipient_reviews · `0006` 챗봇 조회용(정리본 · 축 태그 · 태그 상태 · 30개 · 판 · 실행별 비용) · `0007` 앱 전용 계정 `ai_app`(권한만, 표 변경 없음).
+`alembic/versions/` — `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog · `0004` 열 주석 · `0005` recipient_reviews · `0006` 챗봇 조회용(정리본 · 축 태그 · 태그 상태 · 30개 · 판 · 실행별 비용) · `0007` 앱 전용 계정 `ai_app`(권한만, 표 변경 없음) · `0008` `ai_catalog` 키를 Backend 번호로(`categories.id` · `parent_id`, `products.id` · `category_id` — Backend 상품 시드와 같은 번호).
 
 **이름 규칙.** HTTP 경계(`schemas.py`)만 camelCase, 나머지는 snake_case. 변환은 `pipeline.to_internal()`(7.6 → 내부) · `backend.to_callback()`(내부 → 7.7) 두 곳뿐. 세부는 [이름_대조표.md](이름_대조표.md).
 

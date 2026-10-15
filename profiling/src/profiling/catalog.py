@@ -6,10 +6,8 @@
 
 어느 쪽을 쓸지는 `main.lifespan`이 설정(`CATALOG_SOURCE`) 하나로 고른다. 업무 코드(pipeline)는 어느 쪽인지 모른다.
 
-**상품 번호 규칙** (DbCatalogReader). 7.6·7.7은 Backend가 발급한 정수 번호로 말한다. 그 번호는 아직 없다(`backend_product_id` 전건 NULL).
-그래서 없는 동안에는 수집처 ID의 숫자부(`KAKAO_GIFT:10002797` → `10002797`)를 **임시 번호**로 쓰고, `provisional_ids=True`로 표시해
-기동 로그와 `/health`에 남긴다. Backend 회신을 `--id-map`으로 채우면 같은 코드가 진짜 번호를 쓰기 시작하고 표시는 사라진다.
-임시 번호는 Backend에 없는 번호이므로 **7.7로 내보내면 화면에 상품이 뜨지 않는다** — 배포는 되지만 추천이 맞으려면 회신이 먼저다.
+**상품 번호 규칙** (DbCatalogReader). 7.6·7.7은 Backend가 발급한 정수 번호로 말한다. `ai_catalog` 의 키가 곧 그 번호다(0008) —
+categories.id · products.id 는 Backend 상품 시드와 같은 번호이고 적재 도구가 번호 없는 행을 받지 않는다. 그래서 임시 번호는 없다.
 
 --- 아래는 FileCatalogReader ---
 
@@ -184,17 +182,15 @@ _ACTIVE_VERSION = sa.text(f"select id, package_id from {SCHEMA}.catalog_versions
 ## products 에는 버전 FK가 없고 package_id 만 있어 그 열로 잇는다(시험용 행이 섞여 있어도 활성 패키지만 본다).
 _ACTIVE_PRODUCTS = sa.text(f"""
     select v.id as version_id, v.package_id,
-           p.source_product_id, p.backend_product_id, p.name, p.brand, p.description, p.product_kind,
-           p.source_category_id, c.backend_category_id, c.name as category_name,
-           cp.backend_category_id as parent_backend_category_id, cp.name as parent_category_name,
+           p.id, p.name, p.brand, p.description, p.product_kind,
+           p.category_id, c.name as category_name, c.parent_id, cp.name as parent_category_name,
            p.unit_price, p.availability, p.view_count, p.updated_at
     from {SCHEMA}.catalog_versions v
     join {SCHEMA}.products p on p.package_id = v.package_id
-    join {SCHEMA}.categories c on c.source_category_id = p.source_category_id
-    left join {SCHEMA}.categories cp on cp.source_category_id = c.parent_source_category_id
+    join {SCHEMA}.categories c on c.id = p.category_id
+    left join {SCHEMA}.categories cp on cp.id = c.parent_id
     where v.is_active""")
 ## 부모(대분류)를 같이 읽는 이유: 비선호가 대분류 id·이름으로 오고(09-27 BE 결정) 풀에서 그 하위 소분류 전체를 제외해야 한다.
-## 부모의 Backend 번호가 아직 없으면 None 으로 둔다(임시 번호를 만들지 않는다 — 대분류는 회신 없이 쓸 일이 없다).
 
 def _freeze_long_lived() -> None:
     """카탈로그처럼 프로세스 내내 사는 객체를 GC 영구 세대로 옮긴다(gc.freeze) — 세대 2 수집이 그것들을 다시 훑지 않게.
@@ -211,26 +207,6 @@ def _freeze_long_lived() -> None:
     gc.collect()
     gc.freeze()
     log.info("gc.freeze — 영구 세대 객체 %d개(카탈로그 포함)", gc.get_freeze_count())
-
-
-_SOURCE_PRODUCT_ID = re.compile(r"^[A-Z_]+:(\d+)$")        # KAKAO_GIFT:10002797
-_SOURCE_CATEGORY_ID = re.compile(r"^CAT-(\d+)-(\d+)$")     # CAT-01-02
-
-
-def _provisional_product_id(source_product_id: str) -> int:
-    """Backend 번호가 없는 동안 쓰는 임시 상품 번호 — 수집처 ID의 숫자부. FileCatalogReader의 원형 변환과 같은 규칙."""
-    m = _SOURCE_PRODUCT_ID.match(source_product_id)
-    if not m:
-        raise NoActiveCatalog(f"상품 ID에서 번호를 뽑을 수 없습니다: {source_product_id}")
-    return int(m.group(1))
-
-
-def _provisional_category_id(source_category_id: str) -> int:
-    """임시 카테고리 번호 — 대분류*100 + 소분류. FileCatalogReader의 원형 변환과 같은 규칙."""
-    m = _SOURCE_CATEGORY_ID.match(source_category_id)
-    if not m:
-        raise NoActiveCatalog(f"카테고리 ID에서 번호를 뽑을 수 없습니다: {source_category_id}")
-    return int(m.group(1)) * 100 + int(m.group(2))
 
 
 class DbCatalogReader:
@@ -253,7 +229,6 @@ class DbCatalogReader:
         self._by_id: dict[int, ProductRecord] = {}
         self._snapshot: tuple[UUID, list[ProductRecord]] | None = None   # active() 가 돌려주는 한 벌 — _load 끝에 통째로 바꾼다
         self._polled_at: float | None = None                              # 마지막 **성공한** 폴링 시각(monotonic). None = 아직 안 물었다
-        self.provisional_ids = False
         self.loaded_at: datetime | None = None
 
     # ---- ports.CatalogReader ------------------------------------------------
@@ -305,41 +280,23 @@ class DbCatalogReader:
             raise NoActiveCatalog("활성 버전의 패키지에 상품이 없습니다 — tools/catalog/load_catalog.py 로 적재하세요")
         version, package_id = rows[0]["version_id"], rows[0]["package_id"]
 
-        products: list[ProductRecord] = []
-        provisional_p = provisional_c = 0
-        for r in rows:
-            pid = r["backend_product_id"]
-            if pid is None:
-                pid = _provisional_product_id(r["source_product_id"])
-                provisional_p += 1
-            cid = r["backend_category_id"]
-            if cid is None:
-                cid = _provisional_category_id(r["source_category_id"])
-                provisional_c += 1
-            products.append(ProductRecord(
-                productId=pid, name=r["name"], brand=r["brand"], description=r["description"] or None,
-                categoryId=cid, categoryName=r["category_name"],
-                parentCategoryId=r["parent_backend_category_id"], parentCategoryName=r["parent_category_name"],
+        products = [ProductRecord(
+                productId=r["id"], name=r["name"], brand=r["brand"], description=r["description"] or None,
+                categoryId=r["category_id"], categoryName=r["category_name"],
+                parentCategoryId=r["parent_id"], parentCategoryName=r["parent_category_name"],
                 productKind=r["product_kind"] or None, price=r["unit_price"],
                 availability=r["availability"], updatedAt=r["updated_at"], viewCount=r["view_count"] or 0,
-            ))
+            ) for r in rows]
 
         products.sort(key=lambda p: p.productId)        # 7.9 export와 같은 순서
-        by_id = {p.productId: p for p in products}
-        if len(by_id) != len(products):                 # 진짜 번호와 임시 번호가 섞여 충돌한 경우 — 그대로 쓰면 다른 상품을 추천한다
-            raise NoActiveCatalog(f"상품 번호가 겹칩니다({len(products) - len(by_id)}건) — Backend ID 회신을 끝까지 적용하세요")
+        by_id = {p.productId: p for p in products}      # products.id 가 PK 라 겹칠 수 없다
 
         self._products, self._by_id, self._version = products, by_id, version
         self._snapshot = (version, products)                  # 튜플 하나를 통째로 바꿔 "버전은 옛것, 상품은 새것"인 순간이 없다
-        self.provisional_ids = bool(provisional_p or provisional_c)
         self.loaded_at = datetime.now(UTC)
         log.info("DbCatalogReader 로드 version=%s package=%s 상품 %d건 (재고 available %d · unknown %d)",
                  version, package_id, len(products),
                  sum(p.availability == "available" for p in products), sum(p.availability == "unknown" for p in products))
-        if self.provisional_ids:
-            log.warning("%s 임시 상품 번호 사용 중 — 상품 %d/%d · 카테고리 %d건이 Backend 번호가 아니다. "
-                        "7.7로 내보내면 Backend에 없는 번호가 된다. load_catalog.py --id-map 으로 회신을 채우세요",
-                        ErrorCode.CONTRACT_7_9_SCHEMA, provisional_p, len(products), provisional_c)
         del rows                                        # DB 행 4천 개를 아래 freeze 에 끌고 들어가지 않게
         _freeze_long_lived()
 

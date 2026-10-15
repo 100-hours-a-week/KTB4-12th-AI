@@ -376,20 +376,13 @@ def test_profile_with_reviews_applies_bias_and_stores_scores(caplog) -> None:
     assert not any("좋아요" in r.message for r in caplog.records)               # 리뷰 원문은 로그에 남지 않는다
 
 
-def test_profile_reviews_not_in_catalog_warn_with_provisional_hint(caplog) -> None:
-    """임시 번호 카탈로그(BE id-map 전)면 BE 번호인 리뷰가 하나도 안 맞는다 — 편향 0, 결과는 리뷰 없을 때와 같고 경고에 원인이 찍힌다(보강 C)."""
-    class ProvisionalCatalog(FakeCatalog):
-        provisional_ids = True
-
+def test_profile_reviews_not_in_catalog_warn(caplog) -> None:
+    """리뷰 상품이 카탈로그에 없으면 편향 0 — 결과는 리뷰 없을 때와 같고 경고에 개수가 찍힌다(보강 C)."""
     rq = _rq(reviews=[Review(product_id=999, rating=5)])
     with caplog.at_level("WARNING", logger="profiling.pipeline"):
-        out = pipeline.profile(rq, catalog=ProvisionalCatalog(BIAS_PRODUCTS), store=FakeStore(), recipient_store=FakeRecipientStore())
+        out = pipeline.profile(rq, catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(), recipient_store=FakeRecipientStore())
     assert out.search.product_ids == [1, 3, 2, 4]
-    assert any("0/1" in r.message and "임시 번호" in r.message for r in caplog.records)
-    caplog.clear()
-    with caplog.at_level("WARNING", logger="profiling.pipeline"):
-        pipeline.profile(rq, catalog=FakeCatalog(BIAS_PRODUCTS), store=FakeStore(), recipient_store=FakeRecipientStore())
-    assert any("0/1" in r.message for r in caplog.records) and not any("임시 번호" in r.message for r in caplog.records)
+    assert any("0/1" in r.message for r in caplog.records)
 
 
 def test_profile_finds_category_from_active_snapshot_not_by_id() -> None:
