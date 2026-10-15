@@ -1,4 +1,4 @@
-"""마이그레이션 0003 · 0008(ai_catalog, 키 = Backend 번호) 과 적재 SQL — 진짜 PostgreSQL. DB 없으면 skip.
+"""ai_catalog(키 = Backend 번호) 표와 적재 SQL — 진짜 PostgreSQL. DB 없으면 skip.
 실행: docker compose up -d && uv run alembic upgrade head && uv run pytest tests/integration -q
 
 시험용 번호(9,000,000,000 대 — 실제 Backend 번호 1~수천과 겹치지 않음)를 쓰고 끝에 지운다. 활성 버전 포인터는 건드리지 않는다(activate=False)."""
@@ -75,7 +75,7 @@ def test_tables_and_constraints_exist(engine) -> None:
                 "ck_products_unit_price", "ck_products_id", "ck_products_availability"} <= checks
         cols = {(r[0], r[1]): r[2] for r in c.execute(sa.text(
             "select table_name, column_name, is_nullable from information_schema.columns where table_schema = :s"), {"s": SCHEMA})}
-        # 0008: 키는 Backend 번호 — 수집처 키 열은 없고, 수집처 상품 ID 는 키가 아닌 일반 열
+        # 키는 Backend 번호 — 수집처 키 열은 없고, 수집처 상품 ID 는 키가 아닌 일반 열
         assert cols[("categories", "id")] == "NO" and cols[("products", "id")] == "NO" and cols[("products", "category_id")] == "NO"
         assert ("categories", "source_category_id") not in cols and ("products", "source_category_id") not in cols
         assert ("products", "backend_product_id") not in cols and cols[("products", "source_product_id")] == "YES"

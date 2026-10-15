@@ -55,6 +55,7 @@ def migration_ok(version: str | None) -> bool:
     return bool(version) and len(version) == len(EXPECTED_MIGRATION) and version >= EXPECTED_MIGRATION
 _DEFAULT_SECRETS = ("dev-token",)
 _DEFAULT_DB_PASSWORDS = (":ai_password@", ":ai_app_password@")
+_PUBLIC_DB_USERS = ("ai_user", "ai_app")      # 로컬 compose 의 공개 기본 계정 이름 — 서버는 비공개 이름(PROFILING_APP_DB_ROLE)
 _DEFAULT_BACKEND = "http://localhost:8081"
 
 
@@ -63,6 +64,12 @@ def strict_problems(settings: Settings) -> list[str]:
     problems = []
     if not settings.SERVICE_TOKEN.strip() or settings.SERVICE_TOKEN in _DEFAULT_SECRETS:
         problems.append("PROFILING_SERVICE_TOKEN 이 비었거나 공개 기본값")
+    try:
+        db_user = sa.engine.make_url(settings.DATABASE_URL).username
+    except sa.exc.ArgumentError:
+        db_user = None
+    if db_user in _PUBLIC_DB_USERS:
+        problems.append("PROFILING_DATABASE_URL 의 계정 이름이 공개 기본값 — 서버는 비공개 앱 계정(PROFILING_APP_DB_ROLE)")
     if any(p in settings.DATABASE_URL for p in _DEFAULT_DB_PASSWORDS):
         problems.append("PROFILING_DATABASE_URL 의 비밀번호가 공개 기본값")
     if settings.BACKEND_BASE_URL.rstrip("/") == _DEFAULT_BACKEND:
@@ -213,7 +220,7 @@ def _connect_db(settings: Settings) -> sa.Engine:
             f"DB 연결 실패 ({settings.DATABASE_URL.split('@')[-1]}): {e.orig if hasattr(e, 'orig') else e}\n"
             "  → docker compose up -d && uv run alembic upgrade head"
         ) from e
-    except sa.exc.ProgrammingError as e:    # alembic_version 없음(마이그레이션 안 됨) · 읽을 권한 없음(ai_app 인데 0007 이 안 됨)
+    except sa.exc.ProgrammingError as e:    # alembic_version 없음(마이그레이션 안 됨) · 읽을 권한 없음(앱 계정 권한이 아직 없음)
         engine.dispose()
         raise RuntimeError(f"DB는 있으나 마이그레이션 장부를 못 읽음({type(e.orig).__name__}) → uv run alembic upgrade head") from e
     if version != EXPECTED_MIGRATION and migration_ok(version):
@@ -227,8 +234,8 @@ def _connect_db(settings: Settings) -> sa.Engine:
     if superuser:
         if settings.DB_REFUSE_SUPERUSER:
             engine.dispose()
-            raise RuntimeError(f"앱이 슈퍼유저 계정({user})으로 접속했다 — 앱 전용 계정 ai_app(0007)으로 PROFILING_DATABASE_URL 을 바꾼다")
-        log.warning("앱이 슈퍼유저 계정(%s)으로 접속 — 로컬 전용. 운영 · 개발 서버는 ai_app + PROFILING_DB_REFUSE_SUPERUSER=true", user)
+            raise RuntimeError(f"앱이 슈퍼유저 계정({user})으로 접속했다 — 앱 전용 계정으로 PROFILING_DATABASE_URL 을 바꾼다")
+        log.warning("앱이 슈퍼유저 계정(%s)으로 접속 — 로컬 전용. 운영 · 개발 서버는 앱 전용 계정 + PROFILING_DB_REFUSE_SUPERUSER=true", user)
     log.info("DB 연결 %s migration=%s user=%s pool=%d+%d timeout=%.0fs statement=%dms lock=%dms",
              settings.DATABASE_URL.split("@")[-1], version, user, pool_size, settings.DB_MAX_OVERFLOW, settings.DB_POOL_TIMEOUT_S,
              settings.DB_STATEMENT_TIMEOUT_MS, settings.DB_LOCK_TIMEOUT_MS)

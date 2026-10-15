@@ -26,7 +26,7 @@ from profiling.types import CallbackResult, ErrorCode, ProfileOutcome, RunStatus
 
 log = logging.getLogger(__name__)
 
-# 문서 1 §7.7 경로. tools/fake_backend/app.py의 CALLBACK_PATH와 같아야 한다 (테스트에서 대조).
+# 문서 1 §7.7 경로.
 CALLBACK_PATH = "/api/internal/v1/recipients/{recipientUserId}/profile"
 
 

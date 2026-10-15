@@ -30,7 +30,8 @@ def test_prompt_lists_reviews_in_order_dedups_and_skips_unknown() -> None:
     assert ratings == {"r1": 5, "r2": 2}                                       # 같은 상품 두 번째 · 없는 상품은 빠짐
     assert "r1. 별점 5점 · 상품명: 코롱 30ML · 브랜드: 조말론런던 · 분류: 대1 > c10 · 종류: 공용향수 · 리뷰 글: 은은해요" in prompt
     assert prompt.startswith("취향 문장(pref): 향 좋아해요")
-    assert tagging.PROMPT_SHA256.startswith("2fc950d4")                      # 10-12 로컬 모델 비교에 쓴 프롬프트와 같다
+    assert tagging.load_spec("tag4").sha256.startswith("2fc950d4")           # 10-12 로컬 모델 비교에 쓴 4축 프롬프트와 같다
+    assert tagging.SPEC.name == "tag3" and tagging.PROMPT_SHA256.startswith("56098b49")   # 기본은 v2 운영 3축(10-15)
 
 
 def test_validator_keeps_multi_ref_and_drops_low_rating_promo_unknown() -> None:
@@ -101,7 +102,7 @@ def test_profile_extracts_tags_stores_them_and_drives_embedding_pool(caplog) -> 
         out, row = _profile(rq, products, tagger=tagger, embedding=FakeEmbedding({p.productId: p.categoryId for p in products}))
     assert out.status is RunStatus.RESULT_READY and tagger.calls == 1
     assert out.validation.preferred_tags == ["소분류 3"] and [(t.axis, t.tag, t.ref) for t in row.preferred_tags] == [("카테고리", "소분류 3", "pref")]
-    assert out.prompt_version == f"{tagging.PROMPT_VERSION}@fake-llm" and out.validator_version == pipeline.VALIDATOR_VERSION_TAG4
+    assert out.prompt_version == f"{tagging.PROMPT_VERSION}@fake-llm" and out.validator_version == tagging.SPEC.validator_version
     assert out.search.query_text == "소분류 3" and any(pid > 100 for pid in out.search.product_ids)   # 조회수 낮은 태그 소분류가 들어옴
     assert any(selection.POOL_RULE_D_EMBED in r.message for r in caplog.records)
     assert not any("비밀문장" in r.message for r in caplog.records)           # 원문은 로그에 없다
@@ -166,14 +167,14 @@ def test_parse_report_and_drop_reason_key() -> None:
 
 
 def test_system_prompt_comes_from_file_and_version_tracks_content(tmp_path) -> None:
-    """프롬프트 파일(10-13) — 기본 파일은 2fc950d4 그대로, 다른 파일이면 글이 바뀌고 해시도 바뀐다, 빈 파일은 거부."""
+    """프롬프트 파일(10-13) — 기본 규격(tag3)의 파일 그대로, 다른 파일이면 글이 바뀌고 해시도 바뀐다, 빈 파일은 거부."""
     import hashlib
     import json as _json
 
     import pytest
 
-    assert tagging.DEFAULT_PROMPT_FILE.exists() and tagging.load_system(tagging.DEFAULT_PROMPT_FILE) == tagging.SYSTEM
-    assert tagging.PROMPT_VERSION == "tag4-2fc950d4"
+    assert tagging.SPEC.prompt_file.exists() and tagging.load_system(tagging.SPEC.prompt_file) == tagging.SYSTEM
+    assert tagging.PROMPT_VERSION == "tag3-56098b49"
     alt = tmp_path / "alt.md"
     alt.write_text(tagging.SYSTEM + "\n8. 욕설 · 개인정보는 태그로 만들지 않는다.\n", encoding="utf-8")
     text = tagging.load_system(alt)

@@ -237,8 +237,8 @@ class ProfileOutcome(BaseModel):
     callback_attempts: int = 0          # 7.7 시도 횟수. run_and_callback이 콜백 뒤 +1 해서 저장
     prompt_version: str | None = None
     validator_version: str | None = None
-    tag_status: str | None = None       # 태그 단계 결과 — ok · empty · bad_json · fail:<종류> · skip_no_signal · off · skip (0006)
-    llm_cost_usd: float | None = None   # 외부 API 실제 청구액(OpenRouter usage.cost). 로컬 · 끔이면 None (0006)
+    tag_status: str | None = None       # 태그 단계 결과 — ok · empty · bad_json · fail:<종류> · skip_no_signal · off · skip
+    llm_cost_usd: float | None = None   # 외부 API 실제 청구액(OpenRouter usage.cost). 로컬 · 끔이면 None
     updated_at: datetime | None = None  # **읽을 때만** 채운다 (store.get_run). save()는 무시하고 DB가 now()로 쓴다.
                                         # 접수 단계 중복 판정이 "이 RUNNING이 아직 살아 있나"를 이 값으로 본다
 
@@ -262,7 +262,7 @@ def rating_score(rating: int) -> int:
 
 
 class CategoryScore(BaseModel):
-    """소분류 하나의 누적 — recipient_profiles.category_scores 의 원소(0005). 편향은 저장하지 않고 읽을 때 계산한다."""
+    """소분류 하나의 누적 — recipient_profiles.category_scores 의 원소. 편향은 저장하지 않고 읽을 때 계산한다."""
 
     category_id: int
     n: int = Field(ge=0, description="내가 별점을 매긴 상품 수 (같은 상품은 최신 1건)")
@@ -316,7 +316,7 @@ def preference_hash(text: str | None) -> str | None:
 
 
 class ReviewRecord(BaseModel):
-    """ai_profile.recipient_reviews 한 행(0005 · 0006) — 수신자 한 사람의 리뷰 ≤10, 상품당 최신 1건. 분석마다 행 전체를 교체한다(스냅샷).
+    """ai_profile.recipient_reviews 한 행 — 수신자 한 사람의 리뷰 ≤10, 상품당 최신 1건. 분석마다 행 전체를 교체한다(스냅샷).
 
     **리뷰 글은 가드레일 정리본만 저장한다**(10-13 DR-039 — 결정 C 의 구현). 정리본 = guard.clean(개인정보 · 욕설 가림, 의미 없는 글 ·
     인젝션 의심 글은 None). 원문 그대로는 저장하지 않는다 — 원문 정본은 Backend. review_hash 는 원문 기준(바뀜 판정 · 캐시 키).
@@ -327,7 +327,7 @@ class ReviewRecord(BaseModel):
     review_hash: str = Field(min_length=64, max_length=64, description="review_hash() — 캐시 키 (상품·별점·정규화 글)")
     position: int = Field(ge=0, le=9, description="7.6 reviews 배열에서의 자리(0이 가장 최신, 7.6 상한 10개 → 0~9 · DB CHECK 와 같음). "
                                                    "건너뛴 중복이 있으면 번호가 빌 수 있다")
-    text_clean: str | None = Field(default=None, description="리뷰 글 정리본(guard.clean) — 글 없음 · 의미 없음 · 인젝션 의심이면 None (0006)")
+    text_clean: str | None = Field(default=None, description="리뷰 글 정리본(guard.clean) — 글 없음 · 의미 없음 · 인젝션 의심이면 None")
 
 
 def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
@@ -350,7 +350,7 @@ def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
 # ---------------------------------------------------------------------------
 
 class ProfileTag(BaseModel):
-    """검증기 통과 선호 태그 하나 — recipient_profiles.preferred_tags 의 원소(0006 · DR-040). 챗봇 조회 API 가 그대로 내준다."""
+    """검증기 통과 선호 태그 하나 — recipient_profiles.preferred_tags 의 원소. 챗봇 조회 API 가 그대로 내준다."""
 
     axis: str = Field(description="태그 규격의 축 — tag3: 카테고리 · IP · 브랜드(tag4 는 + 특징)")
     tag: str
@@ -365,19 +365,19 @@ class RecipientProfile(BaseModel):
     source_version: int
     profile_run_id: str | None = None
     preferred_tags: list[ProfileTag] = Field(default_factory=list,
-                                             description="선호 태그(축 · 출처 · 근거 자리) — 추천 30개를 고를 때 쓴 태그 그대로, 자르지 않는다 (0006 · DR-040). "
+                                             description="선호 태그(축 · 출처 · 근거 자리) — 추천 30개를 고를 때 쓴 태그 그대로, 자르지 않는다. "
                                                          "ValidationResult.preferred_tags(글자 목록, 메모리)와 이름만 같다")
     axes: dict[str, list[ValidatedTag]] = Field(default_factory=lambda: {"likes": [], "key_features": [], "dislikes": []})
     disliked_categories: list[DislikedCategory] = Field(default_factory=list)   # 7.6 의 명시 비선호(번호 + 이름) 사본 — 비선호는 이것 하나(DR-040)
     recommended_product_ids: list[int] = Field(default_factory=list, max_length=30)
     gift_preference_hash: str | None = Field(default=None, min_length=64, max_length=64,
-                                             description="7.6 giftPreference 원문의 지문(preference_hash) — 바뀜 판정용. 없거나 공백이면 None (0005)")
+                                             description="7.6 giftPreference 원문의 지문(preference_hash) — 바뀜 판정용. 없거나 공백이면 None")
     gift_preference_clean: str | None = Field(default=None, description="취향 문장 정리본(guard.clean) — 원문은 저장하지 않음(DR-039). "
-                                                                        "없거나 의미 없음 · 인젝션 의심이면 None (0006)")
-    guard_version: str | None = Field(default=None, description="정리 규칙 판(guard.GUARD_VERSION) (0006)")
-    tag_status: str | None = Field(default=None, description="태그 단계 결과 — ProfileOutcome.tag_status (0006)")
-    category_scores: list[CategoryScore] = Field(default_factory=list, description="소분류별 별점 누적 — 편향 = score_sum ÷ (n + 2) (0005)")
-    reviews: list[ReviewRecord] = Field(default_factory=list, max_length=10, description="이번 분석에 쓴 리뷰 ≤10 — recipient_reviews 자식 행, 스냅샷 교체 (0005)")
+                                                                        "없거나 의미 없음 · 인젝션 의심이면 None")
+    guard_version: str | None = Field(default=None, description="정리 규칙 판(guard.GUARD_VERSION)")
+    tag_status: str | None = Field(default=None, description="태그 단계 결과 — ProfileOutcome.tag_status")
+    category_scores: list[CategoryScore] = Field(default_factory=list, description="소분류별 별점 누적 — 편향 = score_sum ÷ (n + 2)")
+    reviews: list[ReviewRecord] = Field(default_factory=list, max_length=10, description="이번 분석에 쓴 리뷰 ≤10 — recipient_reviews 자식 행, 스냅샷 교체")
     catalog_version_id: UUID | None = None
     prompt_version: str | None = None
     validator_version: str | None = None

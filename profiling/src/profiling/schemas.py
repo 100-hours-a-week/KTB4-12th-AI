@@ -167,7 +167,7 @@ class ProfileCallbackAccepted(BaseModel):
 
 
 ## 상품 레코드 — data.products[] 한 건. description만 null 허용.
-## 모르는 필드는 무시(extra="ignore") — Backend가 필드를 더 보내도 상품이 버려지지 않게. 무엇이 왔는지는 가져오기 CLI(tools/catalog/fetch_export.py)가 보고한다.
+## 모르는 필드는 무시(extra="ignore") — Backend가 필드를 더 보내도 상품이 버려지지 않게.
 class ProductRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

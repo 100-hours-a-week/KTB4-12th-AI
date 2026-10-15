@@ -19,7 +19,7 @@ tag3(카테고리 · IP · 브랜드, v2 운영 — 의사결정기록 DR-038). 
 프롬프트를 바꾸면 판 이름(PROMPT_VERSION = <규격>-<글 + 스키마 해시 8자>)이 바뀌고 실행 기록 · 프로필의 prompt_version 에 남는다.
 서비스는 기동 때 load_spec() 한 번 → app.state.tag_spec → 요청마다 pipeline.profile(tag_spec=…) 로 넘긴다. 아래 모듈 값
 (SPEC · AXES · SYSTEM · SCHEMA · PROMPT_VERSION)은 기본 규격 — 도구 · 시험 편의용.
-도구 tools/embed_compare/extract_tags.py(로컬 모델 비교)도 이 모듈을 그대로 쓴다 — 10-12 비교 실험의 프롬프트 해시 2fc950d4.
+모델 비교 실험 도구도 이 모듈을 그대로 쓴다(10-12 비교 실험의 프롬프트 해시 2fc950d4.
 """
 
 from __future__ import annotations

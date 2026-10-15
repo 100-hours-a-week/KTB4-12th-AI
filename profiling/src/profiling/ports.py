@@ -104,7 +104,7 @@ class BackendPort(Protocol):
 class RecipientProfileStore(Protocol):
     """수신자 프로필(태그) 보관 — ai_profile.recipient_profiles. 구현: stores.DbRecipientProfileStore.
     ProfileRunStore(실행 기록·전달 상태)와 분리: 실행 기록은 시도마다 한 행, 프로필은 수신자당 한 행(최신 분석이 덮어씀).
-    upsert·get·delete 는 리뷰 자식 행(recipient_reviews, 0005)을 포함한다 — 저장은 스냅샷 교체, 낮은 버전이면 둘 다 그대로."""
+    upsert·get·delete 는 리뷰 자식 행(recipient_reviews)을 포함한다 — 저장은 스냅샷 교체, 낮은 버전이면 둘 다 그대로."""
 
     def upsert(self, profile: RecipientProfile) -> None: ...
 

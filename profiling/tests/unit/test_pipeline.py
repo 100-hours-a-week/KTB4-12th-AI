@@ -1,4 +1,4 @@
-"""pipeline — 가짜 adapter(ports 모양)로 v1 흐름. DB·HTTP 없음."""
+"""pipeline — 가짜 adapter(ports 모양)로 v2 흐름(별점 편향 · 태그 · 30개 고르기 D · 저장 · 콜백 본문). DB·HTTP 없음."""
 
 from datetime import UTC, datetime
 from uuid import UUID

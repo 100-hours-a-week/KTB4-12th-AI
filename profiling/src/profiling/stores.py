@@ -2,7 +2,7 @@
 
   DbProfileRunStore        ai_profile.profile_runs        실행 기록 — (수신자, source_version) 한 쌍마다 한 행
   DbRecipientProfileStore  ai_profile.recipient_profiles  프로필 — 수신자당 한 행, 최신 분석이 덮어씀
-                           + ai_profile.recipient_reviews 리뷰 자식 행(0005) — 프로필과 **한 문장**으로 함께 저장
+                           + ai_profile.recipient_reviews 리뷰 자식 행 — 프로필과 **한 문장**으로 함께 저장
 
 표 구조·UPSERT 규칙·상태 전이는 docs/DB_전환_설명.md, 근거는 3단계 구현 상세 §10.2·§16.4 및 담당파트 설계서 §1.7.
 다른 구현을 끼울 자리는 ports.py(Protocol)이고, 조립은 main.py 한 곳에서만 한다.
@@ -100,7 +100,7 @@ _RUN_UPSERT = sa.text(f"""
         callback_hash      = coalesce(excluded.callback_hash, {RUNS_TABLE}.callback_hash),
         callback_attempts  = greatest(excluded.callback_attempts, {RUNS_TABLE}.callback_attempts),
         error              = excluded.error,
-        tag_status         = coalesce(excluded.tag_status, {RUNS_TABLE}.tag_status),          -- 콜백 뒤 저장 · 재전송은 이 값을 안 실어 온다(0006)
+        tag_status         = coalesce(excluded.tag_status, {RUNS_TABLE}.tag_status),          -- 콜백 뒤 저장 · 재전송은 이 값을 안 실어 온다
         prompt_version     = coalesce(excluded.prompt_version, {RUNS_TABLE}.prompt_version),
         validator_version  = coalesce(excluded.validator_version, {RUNS_TABLE}.validator_version),
         llm_cost_usd       = coalesce(excluded.llm_cost_usd, {RUNS_TABLE}.llm_cost_usd),
@@ -318,7 +318,7 @@ class DbProfileRunStore:
 PROFILES_TABLE = "ai_profile.recipient_profiles"
 REVIEWS_TABLE = "ai_profile.recipient_reviews"
 
-# 프로필 + 리뷰 스냅샷을 한 문장으로 (0005 · v2 4단계). 덩어리 셋:
+# 프로필 + 리뷰 스냅샷을 한 문장으로. 덩어리 셋:
 #   p  프로필 upsert. 버전 가드(기존 <= 새)에 막히면 RETURNING 이 0행 → 아래 d·u 가 p 를 조건으로 걸어 아무것도 하지 않는다
 #      (옛 분석이 새 분석의 리뷰를 덮지 않게). **p 가 첫 덩어리**라 같은 수신자의 다른 버전이 동시에 와도 프로필 행 잠금에서 줄을 선다.
 #      다만 줄을 선 뒤에도 d 의 스냅샷은 문장 시작 때 것이다 — 그래서 upsert() 가 이 문장 **앞에** 수신자 잠금을 건다(_PROFILE_LOCK)
@@ -344,11 +344,11 @@ _PROFILE_SAVE = sa.text(f"""
                 cast(:recommended as jsonb), :catalog_version_id)
         on conflict (recipient_user_id) do update set
             source_version       = excluded.source_version,
-            preferred_tags       = excluded.preferred_tags,             -- 0006: 축 · 출처가 붙은 모양(DR-040)
+            preferred_tags       = excluded.preferred_tags,             -- 축 · 출처가 붙은 모양(DR-040)
             disliked_categories  = excluded.disliked_categories,
             gift_preference_hash = excluded.gift_preference_hash,
             category_scores      = excluded.category_scores,
-            gift_preference_clean   = excluded.gift_preference_clean,      -- 0006: 정리본 · 상태 · 30개 — 최신 한 벌로 덮는다
+            gift_preference_clean   = excluded.gift_preference_clean,      -- 정리본 · 상태 · 30개 — 최신 한 벌로 덮는다
             guard_version           = excluded.guard_version,
             tag_status              = excluded.tag_status,
             prompt_version          = excluded.prompt_version,
@@ -485,6 +485,6 @@ class DbRecipientProfileStore:
         )
 
     def delete(self, recipient_user_id: int) -> bool:
-        """프로필 삭제 — 리뷰 자식 행은 FK ON DELETE CASCADE 로 함께 사라진다(0005)."""
+        """프로필 삭제 — 리뷰 자식 행은 FK ON DELETE CASCADE 로 함께 사라진다."""
         with self._engine.begin() as conn:
             return conn.execute(sa.text(f"delete from {PROFILES_TABLE} where recipient_user_id = :rid"), {"rid": recipient_user_id}).rowcount > 0

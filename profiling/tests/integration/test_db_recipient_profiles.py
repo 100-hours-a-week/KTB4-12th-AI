@@ -34,9 +34,9 @@ def test_schema_applied(conn, alembic_head) -> None:
         where table_schema='ai_profile' and table_name='recipient_profiles' order by ordinal_position""")).all()
     names = [c[0] for c in cols]
     assert names == ["recipient_user_id", "source_version", "preferred_tags", "disliked_categories", "created_at", "updated_at",
-                     "gift_preference_hash", "category_scores",                 # 0005: ADD COLUMN 은 뒤에 붙는다
+                     "gift_preference_hash", "category_scores",                 # ADD COLUMN 은 뒤에 붙는다
                      "gift_preference_clean", "guard_version", "tag_status", "prompt_version", "validator_version",
-                     "recommended_product_ids", "catalog_version_id"]          # 0006: 챗봇 조회용(정리본 · 상태 · 30개). disliked_tags 는 지움(DR-040)
+                     "recommended_product_ids", "catalog_version_id"]          # 챗봇 조회용(정리본 · 상태 · 30개). disliked_tags 는 지움(DR-040)
     idx = {r[0] for r in conn.execute(sa.text("select indexname from pg_indexes where schemaname='ai_profile' and tablename='recipient_profiles'"))}
     assert "ix_recipient_profiles_preferred_tags" in idx and "ix_recipient_profiles_disliked_tags" not in idx
     assert {c[0]: c[2] for c in cols}["category_scores"].startswith("'[]'::jsonb")
@@ -67,7 +67,7 @@ def test_upsert_keeps_newer_version(conn) -> None:
     assert conn.execute(sa.text("select preferred_tags -> 0 ->> 'tag' from ai_profile.recipient_profiles where recipient_user_id=1")).scalar() == "새것"
 
 
-# ---- recipient_reviews · 리뷰 신호 열 (0005) — 원문은 저장하지 않는다(10-11 결정 B) ---------------------------------------
+# ---- recipient_reviews · 리뷰 신호 열 — 원문은 저장하지 않는다(10-11 결정 B) ---------------------------------------
 # 수신자 번호는 9_000_001 부터 — 로컬 DB 에 콘솔 시험 데이터(작은 번호)가 남아 있어도 겹치지 않게
 
 R1 = 9_000_001
@@ -82,7 +82,7 @@ def test_recipient_reviews_schema(conn) -> None:
         select column_name, col_description(('ai_profile.' || table_name)::regclass, ordinal_position)
         from information_schema.columns where table_schema='ai_profile' and table_name='recipient_reviews' order by ordinal_position""")).all()
     assert [c[0] for c in cols] == ["recipient_user_id", "product_id", "rating", "review_hash", "position", "created_at", "updated_at",
-                                    "review_text_clean"]                       # 0006: 리뷰 글 정리본
+                                    "review_text_clean"]                       # 리뷰 글 정리본
     assert all(c[1] for c in cols if c[0] not in ("created_at", "updated_at"))   # 업무 열마다 주석 (팀 규칙)
     pk = conn.execute(sa.text("""
         select string_agg(a.attname, ',' order by array_position(i.indkey, a.attnum))
@@ -118,7 +118,7 @@ def test_recipient_reviews_cascade_and_checks(conn) -> None:
     assert left == 0                                                              # 부모를 지우면 자식도 사라진다
 
 
-# ---- profile_runs (0002) -------------------------------------------------------------------------------------------------
+# ---- profile_runs -------------------------------------------------------------------------------------------------
 
 def test_profile_runs_schema(conn) -> None:
     names = [r[0] for r in conn.execute(sa.text("""
@@ -126,7 +126,7 @@ def test_profile_runs_schema(conn) -> None:
         where table_schema='ai_profile' and table_name='profile_runs' order by ordinal_position""")).all()]
     assert names == ["id", "recipient_user_id", "source_version", "input_hash", "status", "attempt", "catalog_version_id",
                      "callback_payload", "callback_hash", "callback_attempts", "error", "created_at", "updated_at",
-                     "tag_status", "prompt_version", "validator_version", "llm_cost_usd"]   # 0006
+                     "tag_status", "prompt_version", "validator_version", "llm_cost_usd"]
     idx = conn.execute(sa.text("select indexdef from pg_indexes where schemaname='ai_profile' and indexname='unique_profile_source'")).scalar()
     assert idx and "UNIQUE" in idx and "(recipient_user_id, source_version)" in idx
 

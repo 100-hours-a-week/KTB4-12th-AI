@@ -73,7 +73,8 @@ def test_validator_drops_sentence_profanity_and_pii_tags() -> None:
     keep, drop = tagging.validate([{"axis": "특징", "tag": "아기가 잘 자요", "ref": "pref"},
                                    {"axis": "IP", "tag": "시발 굿즈", "ref": "pref"},
                                    {"axis": "특징", "tag": "010-1111-2222", "ref": "pref"},
-                                   {"axis": "특징", "tag": "숙면", "ref": "pref"}], {}, has_pref=True)
+                                   {"axis": "특징", "tag": "숙면", "ref": "pref"}], {}, has_pref=True,
+                                  spec=tagging.load_spec("tag4"))           # 특징 축이 있는 4축 규격으로 — 문장 · 욕설 · 개인정보 거름만 본다
     assert [t["tag"] for t in keep] == ["숙면"]
     assert sorted(tagging.drop_reason_key(t["drop"]) for t in drop) == ["개인정보", "문장형", "욕설"]
 

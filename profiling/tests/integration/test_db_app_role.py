@@ -1,9 +1,10 @@
-"""앱 전용 계정 ai_app(0007) · 접속 설정(10-13 DB 검토) — 실제 DB 로.
+"""앱 전용 계정(이름 = PROFILING_APP_DB_ROLE · 로컬 기본 ai_app) · 접속 설정(10-13 DB 검토) — 실제 DB 로.
 
-  권한     소유자 계정으로 권한 함수(has_*_privilege)를 본다 + SET ROLE ai_app 으로 앱 경로(잠금 · 저장 · 읽기)를 실제로 돌린다
+  권한     소유자 계정으로 권한 함수(has_*_privilege)를 본다 + SET ROLE <앱 계정> 으로 앱 경로(잠금 · 저장 · 읽기)를 실제로 돌린다
   접속     main._connect_db 가 세션에 시간 상한을 걸고 풀 크기를 슬롯에 맞추는가 · 슈퍼유저 거부 · 저장 잠금 대기가 lock_timeout 에서 끊기는가
-DB 가 없으면 skip. 소유자가 ai_app 으로 SET ROLE 할 수 없으면(슈퍼유저도 멤버도 아님) 그 시험만 skip. 수신자 번호 9,500,001 ~ (DB_ERD §8)."""
+DB 가 없으면 skip. 소유자가 앱 계정으로 SET ROLE 할 수 없으면(슈퍼유저도 멤버도 아님) 그 시험만 skip. 수신자 번호 9,500,001 ~ (DB_ERD §8)."""
 
+import os
 import time
 
 import pytest
@@ -28,6 +29,8 @@ PROFILE_TABLES = ("ai_profile.recipient_profiles", "ai_profile.recipient_reviews
 CATALOG_TABLES = ("ai_catalog.products", "ai_catalog.categories", "ai_catalog.catalog_versions")
 
 
+ROLE = os.environ.get("PROFILING_APP_DB_ROLE") or "ai_app"     # 마이그레이션과 같은 규칙
+
 @pytest.fixture(scope="module")
 def engine():
     eng = sa.create_engine(get_settings().DATABASE_URL, future=True)
@@ -45,56 +48,56 @@ def engine():
 
 def _q(engine, sql: str, **kw):
     with engine.connect() as c:
-        return c.execute(sa.text(sql), kw).scalar()
+        return c.execute(sa.text(sql), {"role": ROLE, **kw}).scalar()
 
 
 @pytest.fixture(scope="module")
 def app_engine(engine):
-    """SET ROLE ai_app 한 커넥션만 내주는 엔진 — 앱이 ai_app 으로 접속한 것과 같은 권한."""
-    if not _q(engine, "select exists(select 1 from pg_roles where rolname = 'ai_app')"):
-        pytest.skip("ai_app 역할 없음 — alembic upgrade head(0007) 전")
-    if not _q(engine, "select pg_has_role(current_user, 'ai_app', 'MEMBER') or (select rolsuper from pg_roles where rolname = current_user)"):
-        pytest.skip("소유자가 ai_app 으로 SET ROLE 할 수 없음")
+    """SET ROLE <앱 계정> 한 커넥션만 내주는 엔진 — 앱이 앱 계정으로 접속한 것과 같은 권한."""
+    if not _q(engine, "select exists(select 1 from pg_roles where rolname = :role)"):
+        pytest.skip("앱 계정 없음 — alembic upgrade head 전")
+    if not _q(engine, "select pg_has_role(current_user, :role, 'MEMBER') or (select rolsuper from pg_roles where rolname = current_user)"):
+        pytest.skip("소유자가 앱 계정으로 SET ROLE 할 수 없음")
     eng = sa.create_engine(get_settings().DATABASE_URL, future=True)
 
     @sa.event.listens_for(eng, "connect")
     def _as_app(dbapi_conn, _record):
         with dbapi_conn.cursor() as cur:
-            cur.execute("SET ROLE ai_app")
+            cur.execute(f"SET ROLE {ROLE}")                  # ROLE 은 마이그레이션과 같은 규칙으로 검사된 이름
         dbapi_conn.commit()                       # SET 은 트랜잭션을 따른다 — 커밋해야 세션 내내 남는다
 
     yield eng
     eng.dispose()
 
 
-# ---------------------------------------------------------------- 권한 (0007)
+# ---------------------------------------------------------------- 권한
 
 
 def test_app_role_is_not_superuser_and_cannot_change_schema(engine) -> None:
-    assert _q(engine, "select rolsuper or rolcreaterole or rolcreatedb from pg_roles where rolname = 'ai_app'") is False
+    assert _q(engine, "select rolsuper or rolcreaterole or rolcreatedb from pg_roles where rolname = :role") is False
     for schema in ("ai_profile", "ai_catalog", "public"):
-        assert _q(engine, "select has_schema_privilege('ai_app', :s, 'CREATE')", s=schema) is False, schema
-    assert _q(engine, "select has_schema_privilege('ai_app', 'ai_profile', 'USAGE') and has_schema_privilege('ai_app', 'ai_catalog', 'USAGE')")
+        assert _q(engine, "select has_schema_privilege(:role, :s, 'CREATE')", s=schema) is False, schema
+    assert _q(engine, "select has_schema_privilege(:role, 'ai_profile', 'USAGE') and has_schema_privilege(:role, 'ai_catalog', 'USAGE')")
 
 
 @pytest.mark.parametrize("table", PROFILE_TABLES)
 def test_app_role_reads_and_writes_profile_tables_but_cannot_truncate(engine, table) -> None:
     for priv in ("SELECT", "INSERT", "UPDATE", "DELETE"):
-        assert _q(engine, "select has_table_privilege('ai_app', :t, :p)", t=table, p=priv), (table, priv)
-    assert _q(engine, "select has_table_privilege('ai_app', :t, 'TRUNCATE')", t=table) is False
+        assert _q(engine, "select has_table_privilege(:role, :t, :p)", t=table, p=priv), (table, priv)
+    assert _q(engine, "select has_table_privilege(:role, :t, 'TRUNCATE')", t=table) is False
 
 
 @pytest.mark.parametrize("table", (*CATALOG_TABLES, "public.alembic_version"))
 def test_app_role_only_reads_catalog_and_migration_ledger(engine, table) -> None:
-    assert _q(engine, "select has_table_privilege('ai_app', :t, 'SELECT')", t=table)
+    assert _q(engine, "select has_table_privilege(:role, :t, 'SELECT')", t=table)
     for priv in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
-        assert _q(engine, "select has_table_privilege('ai_app', :t, :p)", t=table, p=priv) is False, (table, priv)
+        assert _q(engine, "select has_table_privilege(:role, :t, :p)", t=table, p=priv) is False, (table, priv)
 
 
 def test_app_path_runs_as_app_role(app_engine, engine) -> None:
-    """ai_app 권한만으로 운영 경로가 끝까지 도는가 — 실행 잠금 · 기록 저장 · 수신자 저장 잠금 + CTE(리뷰 DELETE 포함) · 읽기."""
+    """앱 계정 권한만으로 운영 경로가 끝까지 도는가 — 실행 잠금 · 기록 저장 · 수신자 저장 잠금 + CTE(리뷰 DELETE 포함) · 읽기."""
     runs, profiles = DbProfileRunStore(app_engine), DbRecipientProfileStore(app_engine)
-    assert _q(app_engine, "select current_user") == "ai_app"
+    assert _q(app_engine, "select current_user") == ROLE
     rq = ProfileRequest(recipient_user_id=RID, source_version=1, gift_preference="향수 좋아해요",
                         disliked_categories=[DislikedCategory(category_id=802, category_name="출산·육아용품")],
                         reviews=[Review(product_id=13006, rating=5, review_text="향이 좋아요"), Review(product_id=13007, rating=2)])

@@ -1,4 +1,4 @@
-"""0007 — 앱 전용 DB 계정 ai_app: ai_profile 읽기 · 쓰기, ai_catalog 읽기만, 표 구조 변경 없음
+"""0007 — 앱 전용 DB 계정: ai_profile 읽기 · 쓰기, ai_catalog 읽기만, 표 구조 변경 없음
 
 Revision ID: 0007
 Revises: 0006
@@ -7,21 +7,23 @@ Create Date: 2026-10-13
 근거: 10-13 DB 검토 — 앱이 DB 소유자 계정(로컬 compose 는 superuser)으로 접속해 표를 지우거나 바꿀 수 있었다. 0006(DR-039)부터
 사람마다 정리본 글을 보관하므로 앱 계정의 권한을 하는 일만큼으로 줄인다. 마이그레이션 · 카탈로그 적재(tools/catalog) · 시험은 소유자 계정 그대로.
 
-  역할       ai_app — 클러스터 공용 이름이라 이미 있으면 만들지 않는다.
+  역할       이름은 PROFILING_APP_DB_ROLE(10-15) — 서버는 비공개 이름을 넣는다. 없으면 로컬 기본 이름(LOCAL_ROLE, 공개된 값이라
+             서버 기동 검사가 거부한다). 클러스터 공용 이름이라 이미 있으면 만들지 않는다.
              로그인 비밀번호는 코드에 없다: 마이그레이션을 돌릴 때 PROFILING_APP_DB_PASSWORD 가 있으면 LOGIN + 그 비밀번호(compose 가 넘긴다),
-             없으면 NOLOGIN 으로 만들고 운영자가 소유자 계정으로 한 번 `ALTER ROLE ai_app LOGIN PASSWORD '…'`.
+             없으면 NOLOGIN 으로 만들고 운영자가 소유자 계정으로 한 번 `ALTER ROLE <앱 계정> LOGIN PASSWORD '…'`.
   권한       ai_profile              USAGE · 표 SELECT · INSERT · UPDATE · DELETE (저장 문장의 리뷰 삭제가 DELETE 를 쓴다)
              ai_catalog              USAGE · 표 SELECT 만 (적재 · 번호 반영은 load_catalog.py — 소유자)
              public.alembic_version  SELECT (기동 · /health 가 마이그레이션 번호를 읽는다)
              앞으로 이 마이그레이션을 돌리는 계정이 두 스키마에 만드는 표에도 같은 권한(ALTER DEFAULT PRIVILEGES)
   안 주는 것 스키마 CREATE · TRUNCATE · REFERENCES · TRIGGER — 표 구조는 마이그레이션만 바꾼다
 
-되돌리면(downgrade) 권한만 거둔다. 역할은 다른 DB 가 쓸 수 있어 지우지 않는다(필요하면 손으로 DROP ROLE ai_app).
+되돌리면(downgrade) 권한만 거둔다. 역할은 다른 DB 가 쓸 수 있어 지우지 않는다(필요하면 손으로 DROP ROLE).
 """
 
 from __future__ import annotations
 
 import os
+import re
 
 import sqlalchemy as sa
 
@@ -32,11 +34,21 @@ down_revision = "0006"
 branch_labels = None
 depends_on = None
 
-ROLE = "ai_app"
+LOCAL_ROLE = "ai_app"                       # 로컬 compose · 시험 전용 기본 이름(공개됨) — 서버는 PROFILING_APP_DB_ROLE 로 바꾼다
+ROLE_ENV = "PROFILING_APP_DB_ROLE"
 PASSWORD_ENV = "PROFILING_APP_DB_PASSWORD"
 
 
+def _role() -> str:
+    """앱 계정 이름 — SQL 에 그대로 들어가므로 소문자 · 숫자 · 밑줄만 받는다."""
+    role = os.environ.get(ROLE_ENV) or LOCAL_ROLE
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", role):
+        raise RuntimeError(f"{ROLE_ENV} 는 소문자 · 숫자 · 밑줄만(63자 이내)")
+    return role
+
+
 def upgrade() -> None:
+    ROLE = _role()
     op.execute(f"""
         DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{ROLE}') THEN
@@ -59,6 +71,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    ROLE = _role()
     op.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA ai_catalog REVOKE SELECT ON TABLES FROM {ROLE}")
     op.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA ai_profile REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM {ROLE}")
     op.execute(f"REVOKE ALL ON public.alembic_version FROM {ROLE}")

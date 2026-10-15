@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     )
 
     # ---- 바깥 연결
-    BACKEND_BASE_URL: str = Field(default="http://localhost:8081", description="7.7 콜백·7.9 export 대상. 로컬은 tools/fake_backend")
+    BACKEND_BASE_URL: str = Field(default="http://localhost:8081", description="7.7 콜백·7.9 export 대상. 로컬 기본값은 :8081 — 서버는 Backend 내부 주소")
     SERVICE_TOKEN: str = Field(default="", description="Backend↔AI 서비스 토큰(Bearer). 비어 있으면 7.6 토큰 검사 생략(로컬 전용)")
     CALLBACK_TIMEOUT_S: float = Field(default=5.0, gt=0, description="7.7 POST 한 번의 타임아웃(초)")
     CALLBACK_MAX_ATTEMPTS: int = Field(
@@ -43,10 +43,10 @@ class Settings(BaseSettings):
     # ---- DB (로컬 compose 기본값. 합칠 때 접두사만 맞춤)
     DATABASE_URL: str = Field(default="postgresql+psycopg://ai_user:ai_password@localhost:5432/ai_chat",
                               description="SQLAlchemy URL (psycopg 3). Alembic env.py도 이 값을 쓴다. 앱은 운영 · 개발 서버에서 "
-                                          "앱 전용 계정 ai_app(0007 — ai_profile 읽기·쓰기, ai_catalog 읽기만)으로, 마이그레이션 · 적재는 소유자 계정으로")
+                                          "앱 전용 계정(ai_profile 읽기·쓰기, ai_catalog 읽기만, 이름은 PROFILING_APP_DB_ROLE)으로, 마이그레이션 · 적재는 소유자 계정으로")
     DB_REFUSE_SUPERUSER: bool = Field(
         default=False,
-        description="true 면 앱이 슈퍼유저 계정으로 접속할 때 기동을 거부한다(운영 · 개발 서버 · compose 는 true + ai_app). "
+        description="true 면 앱이 슈퍼유저 계정으로 접속할 때 기동을 거부한다(운영 · 개발 서버 · compose 는 true + 앱 전용 계정). "
                     "false(로컬 uv 기본)면 경고 로그만")
     # 커넥션 풀(10-13 DB 검토) — 슬롯마다 잠금 커넥션 1개를 분석 내내(LLM 대기 · 콜백 포함) 쥐고, 접수 폴링 · /health 가 IO_THREADS 만큼 더 쓴다
     DB_POOL_SIZE: int | None = Field(
@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     # ---- 카탈로그
     CATALOG_SOURCE: Literal["file", "db"] = Field(
         default="file",
-        description="활성 카탈로그를 어디서 읽나. db = ai_catalog(0003) — **배포는 이쪽**(컨테이너에 파일이 없다). "
+        description="활성 카탈로그를 어디서 읽나. db = ai_catalog — **배포는 이쪽**(컨테이너에 파일이 없다). "
                     "file = CATALOG_FILE 의 JSON — 로컬 개발·시험 기본값",
     )
     CATALOG_FILE: Path = Field(
@@ -118,7 +118,7 @@ class Settings(BaseSettings):
                     "축은 TAG_SPEC 을 따르고, 파일에 적힌 축이 다르면 기동 실패. 상대 경로는 실행 위치(profiling/) 기준. 바꾸면 판 이름(해시)이 바뀐다",
     )
     TAG_SPEC: Literal["tag4", "tag3"] = Field(
-        default="tag4",
+        default="tag3",                     # v2 운영 규격 — Task Definition 에서 빠뜨려도 4축이 조용히 켜지지 않게(10-15)
         description="태그 규격 — 축 · 시스템 프롬프트 · 스키마 · 판 이름 한 묶음(tagging.TagSpec). tag4: 카테고리 · IP · 브랜드 · 특징 "
                     "(prompts/tag4_system.md) · tag3: 카테고리 · IP · 브랜드(prompts/tag3_system.md, v2 운영 — DR-038). "
                     "모르는 이름이면 기동 실패. 바꾸면 서버를 다시 켠다",
@@ -178,7 +178,7 @@ class Settings(BaseSettings):
         default=False,
         description="서버(개발 · 운영 ECS) 기동 검사 — true 면 다음일 때 **기동을 거부**한다: DB 마이그레이션 판이 코드가 기대하는 판"
                     "(main.EXPECTED_MIGRATION)보다 낮음 · SERVICE_TOKEN 이 비었거나 공개 기본값(dev-token) · DATABASE_URL 비밀번호가 "
-                    "공개 기본값(ai_password · ai_app_password) · BACKEND_BASE_URL 이 로컬 가짜 BE 기본값 · CATALOG_SOURCE 가 db 가 아님. "
+                    "공개 기본값 · DATABASE_URL 계정 이름이 공개 기본값(로컬 이름) · BACKEND_BASE_URL 이 로컬 가짜 BE 기본값 · CATALOG_SOURCE 가 db 가 아님. "
                     "로컬 개발 · compose · 시험은 false(기본) — 기본값으로 돌기 때문. Task Definition 에서 true(10-15)",
     )
 

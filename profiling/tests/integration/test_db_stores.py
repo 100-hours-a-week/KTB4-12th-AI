@@ -152,7 +152,7 @@ def test_profile_store_upsert_get_delete_and_version_guard(stores) -> None:
     assert profiles.delete(RID) is True and profiles.get(RID) is None and profiles.delete(RID) is False
 
 
-# ---------------------------------------------------------------- 프로필 + 리뷰 한 문장 저장 (0005 · v2 4단계 · CTE)
+# ---------------------------------------------------------------- 프로필 + 리뷰 한 문장 저장 (· v2 4단계 · CTE)
 
 
 def _rec(pid: int, rating: int, pos: int, text: str | None = None) -> ReviewRecord:
@@ -465,7 +465,7 @@ def test_run_lock_does_not_leave_transaction_open(engine) -> None:
 
 
 def test_profile_runs_column_comments_match_0004(engine) -> None:
-    """0004 — 열 주석이 실제 값(ai_catalog)과 updated_at 의 역할을 말하는지. 09-27 점검에서 한 번 어긋났던 것이라 잠근다."""
+    """열 주석이 실제 값(ai_catalog)과 updated_at 의 역할을 말하는지. 09-27 점검에서 한 번 어긋났던 것이라 잠근다."""
     with engine.connect() as c:
         comments = dict(c.execute(sa.text("""
             select column_name, col_description('ai_profile.profile_runs'::regclass, ordinal_position)
@@ -506,7 +506,7 @@ def test_run_lock_connection_is_reused_for_store_calls(engine) -> None:
 
 
 def test_pipeline_with_tagger_stores_chatbot_profile_data(stores, engine) -> None:
-    """0006 — 챗봇 조회용 데이터가 DB 까지: 정리본 · 축이 붙은 태그 · 태그 상태 · 판 · 30개, 실행 기록에도 상태 · 판 · 비용(10-13)."""
+    """챗봇 조회용 데이터가 DB 까지: 정리본 · 축이 붙은 태그 · 태그 상태 · 판 · 30개, 실행 기록에도 상태 · 판 · 비용(10-13)."""
     from profiling import tagging
     from profiling.ports import TagReply, TokenUsage
 

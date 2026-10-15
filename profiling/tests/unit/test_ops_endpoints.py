@@ -89,7 +89,7 @@ def test_health_has_llm_and_embedding_without_breaking_be_keys() -> None:
 
 
 def _settings(**kw) -> Settings:
-    base = {"SERVICE_TOKEN": "a-real-looking-token", "DATABASE_URL": "postgresql+psycopg://ai_app:S3cret@db:5432/ai_chat",
+    base = {"SERVICE_TOKEN": "a-real-looking-token", "DATABASE_URL": "postgresql+psycopg://svc_profiling_x:S3cret@db:5432/ai_chat",
             "BACKEND_BASE_URL": "http://be.internal:8080", "CATALOG_SOURCE": "db"}
     return Settings(**{**base, **kw})
 
@@ -102,5 +102,11 @@ def test_strict_problems_catch_public_defaults() -> None:
     probs = main.strict_problems(_settings(SERVICE_TOKEN="dev-token",
                                            DATABASE_URL="postgresql+psycopg://ai_app:ai_app_password@db:5432/ai_chat",
                                            BACKEND_BASE_URL="http://localhost:8081", CATALOG_SOURCE="file"))
-    assert len(probs) == 4
+    assert len(probs) == 5                                                          # 토큰 · 계정 이름 · 비밀번호 · BE 주소 · 카탈로그
     assert not any("dev-token" in p or "ai_app_password" in p for p in probs)   # 값 자체는 메시지에 넣지 않는다
+
+
+def test_strict_problems_refuse_public_app_role_name() -> None:
+    """공개된 기본 계정 이름(로컬 기본)으로는 서버가 뜨지 않는다 — 서버는 비공개 이름(PROFILING_APP_DB_ROLE)."""
+    probs = main.strict_problems(_settings(DATABASE_URL="postgresql+psycopg://ai_app:S3cret@db:5432/ai_chat"))
+    assert len(probs) == 1 and "계정 이름" in probs[0] and "ai_app" not in probs[0]

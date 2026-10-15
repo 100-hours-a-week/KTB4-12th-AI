@@ -9,11 +9,11 @@ from profiling.types import RunStatus
 from tests.unit.test_tagging import FakeTagger, _p, _profile, _rq
 
 
-def test_default_spec_is_tag4_and_keeps_the_10_12_version() -> None:
+def test_default_spec_is_tag3_and_tag4_keeps_the_10_12_version() -> None:
     sp = tagging.load_spec("tag4")
     assert sp.axes == tagging.ALL_AXES and sp.prompt_file == tagging.DEFAULT_PROMPT_FILE
     assert sp.version == "tag4-2fc950d4" and sp.validator_version == pipeline.VALIDATOR_VERSION_TAG4   # 10-12 비교 실험 · 기존 기록과 같은 값
-    assert tagging.SPEC.name == "tag4" and tagging.PROMPT_VERSION == sp.version                        # 설정 없으면 기본 규격
+    assert tagging.SPEC.name == "tag3" and tagging.PROMPT_VERSION == tagging.load_spec("tag3").version  # 설정 없으면 v2 운영 규격(10-15)
 
 
 @pytest.mark.parametrize("name, n", [("tag4", 4), ("tag3", 3)])

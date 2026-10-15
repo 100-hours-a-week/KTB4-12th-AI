@@ -137,7 +137,7 @@ def test_to_review_records_keeps_first_per_product_without_text() -> None:
 
 
 def test_review_record_position_capped_at_nine() -> None:
-    """자리는 0~9 — 7.6 상한 10개, DB CHECK(0005)와 같다."""
+    """자리는 0~9 — 7.6 상한 10개, DB CHECK와 같다."""
     with pytest.raises(ValueError):
         rp.ReviewRecord(product_id=1, rating=5, review_hash="a" * 64, position=10)
 

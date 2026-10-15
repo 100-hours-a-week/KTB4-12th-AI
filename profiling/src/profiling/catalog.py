@@ -1,6 +1,6 @@
 """Catalog adapter — 활성 카탈로그 1버전을 `ports.CatalogReader` 모양으로 제공한다. 구현 두 가지.
 
-  DbCatalogReader   `ai_catalog`(마이그레이션 0003)를 읽는다. **배포는 이쪽이다** — 컨테이너 안에 카탈로그 파일이 없기 때문.
+  DbCatalogReader   `ai_catalog`를 읽는다. **배포는 이쪽이다** — 컨테이너 안에 카탈로그 파일이 없기 때문.
                     활성 버전은 `catalog_versions.is_active` 한 행이고, 그 `id`(uuid)가 그대로 `SearchResult.catalog_version_id`가 된다.
   FileCatalogReader 카탈로그 JSON 한 개. 로컬 개발·시험용으로 남긴다(`PROFILING_CATALOG_SOURCE=file`).
 
@@ -150,7 +150,7 @@ class FileCatalogReader:
                  sum(p.availability == "available" for p in products), sum(p.availability == "unknown" for p in products),
                  self.version_label or "-")
         if n_invalid:
-            log.warning("%s %s: 상품 %d건이 7.9 필드 계약에 안 맞아 버림 — tools/catalog/fetch_export.py 로 어느 필드인지 확인",
+            log.warning("%s %s: 상품 %d건이 7.9 필드 계약에 안 맞아 버림",
                         ErrorCode.CONTRACT_7_9_SCHEMA, self.path.name, n_invalid)
 
     # ---- ports.CatalogReader ------------------------------------------------
@@ -169,7 +169,7 @@ class FileCatalogReader:
 
 
 # ===========================================================================
-# DB 구현 — ai_catalog (마이그레이션 0003). 배포 기본값.
+# DB 구현 — ai_catalog. 배포 기본값.
 # ===========================================================================
 
 SCHEMA = "ai_catalog"
