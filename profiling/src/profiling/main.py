@@ -59,6 +59,13 @@ _PUBLIC_DB_USERS = ("ai_user", "ai_app")      # 로컬 compose 의 공개 기본
 _DEFAULT_BACKEND = "http://localhost:8081"
 
 
+def _require_db_url(settings: Settings) -> str:
+    """DB 주소는 코드에 기본값이 없다(10-15) — 없으면 바로 알려 주고 멈춘다."""
+    if not settings.DATABASE_URL.strip():
+        raise RuntimeError("PROFILING_DATABASE_URL 이 없다 — profiling/.env 또는 환경변수로 넣는다(값은 담당에게 받는 로컬 설정 템플릿)")
+    return settings.DATABASE_URL
+
+
 def strict_problems(settings: Settings) -> list[str]:
     """STRICT_STARTUP 에서 기동을 막을 문제 목록(빈 목록이면 통과). 값 자체는 담지 않는다 — 어느 설정이 문제인지만."""
     problems = []
@@ -204,7 +211,7 @@ def _connect_db(settings: Settings) -> sa.Engine:
                            f"슬롯 {settings.PROFILING_SLOTS} + IO_THREADS {settings.IO_THREADS} — 슬롯이 커넥션을 기다리다 실패한다. "
                            "PROFILING_DB_POOL_SIZE 를 비우거나(자동) 늘린다")
     engine = sa.create_engine(
-        settings.DATABASE_URL, pool_pre_ping=True, future=True,
+        _require_db_url(settings), pool_pre_ping=True, future=True,
         pool_size=pool_size, max_overflow=settings.DB_MAX_OVERFLOW, pool_timeout=settings.DB_POOL_TIMEOUT_S,
         connect_args={"connect_timeout": settings.DB_CONNECT_TIMEOUT_S, "options": db_session_options(settings)},
     )

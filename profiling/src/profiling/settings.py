@@ -41,7 +41,7 @@ class Settings(BaseSettings):
                     "최악은 0.5 + 2 + 타임아웃 5초 × 3 ≈ 17.5초")
 
     # ---- DB (로컬 compose 기본값. 합칠 때 접두사만 맞춤)
-    DATABASE_URL: str = Field(default="postgresql+psycopg://ai_user:ai_password@localhost:5432/ai_chat",
+    DATABASE_URL: str = Field(default="",                # 기본값 없음(10-15) — .env 또는 환경변수로. 비면 기동 · 마이그레이션이 멈춘다
                               description="SQLAlchemy URL (psycopg 3). Alembic env.py도 이 값을 쓴다. 앱은 운영 · 개발 서버에서 "
                                           "앱 전용 계정(ai_profile 읽기·쓰기, ai_catalog 읽기만, 이름은 PROFILING_APP_DB_ROLE)으로, 마이그레이션 · 적재는 소유자 계정으로")
     DB_REFUSE_SUPERUSER: bool = Field(

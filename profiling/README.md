@@ -34,7 +34,7 @@ uv run ruff check src tests tools alembic
 
 ```bash
 # AI 앱 (:8000) — 태그 끔(가장 단순). 7.7 콜백은 PROFILING_BACKEND_BASE_URL 의 Backend 로 간다
-PROFILING_SERVICE_TOKEN=dev-token uv run uvicorn profiling.main:app --port 8000
+uv run uvicorn profiling.main:app --port 8000                       # DB 주소 · 토큰은 profiling/.env 에서
 ```
 
 **v2 운영 설정**(외부 API · 3축 · 임베딩) — OpenRouter 키는 `profiling/.env` 의 `PROFILING_OPENROUTER_API_KEY`:
@@ -145,7 +145,7 @@ docker compose run --rm -v /경로:/b:ro ai-migrate python -m tools.catalog.load
 | `DISLIKE_MODE` · `POOL_STRATEGY` · `POOL_SIZE` | `exclude` · `d` · 30 | 비선호 제외/감점 · 고르기 방식 · 개수 |
 | `PROFILING_SLOTS` · `QUEUE_MAX` | 1(코드) · **8(`docker-compose.yml` 배포 기본)** · 200 | 동시 분석 수 · 대기열 상한(넘으면 503). 8 은 10-14 부하 시험 근거 — BE 틱 최대(분당 150명)를 503 없이 받는다(분당 처리 ≈ 슬롯 × 60 ÷ 건당 초). LLM 을 켜면 건당 시간 × 대기열이 BE 의 '분석 중' 시간 초과보다 짧아야 한다 |
 | `CALLBACK_MAX_ATTEMPTS` · `RUNNING_STALE_S` | 3 · 300 | 7.7 재시도 · 끊긴 실행 정리 기준 |
-| `STRICT_STARTUP` | false | **서버(개발 · 운영)는 true.** 마이그레이션 판이 코드(`main.EXPECTED_MIGRATION`)와 다름 · 토큰이 비었거나 `dev-token` · DB 비밀번호가 공개 기본값 · BE 주소가 로컬 가짜 BE · `CATALOG_SOURCE` 가 `db` 아님 → 기동 거부. 로컬 · compose · 시험은 false |
+| `STRICT_STARTUP` | false | **서버(개발 · 운영)는 true.** 마이그레이션 판이 코드(`main.EXPECTED_MIGRATION`)보다 낮음 · 토큰 · DB 계정 이름 · DB 비밀번호가 비었거나 알려진 공개 값 · BE 주소가 로컬 기본값 · `CATALOG_SOURCE≠db` 면 기동 거부 |
 
 ---
 
@@ -179,7 +179,7 @@ docker compose run --rm -v /경로:/b:ro ai-migrate python -m tools.catalog.load
 
 ## 7. 배포 · 보안 주의
 
-- **토큰.** `SERVICE_TOKEN` 이 비면 토큰 검사를 건너뛰고, compose 기본값 `dev-token` 은 공개된 값이다 — 개발 · 운영 서버는 반드시 다른 값을 넣고 `PROFILING_STRICT_STARTUP=true` 로 기본값이면 기동을 막는다.
+- **토큰 · 계정 · 비밀번호.** 코드 · compose 에 기본값을 두지 않는다 — `profiling/.env`(저장소 밖)나 환경변수로 넣는다. `SERVICE_TOKEN` 이 비면 로컬에서는 토큰 검사를 건너뛰지만, 서버(`STRICT_STARTUP=true`)는 빈 값 · 알려진 공개 값을 거부한다.
 - **마이그레이션 판.** 새 마이그레이션을 더하면 `main.EXPECTED_MIGRATION` 도 올린다(단위 시험이 alembic head 와 대조). 서버(엄격 모드)는 판이 다르면 뜨지 않는다 — 배포는 마이그레이션 Task 성공 뒤 앱.
 - **이미지 재현.** 베이스 python · uv 를 다이제스트로 고정했다(검색과 같은 python). 보안 패치는 다이제스트를 일부러 올려 받는다.
 - **DB 계정.** 앱은 앱 전용 계정으로 접속하고 `PROFILING_DB_REFUSE_SUPERUSER=true` 로 슈퍼유저 접속을 막는다. 계정 이름(`PROFILING_APP_DB_ROLE`) · 비밀번호(`PROFILING_APP_DB_PASSWORD`)는 마이그레이션 때 넣는다. 코드의 로컬 기본 이름 · 비밀번호는 공개된 값이라 서버(`STRICT_STARTUP`)는 그 값으로 뜨지 않는다.

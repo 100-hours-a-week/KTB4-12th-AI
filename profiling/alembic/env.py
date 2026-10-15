@@ -17,7 +17,10 @@ config = context.config
 # This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
-config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL)
+_url = get_settings().DATABASE_URL
+if not _url.strip():
+    raise RuntimeError("PROFILING_DATABASE_URL 이 없다 — profiling/.env 또는 환경변수로 넣는다")
+config.set_main_option("sqlalchemy.url", _url)
 
 # add your model's MetaData object here
 # for 'autogenerate' support

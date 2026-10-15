@@ -113,7 +113,7 @@ async def require_service_token(
     403 FORBIDDEN(접근 권한 없음)은 토큰은 맞지만 권한이 없는 경우인데, 서비스 토큰 하나뿐인 지금은 발생하지 않는다.
     """
     expected = settings.SERVICE_TOKEN
-    if not expected:  # 토큰을 설정하지 않은 로컬 개발 환경에서는 검사하지 않는다 (.env.example에 dev-token이 있으므로 보통은 설정됨)
+    if not expected:  # 토큰을 설정하지 않은 로컬 개발 환경에서는 검사하지 않는다. 서버는 기동 검사(STRICT_STARTUP)가 빈 토큰을 거부한다
         return
     if not authorization or not authorization.startswith("Bearer "):
         raise _error(401, "UNAUTHORIZED", "서비스 토큰이 없습니다.")
