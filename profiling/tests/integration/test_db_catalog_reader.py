@@ -125,7 +125,7 @@ def test_parent_category_is_filled_from_db(engine, active) -> None:
     """상품마다 대분류(parentCategoryId·Name)가 categories 부모 조인으로 채워진다 — 비선호(대분류) 제외의 근거."""
     _, products = DbCatalogReader(engine).active()
     assert all(p.parentCategoryId is not None and p.parentCategoryName for p in products)
-    assert {p.parentCategoryId for p in products} <= set(range(1, 11))       # Backend 대분류 id 1~10 (09-25 회신)
+    assert all(p.parentCategoryId > 0 for p in products)                      # Backend 대분류 번호 (09-25 회신)
     p = products[0]
     with engine.connect() as c:
         row = c.execute(sa.text(

@@ -5,8 +5,8 @@ Revises: 0007
 Create Date: 2026-10-15
 
 왜: 0003 은 Backend 번호가 아직 없을 때 만들어 수집처 문자열(`CAT-01-02` · `KAKAO_GIFT:…`)을 PK 로 삼고 Backend 번호를
-nullable 열(backend_*_id)로 붙였다. 지금은 Backend 번호가 정본이다 — 상품 시드(Backend `V10__seed_product_catalog.sql`)의
-categories.id 1~67 · products.id 1~4231 이 7.6 · 7.7 · 비선호 · 별점 누적에서 쓰는 번호이고, AI 카탈로그 67/67 · 4,231/4,231 이 이미 채워져 있다.
+nullable 열(backend_*_id)로 붙였다. 지금은 Backend 번호가 정본이다 — Backend 의 categories.id · products.id 가 7.6 · 7.7 ·
+비선호 · 별점 누적에서 쓰는 번호이고, AI 카탈로그에는 이미 전부 채워져 있다.
 그래서 표의 키를 Backend 와 같은 이름 · 같은 값으로 바꾼다.
 
   categories  PK backend_category_id → **id**(Backend categories.id) · 부모 parent_source_category_id → **parent_id**(Backend parent_id)
@@ -87,10 +87,10 @@ def upgrade() -> None:
 
     # ---- 주석 (DB 안 설명도 지금 뜻으로) --------------------------------------
     comments = {
-        f"{C}.id": "Backend categories.id (상품 시드 1~67). 대분류 1~10 · 소분류 11~67. 7.6 dislikedCategories[].categoryId 가 이 값",
+        f"{C}.id": "Backend categories.id. 7.6 dislikedCategories[].categoryId 가 이 값",
         f"{C}.parent_id": "Backend categories.parent_id — 소분류만 값이 있다(대분류 번호)",
         f"{C}.product_count": "패키지가 선언한 상품 수 (적재 후 실제 수와 대조)",
-        f"{P}.id": "Backend products.id (상품 시드 1~4231). 7.6 reviews[].productId · 7.7 recommendedProductIds 가 이 값",
+        f"{P}.id": "Backend products.id. 7.6 reviews[].productId · 7.7 recommendedProductIds 가 이 값",
         f"{P}.category_id": "Backend products.category_id — 소분류 번호(categories.id, level 2)",
         f"{P}.source_product_id": "패키지 원본의 수집처 상품 ID — 원본 추적 · 옛 형식 상품 벡터 연결용. 키 아님, Backend 와 주고받지 않는다",
         f"{P}.availability": "재고 3값 available · unavailable · unknown. 추천에서 빼는 것은 unavailable 뿐",

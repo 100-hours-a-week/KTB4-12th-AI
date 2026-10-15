@@ -179,7 +179,7 @@ class ProductRecord(BaseModel):
     categoryName: str
     parentCategoryId: int | None = Field(
         default=None, gt=0,
-        description="대분류 Backend id(categories.id, 1~10). 7.9 export에는 없고 DB 카탈로그가 categories 부모 조인으로 채운다. "
+        description="대분류 Backend id(categories.id). 7.9 export에는 없고 DB 카탈로그가 categories 부모 조인으로 채운다. "
                     "비선호는 대분류로 오므로(09-27 BE 결정: PreferenceSaveService 가 root만 허용) 비선호 판정(v1 제외 · v2 감점)에 쓴다. "
                     "파일 카탈로그는 없으면 None")
     parentCategoryName: str | None = Field(default=None, description="대분류 이름 — 이름 보조 판정용")

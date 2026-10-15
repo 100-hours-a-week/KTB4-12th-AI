@@ -7,7 +7,7 @@
 어느 쪽을 쓸지는 `main.lifespan`이 설정(`CATALOG_SOURCE`) 하나로 고른다. 업무 코드(pipeline)는 어느 쪽인지 모른다.
 
 **상품 번호 규칙** (DbCatalogReader). 7.6·7.7은 Backend가 발급한 정수 번호로 말한다. `ai_catalog` 의 키가 곧 그 번호다(0008) —
-categories.id · products.id 는 Backend 상품 시드와 같은 번호이고 적재 도구가 번호 없는 행을 받지 않는다. 그래서 임시 번호는 없다.
+categories.id · products.id 는 Backend 와 같은 번호이고 적재 도구가 번호 없는 행을 받지 않는다. 그래서 임시 번호는 없다.
 
 --- 아래는 FileCatalogReader ---
 
