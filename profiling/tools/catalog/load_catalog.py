@@ -1,9 +1,10 @@
 """Backend 전달 패키지 → ai_catalog 적재 (마이그레이션 0003 · 0008).
 
   적재:      uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1 \
-                 --id-map tools/catalog/returned/2026-09-25/product-id-map.jsonl \
-                 --category-id-map tools/catalog/returned/2026-09-25/category-id-map.jsonl \
-                 --metrics tools/catalog/returned/2026-09-25/metrics.jsonl
+                 --id-map <번호표>/product-id-map.jsonl \
+                 --category-id-map <번호표>/category-id-map.jsonl \
+                 --metrics <번호표>/metrics.jsonl
+              번호표 · 패키지는 팀 내부 자료라 저장소에 없다(10-15) — 프로파일링 담당에게 받는다
   확인만:    … --dry-run
   재고·조회수만 다시: … --metrics <metrics.jsonl>          (패키지 없이)
 
@@ -17,7 +18,7 @@
 패키지는 `product-catalog-20260922-v1` 모양을 기대한다 (data/categories.json · data/products.jsonl · data/summary.json).
 적재는 트랜잭션 하나다 — 도중에 실패하면 아무것도 남지 않고 활성 버전도 그대로다.
 
-**표의 키는 Backend 번호다(0008).** categories.id · products.id 는 Backend 상품 시드(categories.id 1~67 · products.id 1~4231)와
+**표의 키는 Backend 번호다(0008).** categories.id · products.id 는 Backend 의 categories.id · products.id 와
 같은 번호다. 패키지에는 수집처 ID(KAKAO_GIFT:… · CAT-01-02)만 있으므로, 적재할 때 id-map 두 개로 Backend 번호를 붙인다.
 Backend 번호가 없는 상품 · 카테고리가 하나라도 있으면 적재하지 않는다(키를 만들 수 없다). 수집처 상품 ID 는
 products.source_product_id(키 아님)에 원본 추적용으로만 남는다.

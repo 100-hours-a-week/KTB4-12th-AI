@@ -22,3 +22,6 @@ docker-compose.override.yml
 tools/embed_compare/out/
 # 문서는 비공개(10-13) — 설계 · 시험 결과 · 결정 기록은 팀 비공개 폴더에서 관리. 로컬 사본은 여기 두되 저장소에 올리지 않는다
 docs/
+
+# Backend 회신으로 만든 번호 대응표(상품 · 카테고리 번호) — 팀 내부 자료, 공개 저장소에 두지 않는다(10-15)
+tools/catalog/returned/

@@ -2,9 +2,9 @@
 
   uv run python -m tools.catalog.import_be_ids \
       --categories ~/Downloads/카테고리_DB_ID_매핑_2026-09-23.xlsx \
-      --products   ~/Downloads/v1_상품목록_4231개_2026-09-23.xlsx \
+      --products   ~/Downloads/<상품목록>.xlsx \
       --package    ~/Downloads/product-catalog-20260922-v1 \
-      --out        tools/catalog/returned/2026-09-25/
+      --out        <번호표 폴더>/        (팀 내부 자료 — 저장소 밖에 둔다, 10-15)
 
 **DB를 읽지도 쓰지도 않는다(0008 부터).** 패키지 파일과 회신 파일만 읽어 중간 파일을 만든다 — 반영은 `load_catalog`이 적재할 때
 이 번호를 표의 키로 붙이고, 중간 파일이 남아야 중간 파일을 만들고 끝낸다 — 반영은 `load_catalog`이 하고, 중간 파일이 남아야

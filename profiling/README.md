@@ -66,8 +66,9 @@ uv run uvicorn profiling.main:app --port 8000
 docker compose up -d --build                  # ai-db(healthy) → ai-migrate(alembic 한 번) → ai-app(:8000)
 # 카탈로그 적재(일회성) — 패키지 · 번호표는 이미지에 없으므로 합본 파일 하나로 넣는다(0008 — 표의 키가 Backend 번호)
 uv run python -m tools.catalog.load_catalog --package /경로/product-catalog-... \
-    --id-map tools/catalog/returned/2026-09-25/product-id-map.jsonl --category-id-map tools/catalog/returned/2026-09-25/category-id-map.jsonl \
-    --metrics tools/catalog/returned/2026-09-25/metrics.jsonl --write-bundle /경로/catalog-bundle.json.gz      # 로컬에서 합본 만들기(DB 안 씀)
+    --id-map <번호표>/product-id-map.jsonl --category-id-map <번호표>/category-id-map.jsonl \
+    --metrics <번호표>/metrics.jsonl --write-bundle /경로/catalog-bundle.json.gz      # 로컬에서 합본 만들기(DB 안 씀)
+# 번호표(Backend 회신으로 만든 번호 대응표)와 패키지는 팀 내부 자료라 저장소에 두지 않는다 — 프로파일링 담당에게 받는다
 docker compose run --rm -v /경로:/b:ro ai-migrate python -m tools.catalog.load_catalog --bundle /b/catalog-bundle.json.gz --if-empty
 ```
 
@@ -118,7 +119,7 @@ docker compose run --rm -v /경로:/b:ro ai-migrate python -m tools.catalog.load
 | `catalog.py` · `stores.py` · `backend.py` | 카탈로그(파일 · DB) · PostgreSQL 저장소 · 7.7 HTTP 어댑터 |
 | `schemas.py` · `types.py` · `ports.py` · `settings.py` | HTTP DTO(camelCase) · 내부 타입(snake_case) · 포트 · 설정(`PROFILING_*`) |
 
-`alembic/versions/` — `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog · `0004` 열 주석 · `0005` recipient_reviews · `0006` 챗봇 조회용(정리본 · 축 태그 · 태그 상태 · 30개 · 판 · 실행별 비용) · `0007` 앱 전용 계정 `ai_app`(권한만, 표 변경 없음) · `0008` `ai_catalog` 키를 Backend 번호로(`categories.id` · `parent_id`, `products.id` · `category_id` — Backend 상품 시드와 같은 번호).
+`alembic/versions/` — `0001` recipient_profiles · `0002` profile_runs · `0003` ai_catalog · `0004` 열 주석 · `0005` recipient_reviews · `0006` 챗봇 조회용(정리본 · 축 태그 · 태그 상태 · 30개 · 판 · 실행별 비용) · `0007` 앱 전용 계정 `ai_app`(권한만, 표 변경 없음) · `0008` `ai_catalog` 키를 Backend 번호로(`categories.id` · `parent_id`, `products.id` · `category_id` — Backend 와 같은 번호).
 
 **이름 규칙.** HTTP 경계(`schemas.py`)만 camelCase, 나머지는 snake_case. 변환은 `pipeline.to_internal()`(7.6 → 내부) · `backend.to_callback()`(내부 → 7.7) 두 곳뿐. 세부는 [이름_대조표.md](이름_대조표.md).
 
