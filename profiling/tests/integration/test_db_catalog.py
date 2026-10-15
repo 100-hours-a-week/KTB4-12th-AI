@@ -191,3 +191,28 @@ def test_apply_metrics_rejects_bad_availability(engine, clean, tmp_path) -> None
     path.write_text(json.dumps({"productId": PROD_IDS[PIDS[0]], "availability": "품절", "viewCount": 1}), encoding="utf-8")
     with pytest.raises(lc.PackageError, match="3값이 아니다"):
         lc.apply_metrics(engine, path)
+
+
+# ---------------------------------------------------------------- 합본 적재(서버, 10-15)
+
+
+def test_load_bundle_sets_keys_stock_and_views(engine, clean) -> None:
+    b = lc.build_bundle(_pkg(), PROD_IDS, CAT_IDS, {PIDS[0]: {"availability": "available", "viewCount": 77}})
+    got = lc.load_bundle(engine, b, activate=False)
+    assert got["products"] == 2 and got["categories"] == 2
+    with engine.begin() as c:
+        row = c.execute(sa.text(f"select category_id, availability, view_count, source_product_id from {SCHEMA}.products where id = :i"),
+                        {"i": PROD_IDS[PIDS[0]]}).mappings().one()
+        other = c.execute(sa.text(f"select availability, view_count from {SCHEMA}.products where id = :i"),
+                          {"i": PROD_IDS[PIDS[1]]}).mappings().one()
+    assert (row["category_id"], row["availability"], row["view_count"], row["source_product_id"]) == (CAT_IDS[CID], "available", 77, PIDS[0])
+    assert (other["availability"], other["view_count"]) == ("unknown", None)        # 합본에 값이 없으면 기본값
+
+
+def test_has_active_catalog_reflects_active_version(engine) -> None:
+    """--if-empty 판단 — 시험 DB 에 활성 카탈로그가 있으면 참이어야 한다(없는 DB 면 거짓)."""
+    with engine.connect() as c:
+        expected = bool(c.execute(sa.text(
+            f"select exists(select 1 from {SCHEMA}.catalog_versions v join {SCHEMA}.products p on p.package_id = v.package_id "
+            "where v.is_active)")).scalar())
+    assert lc.has_active_catalog(engine) is expected

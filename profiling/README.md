@@ -63,10 +63,16 @@ uv run uvicorn profiling.main:app --port 8000
 
 ```bash
 docker compose up -d --build                  # ai-db(healthy) → ai-migrate(alembic 한 번) → ai-app(:8000)
-docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --package /경로/product-catalog-... \
+# 카탈로그 적재(일회성) — 패키지 · 번호표는 이미지에 없으므로 합본 파일 하나로 넣는다(0008 — 표의 키가 Backend 번호)
+uv run python -m tools.catalog.load_catalog --package /경로/product-catalog-... \
     --id-map tools/catalog/returned/2026-09-25/product-id-map.jsonl --category-id-map tools/catalog/returned/2026-09-25/category-id-map.jsonl \
-    --metrics tools/catalog/returned/2026-09-25/metrics.jsonl   # 카탈로그 적재(일회성) — 표의 키가 Backend 번호라 번호표 두 개가 필수(0008)
+    --metrics tools/catalog/returned/2026-09-25/metrics.jsonl --write-bundle /경로/catalog-bundle.json.gz      # 로컬에서 합본 만들기(DB 안 씀)
+docker compose run --rm -v /경로:/b:ro ai-migrate python -m tools.catalog.load_catalog --bundle /b/catalog-bundle.json.gz --if-empty
 ```
+
+**서버(ECS)**: 합본을 **비공개** S3 에 올리고(팀 내부 자료 — 공개 금지), 마이그레이션/적재용 Task 에서
+`python -m tools.catalog.load_catalog --bundle s3://<버킷>/<키> --if-empty` (Task Role 로 읽음). `--if-empty` 라 배포마다 불러도 이미 있으면 건너뛴다.
+순서는 마이그레이션 → 적재 → 앱 — 카탈로그가 없으면 `/readyz` 가 503 이라 앱 배포가 안정화되지 않는다.
 
 이미지에는 `src/` · `alembic/` · 운영 CLI `tools/catalog` 만 들어간다(`.dockerignore` — 시험 · 문서 · 시험 도구 · 시험 결과물 제외).
 
@@ -171,7 +177,7 @@ docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --packag
 | `loadtest/` | 7.6 동시 N건 부하 하네스(`/health` 지연 · 큐 · 503 · DB 활동). [README](tools/loadtest/README.md) |
 | `be_integration/` | 실물 BE 와 붙이는 시나리오 드라이버 `drive_v07.py`(정상 · AI 꺼짐 · 콜백 불통 · 토큰 틀림 · AI DB 꺼짐) |
 | `fake_backend/` | 가짜 Backend(7.7 수신 · 실패 주입 · 7.9 · 시험 콘솔 :8081). 생애주기는 옛 09-27 모델 — 7.6/7.7 모양 확인용 |
-| `catalog/` | **운영 CLI** — `load_catalog`(BE 전달 패키지 → `ai_catalog`) · `import_be_ids` · `fetch_export`(7.9 점검) |
+| `catalog/` | **운영 CLI** — `load_catalog`(BE 전달 패키지 + 번호표 → `ai_catalog`, 합본 파일 만들기 · S3 합본 적재 `--bundle`) · `import_be_ids` · `fetch_export`(7.9 점검) |
 
 외부 API 를 부르는 시험(`--tagger openrouter` · `extract_tags --openrouter`)은 **유료**다. 키가 없으면 추출기는 꺼진 채로 뜬다.
 
