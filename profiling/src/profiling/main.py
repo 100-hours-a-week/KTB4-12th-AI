@@ -44,7 +44,15 @@ log = logging.getLogger(__name__)
 
 # 이 코드가 기대하는 DB 마이그레이션 판 — alembic head 와 같아야 한다(tests/unit/test_ops_endpoints.py 가 지킨다).
 # 새 마이그레이션을 더하면 여기도 올린다. /readyz 와 STRICT_STARTUP 이 이 값과 DB 의 alembic_version 을 비교한다(10-15).
+# 비교는 "DB 판 ≥ 기대 판"이다 — 롤링 배포는 마이그레이션을 먼저 돌리므로 그동안 옛 Task 는 한 판 높은 DB 위에서 돈다.
+# 같음으로 비교하면 마이그레이션 순간 옛 Task 가 모두 준비 안 됨(503)이 되어 AI 가 빈다. 그래서 마이그레이션은 옛 코드도 도는
+# 모양(열 추가 먼저 → 코드 → 삭제는 다음 판)으로 쓴다. 판 이름은 4자리 숫자라 문자열 비교가 곧 순서다.
 EXPECTED_MIGRATION = "0008"
+
+
+def migration_ok(version: str | None) -> bool:
+    """DB 판이 이 코드가 도는 데 충분한가 — 기대 판 이상이면 참. 판을 못 읽었거나 낮으면 거짓."""
+    return bool(version) and len(version) == len(EXPECTED_MIGRATION) and version >= EXPECTED_MIGRATION
 _DEFAULT_SECRETS = ("dev-token",)
 _DEFAULT_DB_PASSWORDS = (":ai_password@", ":ai_app_password@")
 _DEFAULT_BACKEND = "http://localhost:8081"
@@ -208,8 +216,10 @@ def _connect_db(settings: Settings) -> sa.Engine:
     except sa.exc.ProgrammingError as e:    # alembic_version 없음(마이그레이션 안 됨) · 읽을 권한 없음(ai_app 인데 0007 이 안 됨)
         engine.dispose()
         raise RuntimeError(f"DB는 있으나 마이그레이션 장부를 못 읽음({type(e.orig).__name__}) → uv run alembic upgrade head") from e
-    if version != EXPECTED_MIGRATION:
-        msg = f"DB 마이그레이션 판 {version} ≠ 코드가 기대하는 {EXPECTED_MIGRATION} — 마이그레이션(alembic upgrade head)을 먼저 돌린다"
+    if version != EXPECTED_MIGRATION and migration_ok(version):
+        log.info("DB 마이그레이션 판 %s 가 코드(%s)보다 새 판 — 롤링 배포 중이면 정상(옛 코드도 도는 마이그레이션)", version, EXPECTED_MIGRATION)
+    if not migration_ok(version):
+        msg = f"DB 마이그레이션 판 {version} < 코드가 기대하는 {EXPECTED_MIGRATION} — 마이그레이션(alembic upgrade head)을 먼저 돌린다"
         if settings.STRICT_STARTUP:
             engine.dispose()
             raise RuntimeError(msg)
@@ -298,7 +308,7 @@ async def healthz() -> dict:
 
 @app.get("/readyz", tags=["ops"])
 async def readyz(request: Request) -> JSONResponse:
-    """**Readiness**(ECS) — 7.6 을 받아 처리할 준비가 됐나. 활성 카탈로그 · DB 연결 · 마이그레이션 판(EXPECTED_MIGRATION)이 다 맞으면 200,
+    """**Readiness**(ECS) — 7.6 을 받아 처리할 준비가 됐나. 활성 카탈로그 · DB 연결 · 마이그레이션 판(DB ≥ EXPECTED_MIGRATION)이 다 맞으면 200,
     하나라도 아니면 503. **외부 LLM 은 보지 않는다** — LLM 이 죽어도 태그 없이 30개를 보내므로 트래픽에서 빼면 안 된다(10-15 프로파일링 담당 선택).
     LLM 상태는 /health 의 `llm` 칸."""
     state = request.app.state
@@ -317,7 +327,7 @@ def _ready_checks(state) -> dict[str, bool]:
         with state.engine.connect() as conn:
             conn.execution_options(isolation_level="AUTOCOMMIT")
             version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
-        db, migration = True, version == EXPECTED_MIGRATION
+        db, migration = True, migration_ok(version)
     except sa.exc.SQLAlchemyError:
         db = migration = False
     return {"catalog": catalog, "db": db, "migration": migration}

@@ -39,6 +39,35 @@ def test_expected_migration_is_alembic_head() -> None:
     assert script.get_heads() == [main.EXPECTED_MIGRATION]
 
 
+def test_migration_ok_accepts_same_or_newer_db() -> None:
+    """롤링 배포 — 마이그레이션이 먼저 돌아 DB 가 한 판 높아도 옛 Task 는 준비 상태여야 한다(같음 비교면 그 순간 모두 503)."""
+    exp = main.EXPECTED_MIGRATION
+    newer = f"{int(exp) + 1:04d}"
+    older = f"{int(exp) - 1:04d}"
+    assert main.migration_ok(exp) and main.migration_ok(newer)
+    assert not main.migration_ok(older)
+    assert not main.migration_ok(None) and not main.migration_ok("") and not main.migration_ok("12345")
+
+
+def test_ready_checks_pass_on_newer_db_and_fail_on_older() -> None:
+    class _Conn:
+        def __init__(self, v): self.v = v
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execution_options(self, **k): return self
+        def execute(self, *a, **k): return SimpleNamespace(scalar=lambda: self.v)
+
+    class _Engine:
+        def __init__(self, v): self.v = v
+        def connect(self): return _Conn(self.v)
+
+    exp = main.EXPECTED_MIGRATION
+    ok = main._ready_checks(SimpleNamespace(catalog=_Catalog(), engine=_Engine(f"{int(exp) + 1:04d}")))
+    assert ok == {"catalog": True, "db": True, "migration": True}
+    low = main._ready_checks(SimpleNamespace(catalog=_Catalog(), engine=_Engine(f"{int(exp) - 1:04d}")))
+    assert low == {"catalog": True, "db": True, "migration": False}
+
+
 def test_healthz_always_ok_without_db() -> None:
     assert asyncio.run(main.healthz()) == {"status": "ok"}
 
