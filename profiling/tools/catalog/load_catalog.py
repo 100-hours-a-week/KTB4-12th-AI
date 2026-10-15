@@ -1,4 +1,4 @@
-"""Backend 전달 패키지 → ai_catalog 적재 (마이그레이션 0003 · 0008).
+"""Backend 전달 패키지 → ai_catalog 적재.
 
   적재:      uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1 \
                  --id-map <번호표>/product-id-map.jsonl \
@@ -13,7 +13,6 @@
   합본 만들기(DB 안 씀):  … --package <패키지> --id-map … --category-id-map … --metrics … --write-bundle catalog-bundle.json.gz
   합본 적재:              … --bundle s3://<버킷>/<키>  (또는 로컬 경로)  [--if-empty]
   --if-empty            활성 카탈로그가 이미 있으면 아무것도 하지 않고 성공(0) — 배포 워크플로가 매번 불러도 된다
-              회신 xlsx 를 id-map · metrics jsonl 로 바꾸는 것은 tools/catalog/import_be_ids.py
 
 패키지는 `product-catalog-20260922-v1` 모양을 기대한다 (data/categories.json · data/products.jsonl · data/summary.json).
 적재는 트랜잭션 하나다 — 도중에 실패하면 아무것도 남지 않고 활성 버전도 그대로다.
@@ -41,7 +40,7 @@ from profiling.settings import get_settings
 
 SCHEMA = "ai_catalog"
 BUNDLE_FORMAT = "ai-catalog-bundle/v1"
-AVAILABILITY = ("available", "unavailable", "unknown")   # 마이그레이션 0003 의 CHECK 와 같은 값
+AVAILABILITY = ("available", "unavailable", "unknown")   # DB CHECK 와 같은 값
 
 
 # ---------------------------------------------------------------------------
