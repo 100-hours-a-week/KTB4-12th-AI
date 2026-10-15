@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     )
     CATALOG_FILE: Path = Field(
         default=Path("tests/fixtures/catalog_sample.json"),
-        description="카탈로그 JSON(7.9 export 형식 또는 동료 공유본 원형). 기본은 레포 안 예시 111건 — 전체 4,231건은 .env에서 지정. "
+        description="카탈로그 JSON(7.9 export 형식 또는 동료 공유본 원형). 기본은 레포 안 가짜 예시 111건 — 실제 카탈로그는 DB(CATALOG_SOURCE=db)로. "
                     "상대경로는 실행 위치(profiling/) 기준. CATALOG_SOURCE=file 일 때만 쓴다",
     )
 
@@ -181,6 +181,21 @@ class Settings(BaseSettings):
                     "공개 기본값 · DATABASE_URL 계정 이름이 공개 기본값(로컬 이름) · BACKEND_BASE_URL 이 로컬 가짜 BE 기본값 · CATALOG_SOURCE 가 db 가 아님. "
                     "로컬 개발 · compose · 시험은 false(기본) — 기본값으로 돌기 때문. Task Definition 에서 true(10-15)",
     )
+
+
+def read_dotenv(path: Path | str = ".env") -> dict[str, str]:
+    """.env 파일의 `이름=값` 줄을 읽는다(없으면 빈 dict). 앱 설정이 아닌 값(마이그레이션의 PROFILING_APP_DB_*)을
+    셸에 올리지 않고도 같은 .env 에서 읽으려고 둔다 — alembic/env.py · 시험 conftest 가 쓴다. 값은 어디에도 출력하지 않는다."""
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    out: dict[str, str] = {}
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip("'\"")
+    return out
 
 
 @lru_cache(maxsize=1)

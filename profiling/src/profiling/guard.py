@@ -58,7 +58,7 @@ PROFANITY = tuple(w for ws in PROFANITY_GROUPS.values() for w in ws)
 # 오탐 예외 — 욕설 꼴을 품은 정상 단어. 가리기 전에 잠시 감췄다가 되돌린다.
 ALLOW = (
     "시발점", "시발역", "새끼손가락", "새끼발가락", "새끼줄", "새끼고양이", "새끼강아지", "등신대", "개새해", "염병학",
-    "호모사피엔스", "dickens", "dickinson", "섹스턴", "유니섹스", "unisex",   # 10-13 상품명 4,231개 훑기에서 찾은 오탐(유니섹스 · 새끼 고릴라)
+    "호모사피엔스", "dickens", "dickinson", "섹스턴", "유니섹스", "unisex",   # 10-13 상품명 전체 훑기에서 찾은 오탐(유니섹스 · 새끼 고릴라)
 )
 _ANIMAL = r"(?:강아지|고양이|오리|곰|토끼|돼지|사자|호랑이|펭귄|여우|판다|병아리|양|소|말|새|물고기|햄스터|다람쥐|고릴라|원숭이|코끼리|기린|공룡|너구리|수달|거북이|사슴|늑대)"
 _ALLOW_RE = re.compile("|".join([re.escape(w) for w in sorted(ALLOW, key=len, reverse=True)]

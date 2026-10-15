@@ -7,7 +7,12 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 # ---- profiling 설정에서 DB URL을 가져온다 (환경변수 PROFILING_DATABASE_URL 또는 .env). alembic.ini의 값은 자리표시자.
-from profiling.settings import get_settings
+from profiling.settings import get_settings, read_dotenv
+
+# 0007 이 앱 전용 계정 이름 · 비밀번호를 os.environ 에서 읽는다 — 셸에 없으면 같은 .env 에서 채운다(셸 · Task 값이 우선)
+for _k, _v in read_dotenv(".env").items():
+    if _k in ("PROFILING_APP_DB_ROLE", "PROFILING_APP_DB_PASSWORD") and _v:
+        os.environ.setdefault(_k, _v)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

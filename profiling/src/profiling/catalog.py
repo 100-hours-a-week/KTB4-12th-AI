@@ -195,8 +195,8 @@ _ACTIVE_PRODUCTS = sa.text(f"""
 def _freeze_long_lived() -> None:
     """카탈로그처럼 프로세스 내내 사는 객체를 GC 영구 세대로 옮긴다(gc.freeze) — 세대 2 수집이 그것들을 다시 훑지 않게.
 
-    왜: 요청마다 `rank_products`가 `ScoredProduct` 4,231개를 만들어 세대 2 수집이 주기적으로 일어나는데, 그때마다 상주 카탈로그
-    `ProductRecord` 4,231개까지 훑어 요청 5~6% 가 25~100ms 를 더 썼다. 앱만 7.6 200건 실측: 서버 처리 p95 33.9 → 14.5ms
+    왜: 요청마다 `rank_products`가 `ScoredProduct` 를 카탈로그 전체 수만큼 만들어 세대 2 수집이 주기적으로 일어나는데, 그때마다 상주 카탈로그
+    `ProductRecord` 전체까지 훑어 요청 5~6% 가 25~100ms 를 더 썼다. 앱만 7.6 200건 실측: 서버 처리 p95 33.9 → 14.5ms
     (GC 를 끈 대조 12.2ms). 이슈 docs/issues/2026-10-12_0815_gc-tail-latency.
     순서: unfreeze → collect → freeze. 카탈로그가 바뀌면 옛 객체가 영구 세대에 남아 새지 않도록 먼저 풀고, 전체 수집으로 옛 순환
     쓰레기를 치운 뒤 다시 얼린다(교체는 드물어 전체 수집 비용은 그때 한 번). 그 순간 진행 중이던 요청의 임시 객체도 함께 얼지만
