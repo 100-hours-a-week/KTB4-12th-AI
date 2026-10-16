@@ -13,7 +13,8 @@ def test_default_spec_is_tag3_and_tag4_keeps_the_10_12_version() -> None:
     sp = tagging.load_spec("tag4")
     assert sp.axes == tagging.ALL_AXES and sp.prompt_file == tagging.DEFAULT_PROMPT_FILE
     assert sp.version == "tag4-2fc950d4" and sp.validator_version == pipeline.VALIDATOR_VERSION_TAG4   # 10-12 비교 실험 · 기존 기록과 같은 값
-    assert tagging.SPEC.name == "tag3" and tagging.PROMPT_VERSION == tagging.load_spec("tag3").version  # 설정 없으면 v2 운영 규격(10-15)
+    assert tagging.SPEC.name == "tag3disliked" and tagging.PROMPT_VERSION == tagging.load_spec("tag3disliked").version  # 설정 없으면 v2 운영 규격(3축 + 비선호, DR-043)
+    assert tagging.load_spec("tag3").version == "tag3-56098b49"                  # 3축만인 판은 그대로(10-15)
 
 
 @pytest.mark.parametrize("name, n", [("tag4", 4), ("tag3", 3)])

@@ -35,6 +35,8 @@ class ChangeSummary(NamedTuple):
     tags_removed: Counter
     pool_new: int                    # 이번 30개 중 이전에 없던 번호
     pool_size: int
+    dtags_added: int = 0             # 비선호 태그(disliked_tags) 늘어난 · 줄어든 개수
+    dtags_removed: int = 0
 
     @property
     def input_changed(self) -> bool:
@@ -55,7 +57,7 @@ def summarize(prev: RecipientProfile | None, new: RecipientProfile) -> ChangeSum
     if prev is None:
         return ChangeSummary(True, False, None, _pref(None, new.gift_preference_hash), sorted(r.product_id for r in new.reviews), [], [], [],
                              sorted(c.category_id for c in new.disliked_categories), [], Counter(t.axis for t in new.preferred_tags), Counter(),
-                             len(new.recommended_product_ids), len(new.recommended_product_ids))
+                             len(new.recommended_product_ids), len(new.recommended_product_ids), len(new.disliked_tags), 0)
     pr = {r.product_id: r for r in prev.reviews}
     nr = {r.product_id: r for r in new.reviews}
     both = pr.keys() & nr.keys()
@@ -64,6 +66,8 @@ def summarize(prev: RecipientProfile | None, new: RecipientProfile) -> ChangeSum
     pt = {(t.axis, t.tag) for t in prev.preferred_tags}
     nt = {(t.axis, t.tag) for t in new.preferred_tags}
     old_pool = set(prev.recommended_product_ids)
+    pdt = {(t.axis, t.tag) for t in prev.disliked_tags}
+    ndt = {(t.axis, t.tag) for t in new.disliked_tags}
     return ChangeSummary(
         first=False, stale=prev.source_version >= new.source_version, prev_version=prev.source_version,
         pref=_pref(prev.gift_preference_hash, new.gift_preference_hash),
@@ -73,6 +77,7 @@ def summarize(prev: RecipientProfile | None, new: RecipientProfile) -> ChangeSum
         dislikes_added=sorted(nd - pd), dislikes_removed=sorted(pd - nd),
         tags_added=Counter(a for a, _ in nt - pt), tags_removed=Counter(a for a, _ in pt - nt),
         pool_new=sum(1 for p in new.recommended_product_ids if p not in old_pool), pool_size=len(new.recommended_product_ids),
+        dtags_added=len(ndt - pdt), dtags_removed=len(pdt - ndt),
     )
 
 
@@ -92,4 +97,4 @@ def log_fields(s: ChangeSummary) -> str:
             f"reviews_added={_ids(s.reviews_added)} reviews_removed={_ids(s.reviews_removed)} reviews_changed={_ids(s.reviews_changed)} "
             f"rating_changed={_ids(s.rating_changed)} dislikes_added={_ids(s.dislikes_added)} dislikes_removed={_ids(s.dislikes_removed)} "
             f"tags=+{sum(s.tags_added.values())}/-{sum(s.tags_removed.values())} tags_added_axes={_axes(s.tags_added)} "
-            f"tags_removed_axes={_axes(s.tags_removed)} pool_new={s.pool_new}/{s.pool_size}")
+            f"tags_removed_axes={_axes(s.tags_removed)} disliked_tags=+{s.dtags_added}/-{s.dtags_removed} pool_new={s.pool_new}/{s.pool_size}")

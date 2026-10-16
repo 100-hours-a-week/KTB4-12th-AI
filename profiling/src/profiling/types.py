@@ -166,7 +166,8 @@ class ValidationResult(BaseModel):
     dislikes: list[ValidatedTag]
     preferred_tags: list[str] = Field(description="검증기 통과 태그 글자(keep 순서) — 메모리에서만 쓴다. DB 의 preferred_tags 는 축 · 출처가 붙은 "
                                                   "모양(RecipientProfile.preferred_tags · profile_tags)")
-    disliked_tags: list[str] = Field(description="Backend 비선호 카테고리 이름 — 메모리에서만(DB 엔 disliked_categories 로, DR-040)")
+    disliked_category_names: list[str] = Field(description="Backend 비선호 카테고리 이름 — 메모리에서만(DB 엔 disliked_categories 로, DR-040). "
+                                                         "DB 의 disliked_tags(글에서 뽑은 비선호 태그, DR-043)와 다르다")
     log: list[Decision]
 
 
@@ -350,7 +351,7 @@ def to_review_records(reviews: list[Review]) -> list[ReviewRecord]:
 # ---------------------------------------------------------------------------
 
 class ProfileTag(BaseModel):
-    """검증기 통과 선호 태그 하나 — recipient_profiles.preferred_tags 의 원소. 챗봇 조회 API 가 그대로 내준다."""
+    """검증기 통과 태그 하나 — recipient_profiles.preferred_tags · disliked_tags 의 원소(모양이 같다). 챗봇 조회 API 가 그대로 내준다."""
 
     axis: str = Field(description="태그 규격의 축 — tag3: 카테고리 · IP · 브랜드(tag4 는 + 특징)")
     tag: str
@@ -367,8 +368,11 @@ class RecipientProfile(BaseModel):
     preferred_tags: list[ProfileTag] = Field(default_factory=list,
                                              description="선호 태그(축 · 출처 · 근거 자리) — 추천 30개를 고를 때 쓴 태그 그대로, 자르지 않는다. "
                                                          "ValidationResult.preferred_tags(글자 목록, 메모리)와 이름만 같다")
+    disliked_tags: list[ProfileTag] = Field(default_factory=list,
+                                            description="비선호 태그(DR-043, 0010) — 글에서 '싫다'고 분명히 말한 것, preferred_tags 와 같은 모양. "
+                                                        "이 태그에 걸리는 상품은 30개를 고르기 전에 뺐다. 규격이 tag3disliked 가 아니면 []")
     axes: dict[str, list[ValidatedTag]] = Field(default_factory=lambda: {"likes": [], "key_features": [], "dislikes": []})
-    disliked_categories: list[DislikedCategory] = Field(default_factory=list)   # 7.6 의 명시 비선호(번호 + 이름) 사본 — 비선호는 이것 하나(DR-040)
+    disliked_categories: list[DislikedCategory] = Field(default_factory=list)   # 7.6 의 명시 비선호(번호 + 이름) 사본 — BE 화면에서 고른 것. 글에서 뽑은 비선호는 disliked_tags
     recommended_product_ids: list[int] = Field(default_factory=list, max_length=30)
     gift_preference_hash: str | None = Field(default=None, min_length=64, max_length=64,
                                              description="7.6 giftPreference 원문의 지문(preference_hash) — 바뀜 판정용. 없거나 공백이면 None")
@@ -393,7 +397,8 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
       상태로 구분 — 옛 태그를 남기지 않는다: 입력이 바뀐 새 번호에 옛 태그가 붙어 보이지 않게).
     - axes: ValidationResult의 3축 원형(v1은 전부 []).
     - disliked_categories: 요청(rq)에서 그대로 — "분석 시점 사본"이라 Backend가 이후 바꿔도 다음 7.6까지 모른다(설계서 §1.7).
-      이름만 옮긴 disliked_tags 는 두지 않는다(DR-040).
+      (0001~0005 의 이름만 옮긴 옛 disliked_tags 는 DR-040 에서 지웠다.)
+    - disliked_tags: 판정 로그의 비선호 keep(tag3disliked) — preferred_tags 와 같은 모양(DR-043). 실패면 [] 로 함께 덮는다.
     - recommended_product_ids · catalog_version_id: outcome.search에서(콜백과 같은 30개).
     - gift_preference_hash · reviews: 요청(rq)에서. 원문 그대로는 남기지 않는다 — 취향 문장 · 리뷰 글은 **가드레일 정리본**만
       (gift_preference_clean · ReviewRecord.text_clean, 10-13 DR-039), 지문(해시)은 원문 기준. 리뷰는 to_review_records()로 행이 된다.
@@ -406,6 +411,7 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
         source_version=rq.source_version,
         profile_run_id=profile_run_id,
         preferred_tags=profile_tags(v),
+        disliked_tags=profile_tags(v, dislikes=True),
         axes={"likes": list(v.likes), "key_features": list(v.key_features), "dislikes": list(v.dislikes)} if v
              else {"likes": [], "key_features": [], "dislikes": []},
         disliked_categories=list(rq.disliked_categories),
@@ -422,13 +428,14 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
     )
 
 
-def profile_tags(validation: ValidationResult | None) -> list[ProfileTag]:
-    """판정 로그의 keep → ProfileTag(축 · 글자 · 출처 · 근거 자리). 축이 없는 옛 결과는 likes = 카테고리 · key_features = 특징으로 본다."""
+def profile_tags(validation: ValidationResult | None, *, dislikes: bool = False) -> list[ProfileTag]:
+    """판정 로그의 keep → ProfileTag(축 · 글자 · 출처 · 근거 자리). 축이 없는 옛 결과는 likes = 카테고리 · key_features = 특징으로 본다.
+    dislikes=True 면 비선호 keep 만(disliked_tags), 아니면 비선호를 뺀 나머지(preferred_tags)."""
     if validation is None:
         return []
     out: list[ProfileTag] = []
     for d in validation.log:
-        if d.decision != "keep":
+        if d.decision != "keep" or (d.axis == "dislikes") != dislikes:     # 선호 칸 · 비선호 칸을 나눈다(tag3disliked, DR-043)
             continue
         axis = getattr(d, "axis4", None) or ("특징" if d.axis == "key_features" else "카테고리")
         ref = d.ref or None

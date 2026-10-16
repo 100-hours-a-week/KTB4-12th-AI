@@ -31,7 +31,7 @@ def test_prompt_lists_reviews_in_order_dedups_and_skips_unknown() -> None:
     assert "r1. 별점 5점 · 상품명: 코롱 30ML · 브랜드: 조말론런던 · 분류: 대1 > c10 · 종류: 공용향수 · 리뷰 글: 은은해요" in prompt
     assert prompt.startswith("취향 문장(pref): 향 좋아해요")
     assert tagging.load_spec("tag4").sha256.startswith("2fc950d4")           # 10-12 로컬 모델 비교에 쓴 4축 프롬프트와 같다
-    assert tagging.SPEC.name == "tag3" and tagging.PROMPT_SHA256.startswith("56098b49")   # 기본은 v2 운영 3축(10-15)
+    assert tagging.SPEC.name == "tag3disliked" and tagging.PROMPT_SHA256.startswith("48f77f25")   # 기본은 v2 운영 3축 + 비선호(DR-043, 프롬프트 v3)
 
 
 def test_validator_keeps_multi_ref_and_drops_low_rating_promo_unknown() -> None:
@@ -51,7 +51,7 @@ def test_validation_maps_axes_and_keeps_four_axis_name() -> None:
     keep = [{"axis": "IP", "tag": "춘식이", "ref": "pref"}, {"axis": "특징", "tag": "은은한 향", "ref": "r1"}]
     v = tagging.to_validation(keep, [{"axis": "카테고리", "tag": "x", "ref": "r2", "drop": "근거"}], ["뷰티"])
     assert [t.tag for t in v.likes] == ["춘식이"] and [t.tag for t in v.key_features] == ["은은한 향"]
-    assert v.preferred_tags == ["춘식이", "은은한 향"] and v.disliked_tags == ["뷰티"]
+    assert v.preferred_tags == ["춘식이", "은은한 향"] and v.disliked_category_names == ["뷰티"]
     assert tagging.tags_of(v) == [selection.Tag("IP", "춘식이"), selection.Tag("특징", "은은한 향")]
     assert all(d.evidence is None for d in v.log)                             # 근거 문장(원문 조각)은 남기지 않는다
 
@@ -167,14 +167,14 @@ def test_parse_report_and_drop_reason_key() -> None:
 
 
 def test_system_prompt_comes_from_file_and_version_tracks_content(tmp_path) -> None:
-    """프롬프트 파일(10-13) — 기본 규격(tag3)의 파일 그대로, 다른 파일이면 글이 바뀌고 해시도 바뀐다, 빈 파일은 거부."""
+    """프롬프트 파일(10-13) — 기본 규격(tag3disliked)의 파일 그대로, 다른 파일이면 글이 바뀌고 해시도 바뀐다, 빈 파일은 거부."""
     import hashlib
     import json as _json
 
     import pytest
 
     assert tagging.SPEC.prompt_file.exists() and tagging.load_system(tagging.SPEC.prompt_file) == tagging.SYSTEM
-    assert tagging.PROMPT_VERSION == "tag3-56098b49"
+    assert tagging.PROMPT_VERSION == "tag3disliked-48f77f25"
     alt = tmp_path / "alt.md"
     alt.write_text(tagging.SYSTEM + "\n8. 욕설 · 개인정보는 태그로 만들지 않는다.\n", encoding="utf-8")
     text = tagging.load_system(alt)

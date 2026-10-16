@@ -36,10 +36,12 @@ def test_schema_applied(conn, alembic_head) -> None:
     assert names == ["recipient_user_id", "source_version", "preferred_tags", "disliked_categories", "created_at", "updated_at",
                      "gift_preference_hash", "category_scores",                 # ADD COLUMN 은 뒤에 붙는다
                      "gift_preference_clean", "guard_version", "tag_status", "prompt_version", "validator_version",
-                     "recommended_product_ids", "catalog_version_id"]          # 챗봇 조회용(정리본 · 상태 · 30개). disliked_tags 는 지움(DR-040)
+                     "recommended_product_ids", "catalog_version_id",          # 챗봇 조회용(정리본 · 상태 · 30개). 옛 disliked_tags 는 지움(DR-040)
+                     "disliked_tags"]                                           # 0010 — 글에서 뽑은 비선호 태그(DR-043), 옛 열과 뜻이 다르다
     idx = {r[0] for r in conn.execute(sa.text("select indexname from pg_indexes where schemaname='ai_profile' and tablename='recipient_profiles'"))}
-    assert "ix_recipient_profiles_preferred_tags" in idx and "ix_recipient_profiles_disliked_tags" not in idx
+    assert {"ix_recipient_profiles_preferred_tags", "ix_recipient_profiles_disliked_tags"} <= idx
     assert {c[0]: c[2] for c in cols}["category_scores"].startswith("'[]'::jsonb")
+    assert {c[0]: c[2] for c in cols}["disliked_tags"].startswith("'[]'::jsonb")
     assert cols[0][2] is None                                       # PK는 Backend 값 — 시퀀스 없음
     assert conn.execute(sa.text("select 1 from pg_extension where extname='vector'")).scalar() == 1
     assert conn.execute(sa.text("select version_num from alembic_version")).scalar() == alembic_head

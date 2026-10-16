@@ -37,7 +37,7 @@ def _outcome(rq, preferred=(), disliked=("출산·육아용품",)) -> ProfileOut
     """preferred: 검증기가 남긴(keep) 태그 글자들 — 판정 로그에 keep 으로 넣는다(profile_tags 가 로그에서 만든다)."""
     return ProfileOutcome(
         recipient_user_id=rq.recipient_user_id, source_version=rq.source_version, status=RunStatus.RESULT_READY, input_hash="h",
-        validation=ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=list(preferred), disliked_tags=list(disliked),
+        validation=ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=list(preferred), disliked_category_names=list(disliked),
                                     log=[_keep(t) for t in preferred]),
         search=SearchResult(product_ids=[3, 1, 2], query_text="", catalog_version_id=CV), validator_version="v1-skip",
     )
@@ -47,8 +47,8 @@ def test_from_outcome_maps_fields() -> None:
     rq = _rq()
     row = rp.from_outcome(rq, _outcome(rq), profile_run_id="run-1")
     assert (row.recipient_user_id, row.source_version, row.profile_run_id) == (9073, 3, "run-1")
-    assert row.preferred_tags == [] and not hasattr(row, "disliked_tags")     # 비선호 이름 사본 열은 없다(DR-040)
-    assert row.disliked_categories == rq.disliked_categories                    # 분석 시점 사본 — 비선호는 이것 하나
+    assert row.preferred_tags == [] and row.disliked_tags == []                # 비선호 태그(DR-043)는 글에서 뽑은 것 — 이 결과엔 없다
+    assert row.disliked_categories == rq.disliked_categories                    # 분석 시점 사본 — BE 화면에서 고른 비선호
     assert row.recommended_product_ids == [3, 1, 2] and row.catalog_version_id == CV   # 콜백과 같은 순서
     assert row.axes == {"likes": [], "key_features": [], "dislikes": []} and row.validator_version == "v1-skip"
 
@@ -173,7 +173,7 @@ def test_from_outcome_stores_only_the_guard_cleaned_text() -> None:
 
 
 def test_profile_tags_carry_axis_source_and_ref() -> None:
-    v = rp.ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=["향수", "조말론"], disliked_tags=[], log=[
+    v = rp.ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=["향수", "조말론"], disliked_category_names=[], log=[
         rp.Decision(tag="향수", axis="likes", decision="keep", ref="r1", axis4="카테고리"),
         rp.Decision(tag="조말론", axis="likes", decision="keep", ref="pref, r1", axis4="브랜드"),
         rp.Decision(tag="쿠폰", axis="likes", decision="drop", ref="r1", axis4="카테고리", reason="판촉 단어")])

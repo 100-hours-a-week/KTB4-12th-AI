@@ -84,7 +84,7 @@ def test_v1_request_end_to_end(engine, cleanup) -> None:
         outcome = fake.sent[0]
         assert outcome.status is RunStatus.RESULT_READY
         assert len(outcome.search.product_ids) == 30
-        assert outcome.validation.disliked_tags == ["출산·육아용품"] and outcome.input_hash
+        assert outcome.validation.disliked_category_names == ["출산·육아용품"] and outcome.input_hash
         saved = app.state.store.get(RID)                   # 콜백 뒤 run_and_callback이 결과를 실행 기록에 저장
         assert saved.status is RunStatus.DELIVERED and saved.callback_attempts == 1
         assert saved.search.product_ids == outcome.search.product_ids

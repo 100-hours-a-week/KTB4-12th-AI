@@ -334,17 +334,18 @@ _PROFILE_SAVE = sa.text(f"""
             as t(product_id, rating, review_hash, position, review_text_clean)
     ),
     p as (
-        insert into {PROFILES_TABLE} (recipient_user_id, source_version, preferred_tags, disliked_categories,
+        insert into {PROFILES_TABLE} (recipient_user_id, source_version, preferred_tags, disliked_tags, disliked_categories,
                                       gift_preference_hash, category_scores,
                                       gift_preference_clean, guard_version, tag_status, prompt_version, validator_version,
                                       recommended_product_ids, catalog_version_id)
-        values (:rid, :sv, cast(:preferred as jsonb), cast(:categories as jsonb),
+        values (:rid, :sv, cast(:preferred as jsonb), cast(:disliked as jsonb), cast(:categories as jsonb),
                 :pref_hash, cast(:scores as jsonb),
                 :pref_clean, :guard_version, :tag_status, :prompt_version, :validator_version,
                 cast(:recommended as jsonb), :catalog_version_id)
         on conflict (recipient_user_id) do update set
             source_version       = excluded.source_version,
             preferred_tags       = excluded.preferred_tags,             -- 축 · 출처가 붙은 모양(DR-040)
+            disliked_tags        = excluded.disliked_tags,              -- 같은 모양 — 글에서 뽑은 비선호(DR-043, 0010)
             disliked_categories  = excluded.disliked_categories,
             gift_preference_hash = excluded.gift_preference_hash,
             category_scores      = excluded.category_scores,
@@ -408,6 +409,7 @@ def save_params(profile: RecipientProfile) -> dict[str, Any]:
     return {
         "rid": profile.recipient_user_id, "sv": profile.source_version,
         "preferred": json.dumps([t.model_dump() for t in profile.preferred_tags], ensure_ascii=False),
+        "disliked": json.dumps([t.model_dump() for t in profile.disliked_tags], ensure_ascii=False),
         "categories": json.dumps([c.model_dump() for c in profile.disliked_categories], ensure_ascii=False),
         "pref_hash": profile.gift_preference_hash,
         "scores": json.dumps([c.model_dump() for c in profile.category_scores]),
@@ -423,7 +425,7 @@ def save_params(profile: RecipientProfile) -> dict[str, Any]:
 
 # 프로필 + 리뷰를 한 번에 읽는다(왕복 1). 리뷰는 자리 순서로 json 배열에 담는다 — 없으면 []
 _PROFILE_GET = sa.text(f"""
-    select p.recipient_user_id, p.source_version, p.preferred_tags, p.disliked_categories,
+    select p.recipient_user_id, p.source_version, p.preferred_tags, p.disliked_tags, p.disliked_categories,
            p.gift_preference_hash, p.category_scores, p.updated_at, coalesce(r.reviews, '[]'::json) as reviews,
            p.gift_preference_clean, p.guard_version, p.tag_status, p.prompt_version, p.validator_version,
            p.recommended_product_ids, p.catalog_version_id
@@ -473,6 +475,7 @@ class DbRecipientProfileStore:
         return RecipientProfile(
             recipient_user_id=row["recipient_user_id"], source_version=row["source_version"],
             preferred_tags=[ProfileTag(**t) for t in row["preferred_tags"]],
+            disliked_tags=[ProfileTag(**t) for t in row["disliked_tags"]],
             disliked_categories=[DislikedCategory(**c) for c in row["disliked_categories"]],
             gift_preference_hash=row["gift_preference_hash"],
             category_scores=[CategoryScore(**c) for c in row["category_scores"]],

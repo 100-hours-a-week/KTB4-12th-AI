@@ -304,7 +304,7 @@ def test_profile_v1_happy_path() -> None:
     store = FakeStore()
     out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore(), pool_size=30)
     assert out.status is RunStatus.RESULT_READY
-    assert out.validation.preferred_tags == [] and out.validation.disliked_tags == ["뷰티"]
+    assert out.validation.preferred_tags == [] and out.validation.disliked_category_names == ["뷰티"]
     assert out.search.catalog_version_id == CV and 0 < len(out.search.product_ids) <= 30
     assert out.validator_version == "v1-skip"
     assert store.get(9073) is out                                              # 저장됨
@@ -330,7 +330,7 @@ def test_profile_penalty_mode_keeps_disliked_and_logs_rule(caplog) -> None:
         out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(only_beauty), store=FakeStore(),
                                recipient_store=FakeRecipientStore(), pool_size=30, dislike_mode=PENALTY)
     assert out.status is RunStatus.RESULT_READY and out.search.product_ids == [1, 2]
-    assert out.validation.disliked_tags == ["뷰티"]                               # 태그는 모드와 무관
+    assert out.validation.disliked_category_names == ["뷰티"]                               # 태그는 모드와 무관
     assert any(selection.POOL_RULE_D + "+penalty-fill" in rec.message for rec in caplog.records)
     assert any("비선호 2개를 감점 순서로 채움" in rec.message for rec in caplog.records)
 

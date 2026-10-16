@@ -13,7 +13,7 @@ v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.anal
   api.run_and_callback ──▶ profile(rq, catalog=, store=, recipient_store=)
                             0) store.save(RUNNING)         실행 기록 시작 — profile_runs 한 행 (input_hash 포함). 저장 못 하면 FAILED·콜백 없음
                             1) catalog.active()            활성 카탈로그 (없으면 NoActiveCatalog — api가 접수 단계에서 이미 걸렀지만 여기서도 FAILED로 기록)
-                            2) validation 만들기           v1: 비선호 이름만 disliked_tags에, 나머지 빈 값
+                            2) validation 만들기           v1: 비선호 카테고리 이름만 disliked_category_names 에, 나머지 빈 값
                                category_scores            리뷰 별점 → 소분류 편향 (1)에서 받은 products 로 소분류를 찾는다 — 같은 카탈로그 버전)
                             3) make_pool()                 rank_products()(인기 + 편향 + 감점 순위) → 고르기: PoolStrategy.D(기본, selection.select_pool —
                                                            비선호 하드 제외 · 한 소분류 최대 10 · 같은 모델 하나 · 모자라면 비선호를 감점 순서로)
@@ -212,7 +212,7 @@ def reviewed_ids(rq: ProfileRequest) -> frozenset[int]:
 def make_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int, catalog_version_id: UUID, *,
               dislike_mode: DislikeMode = DislikeMode.EXCLUDE, scores: list[CategoryScore] | None = None,
               pool_strategy: PoolStrategy = PoolStrategy.D, tags: Sequence[selection.Tag] = (),
-              embedding: EmbeddingIndex | None = None) -> tuple[SearchResult, str]:
+              embedding: EmbeddingIndex | None = None, disliked_tags: Sequence[selection.Tag] = ()) -> tuple[SearchResult, str]:
     """풀 pool_size개와 규칙 라벨. 순위(rank_products)는 두 전략이 같고, 고르는 법만 다르다(PoolStrategy).
 
     두 전략 모두 **리뷰한 상품은 고르지 않는다**(reviewed_ids — 이미 받은 선물).
@@ -224,7 +224,7 @@ def make_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int,
         return build_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores), rule
     ranked = rank_products(rq, products, dislike_mode=dislike_mode, scores=scores)
     sel = selection.select_pool(ranked, pool_size, allow_disliked=dislike_mode is DislikeMode.PENALTY, tags=tags, embedding=embedding,
-                                exclude_ids=reviewed_ids(rq))
+                                exclude_ids=reviewed_ids(rq), disliked_tags=disliked_tags)
     if sel.filled_disliked:
         log.info("profile recipient=%s 비선호 아닌 상품으로 %d개를 못 채워 비선호 %d개를 감점 순서로 채움",
                  rq.recipient_user_id, pool_size, sel.filled_disliked)
@@ -344,7 +344,7 @@ def profile(
         # 2) 리뷰 별점 → 소분류 편향 + (추출기가 있으면) 글 · 취향 → 4축 태그(LLM 한 번 → 코드 검증기)
         scores = category_scores(rq, products, catalog)
         disliked_names = [c.category_name for c in rq.disliked_categories]
-        validation = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_tags=disliked_names, log=[])
+        validation = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_category_names=disliked_names, log=[])
         tags: list[selection.Tag] = []
         prompt_version, validator_version = None, VALIDATOR_VERSION_V1
         tag_status = "skip" if not needs_model(rq) else "off"   # 글 · 취향 없음 → skip, 추출기 꺼짐 → off
@@ -368,7 +368,7 @@ def profile(
             log.info("profile recipient=%s source_version=%s 입력 없음(비선호 0 · 취향 없음 · 리뷰 0) → 추천 0개 콜백, Backend 가 인기순 대체", rid, sv)
         else:
             search, rule = make_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores,
-                                     pool_strategy=pool_strategy, tags=tags, embedding=embedding)
+                                     pool_strategy=pool_strategy, tags=tags, embedding=embedding, disliked_tags=tagging.disliked_tags_of(validation))
             if not search.product_ids:
                 # 0개도 성공이다 — 빈 배열을 7.7로 보낸다. Backend는 저장된 추천이 없으면 인기순으로 대체한다(BE PR4 fallback).
                 # 침묵(FAILED)하면 Backend 는 maximum-window(⚙6h) 뒤 복구 전송 때까지 기다리므로 보내는 쪽이 빠르다. BE 확인 요청 8번.
@@ -404,8 +404,9 @@ def profile(
         log.exception("profile recipient=%s 수신자 프로필 저장 실패", rid)
         return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {type(e).__name__}: {e}")
 
-    log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d scores=%d tags=%d tagger=%s catalog_version=%s rule=%s",
-             rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), len(scores), len(tags), tag_status, catalog_version_id, rule)
+    log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d scores=%d tags=%d disliked_tags=%d tagger=%s "
+             "catalog_version=%s rule=%s", rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), len(scores), len(tags),
+             len(validation.dislikes), tag_status, catalog_version_id, rule)
     return outcome
 
 
@@ -447,7 +448,7 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
     원문(리뷰 글 · 취향 문장 · 모델 출력 · 태그 글자)은 로그에 남기지 않는다 — 개수 · 시간 · 모델 · 분류만."""
     rid, sv = rq.recipient_user_id, rq.source_version
     spec = spec or tagging.SPEC
-    empty = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_tags=disliked_names, log=[])
+    empty = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_category_names=disliked_names, log=[])
     prep = tagging.prepare(rq, {p.productId: p for p in products})       # 가드레일: 개인정보 · 욕설 가림, 의미 없는 글 버림, 인젝션 의심 표시
     prompt, ratings = prep.prompt, prep.ratings
     pv = f"{spec.version}@{tagger.model}"
@@ -473,6 +474,7 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
     raw, usage = (reply.text, reply.usage) if isinstance(reply, TagReply) else (str(reply), None)
     parsed, parse_err = tagging.parse_report(raw)
     keep, drop = tagging.validate(parsed, ratings, prep.has_pref, spec)
+    keep, drop = tagging.drop_category_restatements(keep, drop, disliked_names)     # BE 비선호 대분류를 다시 말한 비선호는 버림(10-16)
     validation = tagging.to_validation(keep, drop, disliked_names)
     axes = Counter(t["axis"] for t in keep)
     drops = Counter(tagging.drop_reason_key(t.get("drop")) for t in drop)

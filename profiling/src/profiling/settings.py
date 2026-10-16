@@ -121,10 +121,11 @@ class Settings(BaseSettings):
         description="태그 추출 시스템 프롬프트 파일(문구 실험용 덮어쓰기) — 없으면 TAG_SPEC 규격의 src/profiling/prompts/<규격>_system.md. "
                     "축은 TAG_SPEC 을 따르고, 파일에 적힌 축이 다르면 기동 실패. 상대 경로는 실행 위치(profiling/) 기준. 바꾸면 판 이름(해시)이 바뀐다",
     )
-    TAG_SPEC: Literal["tag4", "tag3"] = Field(
-        default="tag3",                     # v2 운영 규격 — Task Definition 에서 빠뜨려도 4축이 조용히 켜지지 않게(10-15)
+    TAG_SPEC: Literal["tag4", "tag3", "tag3disliked"] = Field(
+        default="tag3disliked",                  # v2 운영 규격 — 3축 + 비선호(DR-043, 10-16). Task Definition 에서 빠뜨려도 4축이 조용히 켜지지 않게(10-15)
         description="태그 규격 — 축 · 시스템 프롬프트 · 스키마 · 판 이름 한 묶음(tagging.TagSpec). tag4: 카테고리 · IP · 브랜드 · 특징 "
-                    "(prompts/tag4_system.md) · tag3: 카테고리 · IP · 브랜드(prompts/tag3_system.md, v2 운영 — DR-038). "
+                    "(prompts/tag4_system.md) · tag3: 카테고리 · IP · 브랜드(prompts/tag3_system.md, DR-038) · "
+                    "tag3disliked: tag3 + 비선호(v2 운영 — DR-043, 글 속 '싫다'를 비선호 태그로 뽑아 후보에서 빼고 disliked_tags 에 저장). "
                     "모르는 이름이면 기동 실패. 바꾸면 서버를 다시 켠다",
     )
     OPENROUTER_URL: str = Field(default="https://openrouter.ai/api/v1", description="OpenRouter API 주소(OpenAI 호환 /chat/completions)")

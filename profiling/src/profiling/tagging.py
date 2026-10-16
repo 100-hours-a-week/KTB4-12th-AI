@@ -41,7 +41,10 @@ ALL_AXES = ("카테고리", "IP", "브랜드", "특징")
 SPEC_AXES: dict[str, tuple[str, ...]] = {          # 규격 이름 → 축. 프롬프트 파일은 prompts/<이름>_system.md
     "tag4": ALL_AXES,
     "tag3": ("카테고리", "IP", "브랜드"),           # v2 운영(DR-038) — 특징은 v2 에서 쓰는 기능이 없다
+    "tag3disliked": ("카테고리", "IP", "브랜드"),        # v2 운영(DR-043, 10-16): 3축 + 비선호 — "소니 싫어" 같은 글 속 부정을 비선호 태그로 뽑아 후보에서 뺀다
 }
+DISLIKED_SPECS = frozenset({"tag3disliked"})            # 태그마다 polarity(선호 · 비선호)를 받는 규격
+POLARITY = ("선호", "비선호")
 PROMO = re.compile(r"증정|사은품|선물포장|쇼핑백|메세지카드|택1|택일|랜덤|단독|각인|NEW|신상|한정|리뉴얼|에디션|BEST|베스트|1위|인기|누적판매|"
                    r"백화점|공식|정품|본사|당일발송|빠른배송|무료배송|추천", re.IGNORECASE)
 
@@ -63,12 +66,16 @@ def load_system(path: Path | str | None = None) -> str:
     return text
 
 
-def schema_for(axes: Sequence[str]) -> dict[str, Any]:
-    """LLM 출력 스키마 — axis 는 이 축들만(Ollama format · OpenRouter json_schema 가 강제한다)."""
+def schema_for(axes: Sequence[str], disliked: bool = False) -> dict[str, Any]:
+    """LLM 출력 스키마 — axis 는 이 축들만(Ollama format · OpenRouter json_schema 가 강제한다). disliked 면 polarity(선호 · 비선호)도 받는다."""
+    props: dict[str, Any] = {"axis": {"type": "string", "enum": list(axes)}, "tag": {"type": "string"},
+                             "ref": {"type": "string"}, "evidence": {"type": "string"}}
+    required = ["axis", "tag", "ref", "evidence"]
+    if disliked:
+        props["polarity"] = {"type": "string", "enum": list(POLARITY)}
+        required.append("polarity")
     return {"type": "object", "properties": {"tags": {"type": "array", "items": {
-        "type": "object", "properties": {"axis": {"type": "string", "enum": list(axes)}, "tag": {"type": "string"},
-                                         "ref": {"type": "string"}, "evidence": {"type": "string"}},
-        "required": ["axis", "tag", "ref", "evidence"]}}}, "required": ["tags"]}
+        "type": "object", "properties": props, "required": required}}}, "required": ["tags"]}
 
 
 def declared_axes(system: str) -> set[str]:
@@ -85,8 +92,12 @@ class TagSpec(NamedTuple):
     prompt_file: Path
 
     @property
+    def disliked(self) -> bool:
+        return self.name in DISLIKED_SPECS
+
+    @property
     def schema(self) -> dict[str, Any]:
-        return schema_for(self.axes)
+        return schema_for(self.axes, self.disliked)
 
     @property
     def sha256(self) -> str:
@@ -181,23 +192,26 @@ def worth_llm(prep: Prepared) -> bool:
 def validate(tags: Sequence[dict[str, Any]], ratings: dict[str, int], has_pref: bool,
              spec: TagSpec | None = None) -> tuple[list[dict], list[dict]]:
     """근거 ref 는 여러 개일 수 있다("pref, r1") — 하나라도 취향 문장이거나 4~5점 리뷰면 통과, 전부 1~3점이거나 없는 번호면 버림.
-    축은 spec(없으면 기본 규격)의 축만 받는다 — 밖이면 '축 밖'."""
-    axes = (spec or SPEC).axes
+    축은 spec(없으면 기본 규격)의 축만 받는다 — 밖이면 '축 밖'.
+    비선호 규격(tag3disliked)의 **비선호** 태그는 별점과 상관없이 근거(취향 문장 · 아무 리뷰)만 있으면 통과 — 싫다는 말은 낮은 별점 리뷰에도 있다."""
+    spec = spec or SPEC
+    axes = spec.axes
     keep, drop = [], []
     for t in tags:
         tag = str(t.get("tag", "")).strip()
+        is_disliked = spec.disliked and t.get("polarity") == "비선호"
         refs = [x for x in re.split(r"[\s,/·]+", str(t.get("ref", ""))) if x]
         known = [x for x in refs if (x == "pref" and has_pref) or x in ratings]
-        good = [x for x in known if x == "pref" or ratings[x] >= 4]
+        good = [x for x in known if x == "pref" or is_disliked or ratings[x] >= 4]
         why = ("축 밖" if t.get("axis") not in axes else "빈 태그" if not tag else "판촉 단어" if PROMO.search(tag)
                else guard.tag_problem(tag) if guard.tag_problem(tag)
                else "근거 ref 가 없음" if not known
                else "근거가 별점 1~3점 리뷰뿐(" + ",".join(f"{x}={ratings[x]}" for x in known) + ")" if not good else "")
-        (drop if why else keep).append({**t, "tag": tag, **({"drop": why} if why else {})})
+        (drop if why else keep).append({**t, "tag": tag, "polarity": "비선호" if is_disliked else "선호", **({"drop": why} if why else {})})
     uniq, seen = [], set()
-    for t in keep:                                  # 같은 축 · 같은 태그는 하나만
-        if (t["axis"], t["tag"]) not in seen:
-            seen.add((t["axis"], t["tag"]))
+    for t in keep:                                  # 같은 축 · 같은 태그 · 같은 극성은 하나만
+        if (t["axis"], t["tag"], t["polarity"]) not in seen:
+            seen.add((t["axis"], t["tag"], t["polarity"]))
             uniq.append(t)
     return uniq, drop
 
@@ -228,16 +242,47 @@ def _source(ref: str) -> str:
     return "preference" if "pref" in ref else "review_text"
 
 
+def _bucket(t: dict) -> str:
+    """판정 로그의 axis 칸 — 비선호 → dislikes · 특징 → key_features · 나머지 → likes."""
+    return "dislikes" if t.get("polarity") == "비선호" else "key_features" if t.get("axis") == "특징" else "likes"
+
+
+_NORM_CAT = re.compile(r"[\s·/_\-()\[\]'\".,]+")
+
+
+def drop_category_restatements(keep: Sequence[dict], drop: Sequence[dict],
+                               disliked_names: Sequence[str]) -> tuple[list[dict], list[dict]]:
+    """BE 비선호 대분류를 다시 말한 비선호 태그는 버린다(10-16) — 그 대분류 상품은 이미 빠지므로 추천은 그대로이고, 사용자가
+    "○○ 쪽은 그만 받고 싶다고 설정했지만 사실 좋았어요"처럼 설정을 뒤집어 말할 때 설정만 보고 비선호로 적는 오답을 없앤다.
+    대분류 이름을 '·'로 나눈 조각(카페·디저트 → 카페 · 디저트)으로 시작하는 비선호 태그가 대상(디저트 · 생활용품 · 반려동물용품 …).
+    선호 태그는 건드리지 않는다. 버린 태그는 판정 로그에 사유 'BE 비선호 대분류와 같음'으로 남는다."""
+    parts = {q for n in disliked_names for q in [_NORM_CAT.sub("", n)] + [_NORM_CAT.sub("", x) for x in str(n).split("·")] if len(q) >= 2}
+    if not parts:
+        return list(keep), list(drop)
+    kept, dropped = [], list(drop)
+    for t in keep:
+        tag = _NORM_CAT.sub("", str(t.get("tag", "")))
+        if t.get("polarity") == "비선호" and any(tag.startswith(q) for q in parts):
+            dropped.append({**t, "drop": "BE 비선호 대분류와 같음"})
+        else:
+            kept.append(t)
+    return kept, dropped
+
+
 def to_validation(keep: Sequence[dict], drop: Sequence[dict], disliked_names: Sequence[str]) -> ValidationResult:
-    """검증 결과 → ValidationResult. 특징 → key_features · 나머지 → likes. 판정 로그엔 원문 대신 축 · ref · 사유만."""
-    likes = [ValidatedTag(tag=t["tag"], source=_source(str(t.get("ref", ""))), grade="confirmed") for t in keep if t["axis"] != "특징"]
-    feats = [ValidatedTag(tag=t["tag"], source=_source(str(t.get("ref", ""))), grade="confirmed") for t in keep if t["axis"] == "특징"]
-    log = [Decision(tag=t["tag"], axis="key_features" if t.get("axis") == "특징" else "likes", decision="keep", ref=str(t.get("ref", "")),
-                    axis4=t["axis"]) for t in keep]
-    log += [Decision(tag=str(t.get("tag", "")), axis="key_features" if t.get("axis") == "특징" else "likes", decision="drop",
+    """검증 결과 → ValidationResult. 비선호 → dislikes · 특징 → key_features · 나머지 → likes. 판정 로그엔 원문 대신 축 · ref · 사유만."""
+    def vt(t: dict) -> ValidatedTag:
+        return ValidatedTag(tag=t["tag"], source=_source(str(t.get("ref", ""))), grade="confirmed")
+
+    likes = [vt(t) for t in keep if _bucket(t) == "likes"]
+    feats = [vt(t) for t in keep if _bucket(t) == "key_features"]
+    dislikes = [vt(t) for t in keep if _bucket(t) == "dislikes"]
+    log = [Decision(tag=t["tag"], axis=_bucket(t), decision="keep", ref=str(t.get("ref", "")), axis4=t["axis"]) for t in keep]
+    log += [Decision(tag=str(t.get("tag", "")), axis=_bucket(t), decision="drop",
                      ref=str(t.get("ref", "")), axis4=t.get("axis"), reason=t.get("drop")) for t in drop]
-    return ValidationResult(likes=likes, key_features=feats, dislikes=[], preferred_tags=[t["tag"] for t in keep],
-                            disliked_tags=list(disliked_names), log=log)
+    return ValidationResult(likes=likes, key_features=feats, dislikes=dislikes,
+                            preferred_tags=[t["tag"] for t in keep if _bucket(t) != "dislikes"],
+                            disliked_category_names=list(disliked_names), log=log)
 
 
 def tags_of(validation: ValidationResult) -> list[Tag]:
@@ -247,3 +292,9 @@ def tags_of(validation: ValidationResult) -> list[Tag]:
     out += [Tag(axis4.get(t.tag) or "특징", t.tag) for t in validation.key_features]
     order = {t: k for k, t in enumerate(validation.preferred_tags)}
     return sorted(out, key=lambda t: order.get(t.text, len(order)))
+
+
+def disliked_tags_of(validation: ValidationResult) -> list[Tag]:
+    """ValidationResult → 후보에서 뺄 비선호 태그(축 · 글자). 비선호 규격이 아니면 늘 빈 목록."""
+    axis4 = {d.tag: getattr(d, "axis4", None) for d in validation.log if d.decision == "keep" and d.axis == "dislikes"}
+    return [Tag(axis4.get(t.tag) or "카테고리", t.tag) for t in validation.dislikes]

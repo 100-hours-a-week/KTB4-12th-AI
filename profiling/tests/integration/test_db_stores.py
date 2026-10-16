@@ -536,3 +536,19 @@ def test_pipeline_with_tagger_stores_chatbot_profile_data(stores, engine) -> Non
         dumped = c.execute(sa.text("select row_to_json(p)::text from ai_profile.recipient_profiles p where p.recipient_user_id = :rid"),
                            {"rid": RID + 3}).scalar()
     assert "010-1234-5678" not in dumped                                             # 원문의 개인정보는 DB 어디에도 없다
+
+
+def test_profile_store_round_trips_disliked_tags(stores, engine) -> None:
+    """0010(DR-043) — 비선호 태그를 선호 태그와 같은 모양으로 저장 · 읽기. 새 번호가 태그 없이 오면 [] 로 함께 덮는다(NULL 아님)."""
+    _, profiles = stores
+    sony = ProfileTag(axis="브랜드", tag="소니", source="preference", ref="pref")
+    audio = ProfileTag(axis="카테고리", tag="음향기기", source="review_text", ref="r1")
+    camp = ProfileTag(axis="카테고리", tag="캠핑용품", source="preference", ref="pref")
+    profiles.upsert(RecipientProfile(recipient_user_id=RID, source_version=3, preferred_tags=[camp], disliked_tags=[sony, audio]))
+    got = profiles.get(RID)
+    assert got.preferred_tags == [camp] and got.disliked_tags == [sony, audio]
+    profiles.upsert(RecipientProfile(recipient_user_id=RID, source_version=4))             # 새 번호 · 태그 단계 실패 등 — 옛 태그를 남기지 않는다
+    got = profiles.get(RID)
+    assert got.disliked_tags == [] and got.preferred_tags == []
+    with engine.connect() as c:
+        assert c.execute(sa.text("select disliked_tags from ai_profile.recipient_profiles where recipient_user_id=:r"), {"r": RID}).scalar() == []
