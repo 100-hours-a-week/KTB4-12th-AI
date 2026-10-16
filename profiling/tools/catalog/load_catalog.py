@@ -14,6 +14,13 @@
   합본 적재:              … --bundle s3://<버킷>/<키>  (또는 로컬 경로)  [--if-empty]
   --if-empty            활성 카탈로그가 이미 있으면 아무것도 하지 않고 성공(0) — 배포 워크플로가 매번 불러도 된다
 
+**상품 임베딩 벡터 적재(10-16, 0009).** 검색기(product-search)가 만든 manifest.json · vectors.f32 를 products.embedding(pgvector)에 넣는다.
+  벡터만:                 … --embeddings <폴더 | s3://<버킷>/<접두어>>  [--if-empty]
+  카탈로그와 함께:         … --bundle s3://<버킷>/<키> --embeddings s3://<버킷>/<접두어> --if-empty
+  폴더는 manifest.json 이 든 폴더, 또는 product-search 폴더(data/ · data/CURRENT 규칙을 따른다). S3 는 접두어 아래 두 파일.
+  벡터 해시 · 차원 · 상품 번호 매칭 비율(90%)을 검사하고 틀리면 넣지 않는다. 활성 카탈로그 판에 벡터 정보(모델 · 해시)를 함께 남긴다.
+  --if-empty 면 활성 판에 벡터가 이미 있을 때 건너뛴다.
+
 패키지는 `product-catalog-20260922-v1` 모양을 기대한다 (data/categories.json · data/products.jsonl · data/summary.json).
 적재는 트랜잭션 하나다 — 도중에 실패하면 아무것도 남지 않고 활성 버전도 그대로다.
 
@@ -36,6 +43,15 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from profiling.embedding import (
+    DIM_DB,
+    MIN_MATCH_RATIO,
+    active_data_dir,
+    normalize,
+    parse_vector_files,
+    row_index,
+    vector_literal,
+)
 from profiling.settings import get_settings
 
 SCHEMA = "ai_catalog"
@@ -283,7 +299,7 @@ def _s3_get(uri: str) -> bytes:
     try:
         return boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
     except (BotoCoreError, ClientError) as e:              # 권한 · 없는 키 · 네트워크 — 원인 종류만(자격 정보는 남기지 않음)
-        raise PackageError(f"S3 에서 합본을 읽지 못했다({type(e).__name__}): {uri}") from e
+        raise PackageError(f"S3 객체를 읽지 못했다({type(e).__name__}): {uri}") from e
 
 
 def read_bundle(src: str) -> dict[str, Any]:
@@ -360,6 +376,74 @@ def has_active_catalog(engine: sa.Engine) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 상품 임베딩 벡터 — products.embedding(pgvector, 0009)
+# ---------------------------------------------------------------------------
+
+
+def read_embeddings(src: str) -> tuple[dict[str, Any], Any]:
+    """벡터 파일 읽기 — 로컬 폴더(manifest.json 이 든 폴더 또는 product-search 폴더) 또는 s3://버킷/접두어."""
+    try:
+        if src.startswith("s3://"):
+            prefix = src.rstrip("/")
+            return parse_vector_files(_s3_get(prefix + "/manifest.json"), _s3_get(prefix + "/vectors.f32"))
+        root = Path(src)
+        if (root / "manifest.json").is_file():
+            data = root
+        elif (root / "data").is_dir():
+            data = active_data_dir(root)
+        else:
+            raise PackageError(f"벡터 폴더가 아니다(manifest.json 도 data/ 도 없다): {src}")
+        return parse_vector_files((data / "manifest.json").read_bytes(), (data / "vectors.f32").read_bytes())
+    except FileNotFoundError as e:
+        raise PackageError(f"벡터 파일이 없다: {e.filename}") from e
+    except (RuntimeError, KeyError, ValueError) as e:
+        raise PackageError(f"벡터 파일을 읽을 수 없다: {e}") from e
+
+
+def has_active_embeddings(engine: sa.Engine) -> bool:
+    """활성 카탈로그 판에 벡터가 이미 들어가 있나 — --if-empty 판단."""
+    with engine.connect() as conn:
+        return bool(conn.execute(sa.text(
+            f"select exists(select 1 from {SCHEMA}.catalog_versions where is_active and embedding_model is not null)")).scalar())
+
+
+def load_embeddings(engine: sa.Engine, manifest: dict[str, Any], raw: Any) -> dict[str, Any]:
+    """벡터 → products.embedding. 트랜잭션 하나 — 옛 벡터를 지우고 새로 넣은 뒤 활성 카탈로그 판에 벡터 정보를 남긴다.
+    번호 연결은 앱과 같은 규칙(embedding.row_index): 새 형식은 BE 번호, 옛 형식은 수집처 ID → source_product_id."""
+    if manifest.get("dimensions") != DIM_DB:
+        raise PackageError(f"벡터 차원이 {manifest.get('dimensions')} — products.embedding 은 {DIM_DB}")
+    vectors = normalize(raw)
+    with engine.begin() as conn:
+        version_id = conn.execute(sa.text(f"select id from {SCHEMA}.catalog_versions where is_active")).scalar()
+        if version_id is None:
+            raise PackageError("활성 카탈로그가 없다 — 카탈로그(--bundle 등)를 먼저 적재한다")
+        rows = conn.execute(sa.text(f"select id, source_product_id from {SCHEMA}.products")).all()
+        index = row_index(manifest, {sid: pid for pid, sid in rows if sid is not None}, {pid for pid, _ in rows})
+        if len(index) < MIN_MATCH_RATIO * len(rows):
+            raise PackageError(f"상품 번호 매칭 부족 {len(index)}/{len(rows)} — 벡터의 번호 체계 · 세대가 카탈로그와 다르다")
+        conn.execute(sa.text(f"update {SCHEMA}.products set embedding = null where embedding is not null"))
+        conn.execute(sa.text(f"update {SCHEMA}.products set embedding = cast(:v as vector) where id = :id"),
+                     [{"id": pid, "v": vector_literal(vectors[i])} for pid, i in sorted(index.items())])
+        conn.execute(sa.text(f"""update {SCHEMA}.catalog_versions set embedding_model = :m, embedding_model_sha256 = :ms,
+                                     embedding_vectors_sha256 = :vs, embedding_loaded_at = now() where id = :id"""),
+                     {"m": manifest["model"], "ms": manifest["model_sha256"], "vs": manifest["vectors_sha256"], "id": version_id})
+    return {"matched": len(index), "total": len(rows), "version_id": version_id,
+            "format": "new" if "source_product_ids" in manifest else "old"}
+
+
+def _embeddings_step(engine: sa.Engine, src: str, *, if_empty: bool) -> int:
+    """--embeddings 단계 — 읽기 → (--if-empty 면 이미 있을 때 건너뜀) → 적재. 종료 코드를 돌려준다."""
+    if if_empty and has_active_embeddings(engine):
+        print("  · 활성 카탈로그 판에 상품 벡터가 이미 있다 — --if-empty 라 넣지 않는다")
+        return 0
+    manifest, raw = read_embeddings(src)
+    got = load_embeddings(engine, manifest, raw)
+    print(f"  ✓ 상품 벡터 — {got['matched']}/{got['total']} 상품 · {manifest['model'].split('/')[-1]} · "
+          f"형식 {got['format']} · 카탈로그 판 {got['version_id']}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # 재고 · 조회수 회신 반영
 # ---------------------------------------------------------------------------
 
@@ -414,7 +498,7 @@ def report(engine: sa.Engine) -> None:
 
         print(f"  카테고리        대분류 {q(f'select count(*) from {SCHEMA}.categories where level = 1')}"
               f" · 소분류 {q(f'select count(*) from {SCHEMA}.categories where level = 2')}")
-        print(f"  상품            {q(f'select count(*) from {SCHEMA}.products')}건")
+        print(f"  상품            {q(f'select count(*) from {SCHEMA}.products')}건 · 벡터 {q(f'select count(embedding) from {SCHEMA}.products')}건")
         print(f"  활성 버전       {q(f'select coalesce(max(id::text), chr(45)) from {SCHEMA}.catalog_versions where is_active')}")
         print(f"  Backend 번호    상품 {q(f'select coalesce(min(id), 0) from {SCHEMA}.products')}~{q(f'select coalesce(max(id), 0) from {SCHEMA}.products')}"
               f" · 카테고리 {q(f'select coalesce(min(id), 0) from {SCHEMA}.categories')}~{q(f'select coalesce(max(id), 0) from {SCHEMA}.categories')} (표의 키)")
@@ -444,13 +528,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-activate", action="store_true", help="적재는 하되 활성 버전으로 바꾸지 않는다")
     ap.add_argument("--write-bundle", type=Path, help="DB 에 쓰지 않고 합본 파일(.json 또는 .json.gz)만 만든다 — 서버 적재용(10-15)")
     ap.add_argument("--bundle", help="합본 파일을 적재한다 — 로컬 경로 또는 s3://버킷/키 (서버 적재)")
-    ap.add_argument("--if-empty", action="store_true", help="활성 카탈로그가 이미 있으면 아무것도 하지 않고 성공 — 배포 워크플로용")
+    ap.add_argument("--if-empty", action="store_true", help="활성 카탈로그(· 벡터)가 이미 있으면 그 단계는 건너뛰고 성공 — 배포 워크플로용")
+    ap.add_argument("--embeddings", help="상품 임베딩 벡터를 넣는다 — 폴더(manifest.json · vectors.f32) 또는 s3://버킷/접두어 (0009)")
     args = ap.parse_args(argv)
 
     if args.bundle:
         if args.package or args.id_map or args.category_id_map or args.metrics or args.write_bundle:
-            ap.error("--bundle 은 단독으로 쓴다(합본에 번호 · 재고 · 조회수가 다 들어 있다)")
+            ap.error("--bundle 은 단독으로 쓴다(합본에 번호 · 재고 · 조회수가 다 들어 있다 — --embeddings 만 함께 쓸 수 있다)")
         return _main_bundle(args)
+    if args.embeddings and not (args.package or args.metrics):
+        return _main_embeddings_only(args)
     if args.write_bundle and not args.package:
         ap.error("--write-bundle 에는 --package · --id-map · --category-id-map 이 필요하다")
     if not (args.package or args.metrics):
@@ -543,10 +630,12 @@ def _main_bundle(args: argparse.Namespace) -> int:
     try:
         if args.if_empty and has_active_catalog(engine):
             print("  · 활성 카탈로그가 이미 있다 — --if-empty 라 적재하지 않는다")
-            return 0
-        got = load_bundle(engine, bundle, activate=not args.no_activate)
-        print(f"  ✓ 적재 — 카테고리 {got['categories']} · 상품 {got['products']} · 버전 {got['version_id']}"
-              f"{'' if args.no_activate else ' (활성)'}")
+        else:
+            got = load_bundle(engine, bundle, activate=not args.no_activate)
+            print(f"  ✓ 적재 — 카테고리 {got['categories']} · 상품 {got['products']} · 버전 {got['version_id']}"
+                  f"{'' if args.no_activate else ' (활성)'}")
+        if args.embeddings:
+            _embeddings_step(engine, args.embeddings, if_empty=args.if_empty)
         print("\n현재 상태")
         report(engine)
     except PackageError as e:
@@ -558,6 +647,29 @@ def _main_bundle(args: argparse.Namespace) -> int:
     finally:
         engine.dispose()
     return 0
+
+
+def _main_embeddings_only(args: argparse.Namespace) -> int:
+    """--embeddings 만 — 이미 적재된 활성 카탈로그에 벡터를 넣는다."""
+    if args.dry_run:
+        try:
+            manifest, raw = read_embeddings(args.embeddings)
+        except PackageError as e:
+            print(f"✗ {e}", file=sys.stderr)
+            return 1
+        print(f"벡터 {manifest['model'].split('/')[-1]} · {raw.shape[0]}개 × {raw.shape[1]} — dry-run, 쓰지 않았다")
+        return 3
+    engine = sa.create_engine(get_settings().DATABASE_URL, future=True)
+    try:
+        return _embeddings_step(engine, args.embeddings, if_empty=args.if_empty)
+    except PackageError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+    except sa.exc.SQLAlchemyError as e:
+        print(f"✗ DB 오류: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    finally:
+        engine.dispose()
 
 
 if __name__ == "__main__":

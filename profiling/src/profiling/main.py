@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 # 비교는 "DB 판 ≥ 기대 판"이다 — 롤링 배포는 마이그레이션을 먼저 돌리므로 그동안 옛 Task 는 한 판 높은 DB 위에서 돈다.
 # 같음으로 비교하면 마이그레이션 순간 옛 Task 가 모두 준비 안 됨(503)이 되어 AI 가 빈다. 그래서 마이그레이션은 옛 코드도 도는
 # 모양(열 추가 먼저 → 코드 → 삭제는 다음 판)으로 쓴다. 판 이름은 4자리 숫자라 문자열 비교가 곧 순서다.
-EXPECTED_MIGRATION = "0008"
+EXPECTED_MIGRATION = "0009"
 
 
 def migration_ok(version: str | None) -> bool:
@@ -131,9 +131,9 @@ async def lifespan(app: FastAPI):
         log.info("태그 규격 %s 축=%s 판=%s 파일=%s", sp.name, "·".join(sp.axes), sp.version, sp.prompt_file)
     if settings.TAGGER == "ollama":
         from profiling.llm import OllamaTagExtractor
-        app.state.tagger = OllamaTagExtractor(settings.OLLAMA_URL, settings.TAGGER_MODEL, timeout_s=settings.TAGGER_TIMEOUT_S)
+        app.state.tagger = OllamaTagExtractor(settings.OLLAMA_URL, settings.tagger_model, timeout_s=settings.TAGGER_TIMEOUT_S)
         app.state.tagger.warm_up()
-        log.info("태그 추출기 ollama model=%s url=%s", settings.TAGGER_MODEL, settings.OLLAMA_URL)
+        log.info("태그 추출기 ollama model=%s url=%s", settings.tagger_model, settings.OLLAMA_URL)
     elif settings.TAGGER == "openrouter":
         if settings.OPENROUTER_API_KEY is None or not settings.OPENROUTER_API_KEY.get_secret_value().strip():
             log.error("TAGGER=openrouter 인데 PROFILING_OPENROUTER_API_KEY 가 없음 — 태그 추출기 끈 채로 진행")
@@ -141,22 +141,24 @@ async def lifespan(app: FastAPI):
         else:
             from profiling.llm import OpenRouterTagExtractor
             app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, settings.OPENROUTER_API_KEY.get_secret_value(),
-                                                      settings.TAGGER_MODEL, timeout_s=settings.TAGGER_TIMEOUT_S)
-            log.info("태그 추출기 openrouter model=%s url=%s", settings.TAGGER_MODEL, settings.OPENROUTER_URL)   # 키는 남기지 않음
+                                                      settings.tagger_model, timeout_s=settings.TAGGER_TIMEOUT_S)
+            log.info("태그 추출기 openrouter model=%s url=%s", settings.tagger_model, settings.OPENROUTER_URL)   # 키는 남기지 않음
     if settings.EMBEDDING_DIR:
         try:
-            from profiling.embedding import ProductSearchEmbedding
-            app.state.embedding = ProductSearchEmbedding(Path(settings.EMBEDDING_DIR), app.state.engine)
-            emb = app.state.embedding
-            matched, total = getattr(emb, "matched", None), getattr(emb, "total", None)      # 매칭 수는 임베딩 수정(fix 브랜치) 뒤에 생긴다
-            app.state.embedding_status = {"enabled": True, "version": emb.version, "matched": matched, "total": total}
-            log.info("임베딩 %s (%s) 상품 매칭 %s/%s", emb.version, settings.EMBEDDING_DIR, matched, total)
+            from profiling.embedding import DbEmbedding, ProductSearchEmbedding
+            index = DbEmbedding if settings.EMBEDDING_SOURCE == "db" else ProductSearchEmbedding
+            app.state.embedding = emb = index(Path(settings.EMBEDDING_DIR), app.state.engine)
+            emb.encode(["상품 검색"])                       # 질의 인코더(Node)를 기동 때 띄워 둔다 — 첫 요청이 모델 적재를 기다리지 않게,
+                                                            # 띄우지 못하면 여기서 실패해 임베딩을 끈 채로 뜬다(요청 중에 알게 되지 않게)
+            app.state.embedding_status = {"enabled": True, "source": emb.source, "version": emb.version,
+                                          "matched": emb.matched, "total": emb.total}
+            log.info("임베딩 %s 벡터=%s 상품 매칭 %s/%s", emb.version, emb.source, emb.matched, emb.total)
         except Exception as e:
             log.exception("임베딩을 켜지 못함 — 끈 채로 진행(태그가 있어도 임베딩 단계 없이 D)")
             app.state.embedding_status = {"enabled": False, "reason": type(e).__name__}
     status.LLM.reset()
     status.LLM.configure(requested=settings.TAGGER, enabled=app.state.tagger is not None,
-                         model=settings.TAGGER_MODEL if settings.TAGGER != "none" else None, reason=tagger_reason)
+                         model=settings.tagger_model, reason=tagger_reason)
     app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
 
     # 끊긴 실행 정리 — 프로세스가 죽으면 그 행은 RUNNING 인 채 남는다. 남겨 두면 중복 판정이 "이미 분석 중"으로

@@ -16,6 +16,10 @@ from typing import Literal
 from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 추출기별 기본 모델 — TAGGER_MODEL 을 비우면 이것을 쓴다. 추출기와 맞지 않는 모델 이름이 넘어가 요청마다 태그가 실패하는 것을 막는다
+# (예: openrouter 에 Ollama 모델 이름을 보내면 http_400 — 추천은 나가므로 겉으로는 정상처럼 보인다)
+DEFAULT_TAGGER_MODEL: dict[str, str] = {"openrouter": "google/gemini-3.5-flash-lite", "ollama": "gemma4:12b"}
+
 
 class Settings(BaseSettings):
     """서비스 설정. 대문자 필드명 = 환경변수 이름에서 접두사를 뗀 것 (PROFILING_POOL_SIZE → POOL_SIZE)."""
@@ -125,11 +129,20 @@ class Settings(BaseSettings):
     )
     OPENROUTER_URL: str = Field(default="https://openrouter.ai/api/v1", description="OpenRouter API 주소(OpenAI 호환 /chat/completions)")
     OLLAMA_URL: str = Field(default="http://localhost:11434", description="TAGGER=ollama 일 때 Ollama 주소")
-    TAGGER_MODEL: str = Field(default="gemma4:12b", description="태그 추출 모델 — ollama: gemma4:12b(정밀) · qwen3.5:9b(빠름), openrouter: 제공자/모델 이름(OpenRouter 모델 목록의 id)")
+    TAGGER_MODEL: str | None = Field(
+        default=None,
+        description="태그 추출 모델. 비우면 추출기별 기본값(DEFAULT_TAGGER_MODEL) — openrouter: google/gemini-3.5-flash-lite(10-14 확정) · "
+                    "ollama: gemma4:12b. 다른 모델은 이름을 직접(ollama 예 qwen3.5:9b, openrouter 는 모델 목록의 id)",
+    )
     TAGGER_TIMEOUT_S: float = Field(default=120.0, gt=0, description="LLM 호출 한 번의 시간 상한(초)")
     EMBEDDING_DIR: str | None = Field(
         default=None,
-        description="product-search 폴더(상품 벡터 data/ · 질의 인코더 embedding/). 없으면 임베딩 끔. 모델 라이선스 CC BY-NC — 서비스 전 확인",
+        description="질의 인코더가 있는 product-search 폴더(embedding/ — Node · 모델). 없으면 임베딩 끔",
+    )
+    EMBEDDING_SOURCE: Literal["db", "file"] = Field(
+        default="db",
+        description="상품 벡터를 어디서 읽나 — db: ai_catalog.product_embeddings(pgvector, 0009 · load_catalog --embeddings 로 적재) · "
+                    "file: EMBEDDING_DIR 의 data/ 파일(검색기가 만든 manifest.json · vectors.f32)",
     )
 
     # ---- 실행 (3단계 구현 상세 §12.1 개발 시험 시작값)
@@ -181,6 +194,13 @@ class Settings(BaseSettings):
                     "공개 기본값 · DATABASE_URL 계정 이름이 공개 기본값(로컬 이름) · BACKEND_BASE_URL 이 로컬 가짜 BE 기본값 · CATALOG_SOURCE 가 db 가 아님. "
                     "로컬 개발 · compose · 시험은 false(기본) — 기본값으로 돌기 때문. Task Definition 에서 true(10-15)",
     )
+
+    @property
+    def tagger_model(self) -> str | None:
+        """실제로 쓸 태그 추출 모델 — TAGGER_MODEL 이 있으면 그것, 없으면 추출기별 기본값. 추출기가 꺼져 있으면 None."""
+        if self.TAGGER == "none":
+            return None
+        return self.TAGGER_MODEL or DEFAULT_TAGGER_MODEL[self.TAGGER]
 
 
 def read_dotenv(path: Path | str = ".env") -> dict[str, str]:

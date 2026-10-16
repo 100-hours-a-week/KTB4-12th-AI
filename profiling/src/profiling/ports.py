@@ -129,6 +129,9 @@ class EmbeddingIndex(Protocol):
     def encode(self, texts: list[str]):  # -> numpy.ndarray (len, d)
         ...
 
+    # 선택: similarities(product_ids, queries) -> numpy.ndarray (len, 질의 수) — 있으면 selection 이 이것으로 유사도를 받는다
+    # (DB 구현은 pgvector 가 계산). 없으면 product_vectors(ids) @ queries.T.
+
 
 class TokenUsage(NamedTuple):
     """LLM 한 번의 사용량 — 로컬이어도 잰다(외부 API 로 바꿀 때 비용 추정 · 느려짐 원인 추적). 모르는 값은 None.

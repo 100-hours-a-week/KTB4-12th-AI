@@ -33,7 +33,10 @@ services:
 
   # 마이그레이션 — 앱과 같은 이미지로 한 번 돌고 종료한다 (restart: no)
   ai-migrate:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        product-search: ../product-search      # 질의 인코더(Node · 모델) — Dockerfile 머리 주석
     image: profiling-ai-app
     container_name: profiling-ai-migrate
     command: ["alembic", "upgrade", "head"]
@@ -48,7 +51,10 @@ services:
     restart: "no"
 
   ai-app:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        product-search: ../product-search      # 질의 인코더(Node · 모델) — Dockerfile 머리 주석
     image: profiling-ai-app
     container_name: profiling-ai-app
     restart: unless-stopped

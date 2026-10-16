@@ -19,7 +19,7 @@ flowchart LR
 |---|---|
 | 상태 | **v2 개발 · 통합 중** (브랜치 `feat/v2-profiling-merge`) |
 | 언어 · 런타임 | Python 3.13 · FastAPI · SQLAlchemy · Alembic · uv |
-| 저장소 | PostgreSQL 16 + pgvector (마이그레이션 `0008`) |
+| 저장소 | PostgreSQL 16 + pgvector (마이그레이션 `0009` — 상품 임베딩 벡터도 DB 에) |
 | 외부 LLM | OpenRouter (태그 추출 — 꺼도 추천은 동작) |
 | 담당 | AI 프로파일링 (Profile · Catalog · DB · Embedding 어댑터) |
 
@@ -53,6 +53,7 @@ uv sync                          # 가상환경 + 의존성
 docker compose up -d ai-db       # PostgreSQL 16 + pgvector
 uv run alembic upgrade head      # 표 · 앱 전용 계정 만들기
 uv run python -m tools.catalog.load_catalog --bundle <카탈로그 합본>.json.gz --if-empty
+uv run python -m tools.catalog.load_catalog --embeddings <product-search 폴더> --if-empty   # 선택: 임베딩을 켤 때만
 uv run uvicorn profiling.main:app --port 8000
 ```
 
@@ -68,7 +69,7 @@ curl localhost:8000/health       # catalog.active · store.connected 가 true
 ### 컨테이너로 한 번에 (배포와 같은 모양)
 
 ```bash
-docker compose up -d --build     # ai-db → ai-migrate(마이그레이션 한 번) → ai-app(:8000)
+docker compose up -d --build     # ai-db → ai-migrate(마이그레이션 한 번) → ai-app(:8000). 이미지에 검색기의 질의 인코더도 넣는다
 docker compose run --rm -v <합본 폴더>:/b:ro ai-migrate \
   python -m tools.catalog.load_catalog --bundle /b/<카탈로그 합본>.json.gz --if-empty
 ```
@@ -91,11 +92,12 @@ docker compose run --rm -v <합본 폴더>:/b:ro ai-migrate \
 | `PROFILING_BACKEND_BASE_URL` | `http://localhost:8081` | 콜백을 보낼 Backend 주소 |
 | `PROFILING_CATALOG_SOURCE` | `file` | `db` = 배포 경로. `file` = 시험용 예시 카탈로그(가짜 상품 111개) |
 | `PROFILING_TAGGER` | `none` | 태그 추출기 `none` · `openrouter` · `ollama` |
-| `PROFILING_TAGGER_MODEL` | `gemma4:12b` | 추출기 모델 id (OpenRouter 를 쓰면 그 모델 id) |
+| `PROFILING_TAGGER_MODEL` | 추출기별 | 비우면 `openrouter` → `google/gemini-3.5-flash-lite` · `ollama` → `gemma4:12b`. 다른 모델은 이름을 직접 |
 | `PROFILING_TAGGER_TIMEOUT_S` | `120` | LLM 한 번 상한(초). **서버는 30** |
 | `PROFILING_OPENROUTER_API_KEY` | 없음 | OpenRouter 키. `.env` 에만 둔다 |
 | `PROFILING_TAG_SPEC` | `tag3` | 태그 규격 — `tag3`(카테고리 · IP · 브랜드) / `tag4`(+ 특징) |
-| `PROFILING_EMBEDDING_DIR` | 없음 | 검색(product-search) 폴더. 주면 태그로 비슷한 상품을 찾는 단계가 켜진다 |
+| `PROFILING_EMBEDDING_DIR` | 없음 | 질의 인코더(Node · 모델)가 있는 검색(product-search) 폴더. 주면 태그로 비슷한 상품을 찾는 단계가 켜진다 |
+| `PROFILING_EMBEDDING_SOURCE` | `db` | 상품 벡터를 읽는 곳 — `db`: `products.embedding`(pgvector, 먼저 `--embeddings` 로 적재) · `file`: 검색기 폴더의 벡터 파일 |
 | `PROFILING_DISLIKE_MODE` | `exclude` | 비선호 카테고리 `exclude`(빼기) / `penalty`(감점) |
 | `PROFILING_SLOTS` | `1` (compose · 서버 `8`) | 동시 분석 수 |
 | `PROFILING_QUEUE_MAX` | `200` | 대기열 상한. 넘으면 `503` |
@@ -153,7 +155,7 @@ DB 연결 수 · 시간 상한 · 재시도 같은 나머지 설정은 `settings
    3. **추천 30개를 고릅니다.**
       - 비선호 카테고리 상품과 이미 리뷰한 상품은 뺍니다.
       - 한 소분류는 최대 10개, 같은 모델은 하나만 넣습니다.
-      - 태그가 있고 임베딩이 켜져 있으면 태그와 비슷한 상품을 골고루 섞습니다.
+      - 태그가 있고 임베딩이 켜져 있으면 태그와 비슷한 상품을 골고루 섞습니다. 상품 벡터는 DB(`products.embedding`)에 있고, 태그와의 유사도는 pgvector 가 계산합니다.
       - 입력 세 칸이 모두 비어 있으면 0개를 보냅니다(Backend 가 인기순으로 대체).
    4. 결과와 받는 사람 프로필을 저장합니다. **원문은 저장하지 않고 가드레일 정리본만** 둡니다.
 4. **콜백** — Backend 로 30개를 보냅니다.
@@ -186,7 +188,7 @@ profiling/
 │   ├── types.py         내부 타입 (snake_case)
 │   ├── ports.py         바깥 의존의 인터페이스
 │   └── settings.py      설정 (PROFILING_*)
-├── alembic/versions/    DB 마이그레이션 (0001 ~ 0008)
+├── alembic/versions/    DB 마이그레이션 (0001 ~ 0009)
 ├── tools/catalog/       운영 CLI — 카탈로그 적재 (이미지에 들어가는 유일한 도구)
 ├── tests/
 │   ├── unit/            DB · 네트워크 · LLM 없이
@@ -218,7 +220,7 @@ uv run ruff check src tests tools alembic     # 린트
 | 묶음 | 무엇을 보나 | 필요한 것 |
 |---|---|---|
 | `tests/unit` (315개) | 업무 규칙 · 어댑터(가짜 HTTP) · 설정 · 기동 검사 | 없음 |
-| `tests/integration` (80개) | 마이그레이션 · 저장소 · 앱 끝에서 끝 | PostgreSQL (`PROFILING_DATABASE_URL`) |
+| `tests/integration` (84개) | 마이그레이션 · 저장소 · 앱 끝에서 끝 | PostgreSQL (`PROFILING_DATABASE_URL`) |
 
 실험 도구(시험 장치 · 부하 시험 · 모델 비교 · 가짜 Backend)는 이 브랜치에 없습니다. 필요하면 프로파일링 담당에게 요청합니다.
 
@@ -230,7 +232,8 @@ uv run ruff check src tests tools alembic     # 린트
 
 ```bash
 alembic upgrade head                                                     # 마이그레이션 Task (소유자 계정)
-python -m tools.catalog.load_catalog --bundle s3://<버킷>/<키> --if-empty  # 적재 Task — 이미 있으면 건너뜀
+python -m tools.catalog.load_catalog --bundle s3://<버킷>/<키> \
+  --embeddings s3://<버킷>/<벡터 접두어> --if-empty                            # 적재 Task — 카탈로그 · 상품 벡터, 이미 있으면 건너뜀
 uvicorn profiling.main:app --host 0.0.0.0 --port 8000                    # 앱 (이미지 기본 명령)
 ```
 
@@ -238,14 +241,15 @@ uvicorn profiling.main:app --host 0.0.0.0 --port 8000                    # 앱 (
 |---|---|
 | 포트 | 8000 |
 | 헬스 체크 | Liveness `/healthz` · Readiness `/readyz` |
-| 권장 자원 | `cpu` 256 · `memoryReservation` 256 MiB · `memory` 512 MiB |
+| 권장 자원 | 임베딩 끔: `cpu` 256 · `memoryReservation` 256 MiB · `memory` 512 MiB / **임베딩 켬: `cpu` 512 · `memoryReservation` 512 MiB · `memory` 1024 MiB**(질의 인코더 Node 몫, 실측 최대 약 375MiB) |
 | 종료 유예 | `PROFILING_SHUTDOWN_DRAIN_S=35` · 컨테이너 `stopTimeout` 60 |
 | 동시 분석 | `PROFILING_SLOTS=8` (DB 연결은 Task 당 14) |
 | 카탈로그 합본 | **비공개** S3 (팀 내부 자료) |
 
-- 새 마이그레이션을 더하면 `main.EXPECTED_MIGRATION` 도 같은 커밋에서 올립니다. 다음 번호는 `0009`.
+- 새 마이그레이션을 더하면 `main.EXPECTED_MIGRATION` 도 같은 커밋에서 올립니다. 다음 번호는 `0010`.
 - 배포 중에는 옛 코드도 새 표에서 돌아야 하므로 **열 추가 → 코드 → 삭제는 다음 판** 순서로 씁니다.
-- 이미지에는 `src/` · `alembic/` · `tools/catalog/` 만 들어갑니다. 시험 · 문서 · `.env` 는 들어가지 않습니다. 비루트 사용자로 돕니다.
+- 이미지 빌드: `docker build --build-context product-search=../product-search -t profiling-ai-app .` — 검색기 폴더의 질의 인코더(Node · 모델, 모델 해시 검증)를 함께 넣습니다. 켜는 것은 실행 설정 `PROFILING_EMBEDDING_DIR=/app/product-search`.
+- 이미지에는 `src/` · `alembic/` · `tools/catalog/` 와 질의 인코더만 들어갑니다. 시험 · 문서 · `.env` 는 들어가지 않습니다. 비루트 사용자로 돕니다.
 
 ---
 

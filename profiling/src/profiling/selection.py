@@ -22,6 +22,7 @@ D 의 규칙
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, NamedTuple
@@ -29,6 +30,8 @@ from typing import TYPE_CHECKING, NamedTuple
 if TYPE_CHECKING:
     from profiling.pipeline import ScoredProduct
     from profiling.ports import EmbeddingIndex
+
+log = logging.getLogger(__name__)
 
 CAT_CAP = 10            # 한 소분류 최대 개수 — K 훑기(5 · 10 · 15)에서 10: 모두 8종 이상 · 취향 적중 평균 29/30
 MMR_LAMBDA = 0.7        # 관련도 비중. 0.5 는 느슨한 상품(카메라 · 키링)이 섞였다(10-12 사용자 결정 0.7)
@@ -38,6 +41,7 @@ AXIS_WEIGHT = {"특징": 0.5}   # 축 가중(없으면 1.0) — "실용적인 �
 
 POOL_RULE_D = "v2-d:exclude-search+cap10+dedupe"            # 태그 · 임베딩 없이(1~3)
 POOL_RULE_D_EMBED = "v2-d:exclude-search+embed+mmr+cap10+dedupe"   # 4 까지
+POOL_RULE_D_EMBED_FAILED = "v2-d:exclude-search+cap10+dedupe+embed-failed"   # 임베딩이 실패해 1~3 만(요청은 성공)
 
 _MODEL = re.compile(r"[A-Za-z]{1,6}-?\d{2,}[A-Za-z0-9-]*")   # WH-1000XM6 · ULT900N
 
@@ -92,8 +96,16 @@ def select_pool(ranked: Sequence[ScoredProduct], pool_size: int, *, allow_dislik
 
     rule, cands, query = POOL_RULE_D, 0, ""
     if tags and embedding is not None and ok:
-        cands = _embedding_pick(ranked, ok, tags, embedding, pool_size, lambda i: take(i, cap=True), picked)
-        rule, query = POOL_RULE_D_EMBED, " ".join(t.text for t in tags)
+        try:
+            cands = _embedding_pick(ranked, ok, tags, embedding, pool_size, lambda i: take(i, cap=True), picked)
+            rule, query = POOL_RULE_D_EMBED, " ".join(t.text for t in tags)
+        except Exception as e:  # noqa: BLE001 — 임베딩(질의 인코더 · DB 유사도)이 실패해도 요청은 실패시키지 않는다(LLM 실패와 같은 원칙)
+            # 외부 호출(encode · similarities · product_vectors)은 모두 고르기 전에 끝나므로, 여기서는 아직 고른 것이 없다 — 그래도 비우고 순위대로
+            log.warning("임베딩 단계 실패 — 태그 없이 순위대로 고른다(%s)", type(e).__name__)
+            picked.clear()
+            per_cat.clear()
+            seen_keys.clear()
+            rule = POOL_RULE_D_EMBED_FAILED
     for cap in (True, False):                     # 순위대로 채움 — 상한 지킴 → 그래도 모자라면 상한 없이
         for i in ok:
             if len(picked) >= pool_size:
@@ -116,9 +128,10 @@ def _embedding_pick(ranked, ok: list[int], tags: Sequence[Tag], embedding: Embed
     받아들인 상품만 '이미 고른 것'으로 쳐서 다음 MMR 감점에 쓴다(실험 도구와 같은 규칙). 후보 수를 돌려준다. numpy 는 이 경로에서만."""
     import numpy as np
 
-    V = embedding.product_vectors([ranked[i].product.productId for i in ok])      # (len(ok), d), 정규화
+    ids = [ranked[i].product.productId for i in ok]
     Q = embedding.encode([t.text for t in tags])                                    # (태그 수, d), 정규화
-    sims = V @ Q.T
+    sim_fn = getattr(embedding, "similarities", None)                               # DB 구현은 pgvector 로 계산(10-16)
+    sims = sim_fn(ids, Q) if sim_fn else embedding.product_vectors(ids) @ Q.T       # (len(ok), 태그 수)
     w = np.array([AXIS_WEIGHT.get(t.axis, 1.0) for t in tags])
     n = len(ok)
     cand: set[int] = set()
@@ -128,7 +141,7 @@ def _embedding_pick(ranked, ok: list[int], tags: Sequence[Tag], embedding: Embed
     total = np.array([ranked[i].popularity + ranked[i].bias for i in ok]) + SIM_WEIGHT * (pct * w).max(axis=1)
     cl = sorted(cand)
     rel = _pct(total[cl])
-    cv = V[cl]
+    cv = embedding.product_vectors([ids[k] for k in cl])                            # MMR 감점용 — 후보 벡터만
     red = np.zeros(len(cl))
     left = np.ones(len(cl), dtype=bool)
     while left.any() and len(picked) < pool_size:

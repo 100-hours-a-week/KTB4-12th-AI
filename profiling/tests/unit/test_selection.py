@@ -127,3 +127,20 @@ def test_reviewed_products_are_never_recommended() -> None:
     for strategy in (pipeline.PoolStrategy.D, pipeline.PoolStrategy.S0):
         ids = pipeline.make_pool(rq, products, 30, CV, dislike_mode=PENALTY, pool_strategy=strategy)[0].product_ids
         assert 1 not in ids and 50 not in ids and len(ids) == 6
+
+
+class BrokenEmbedding(FakeEmbedding):
+    """질의 인코더(Node)가 죽거나 시간 초과 — encode 가 예외."""
+
+    def encode(self, texts):
+        raise RuntimeError("임베딩 응답 시간 초과")
+
+
+def test_embedding_failure_falls_back_to_rank_order_instead_of_failing() -> None:
+    """임베딩이 실패해도 요청은 실패하지 않는다(10-16) — 임베딩 없이 고른 것과 같은 30개, 규칙 이름에 실패 표시."""
+    products = [_p(i, 1 + i % 4, 1000 - i) for i in range(1, 41)]
+    emb = BrokenEmbedding({p.productId: p.categoryId for p in products})
+    tags = [selection.Tag("카테고리", "소분류 3")]
+    got = _pick(products, 20, tags=tags, embedding=emb)
+    assert got.rule == selection.POOL_RULE_D_EMBED_FAILED and got.query_text == "" and got.candidates == 0
+    assert got.product_ids == _pick(products, 20).product_ids                 # 임베딩 없이 고른 결과와 같다
