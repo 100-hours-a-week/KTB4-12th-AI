@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 # 비교는 "DB 판 ≥ 기대 판"이다 — 롤링 배포는 마이그레이션을 먼저 돌리므로 그동안 옛 Task 는 한 판 높은 DB 위에서 돈다.
 # 같음으로 비교하면 마이그레이션 순간 옛 Task 가 모두 준비 안 됨(503)이 되어 AI 가 빈다. 그래서 마이그레이션은 옛 코드도 도는
 # 모양(열 추가 먼저 → 코드 → 삭제는 다음 판)으로 쓴다. 판 이름은 4자리 숫자라 문자열 비교가 곧 순서다.
-EXPECTED_MIGRATION = "0010"
+EXPECTED_MIGRATION = "0011"
 
 
 def migration_ok(version: str | None) -> bool:
@@ -366,7 +366,8 @@ async def health(request: Request) -> dict:
 def _health_sync(state) -> dict:
     try:
         version_id, products = state.catalog.active()
-        catalog = {"active": True, "version": str(version_id), "products": len(products)}
+        catalog = {"active": True, "version": str(version_id), "products": len(products),
+                   "productTags": getattr(state.catalog, "tags_state", "none")}     # 0011 — ok · stale · none(없거나 다르면 그 자리에서 계산)
     except NoActiveCatalog as e:
         catalog = {"active": False, "reason": str(e)}
     return {"status": "ok", "catalog": catalog, "store": _store_health(state), "supervisor": state.supervisor.stats(),

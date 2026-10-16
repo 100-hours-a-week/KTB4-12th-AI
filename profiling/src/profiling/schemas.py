@@ -195,6 +195,10 @@ class ProductRecord(BaseModel):
     viewCount: int = Field(default=0, ge=0, validation_alias=AliasChoices("viewCount", "views", "view_count"),
                            description="조회수 — v1 추천 풀 정렬 기준(내림차순). Backend가 초기에는 임의 값을 넣어 보냄(09-22 합의). "
                                        "Backend 열 이름이 views라 viewCount·views·view_count 어느 이름으로 와도 받는다. 없으면 0")
+    tags: frozenset[tuple[str, str]] | None = Field(
+        default=None, exclude=True,
+        description="상품 축 태그 (축, 대표 이름) 집합 — DB 카탈로그가 판(tags_rule · tags_sha256)이 코드와 같을 때만 채운다(0011). "
+                    "None 이면 vocab 이 같은 함수로 그 자리에서 계산한다. 계약 필드가 아니라 응답 · export 에는 나가지 않는다")
 
     @field_validator("availability", mode="before")
     @classmethod
@@ -205,7 +209,7 @@ class ProductRecord(BaseModel):
         return "unknown" if v is None else v
 
 
-PRODUCT_FIELDS = frozenset(ProductRecord.model_fields)                                   # 계약 필드 이름 (CLI 보고용)
+PRODUCT_FIELDS = frozenset(ProductRecord.model_fields) - {"tags"}                        # 계약 필드 이름 (CLI 보고용) — tags 는 DB 전용
 PRODUCT_FIELD_ALIASES = frozenset({"views", "view_count", "available"})                   # 같은 뜻의 다른 이름 — 모르는 필드로 세지 않음
 
 

@@ -27,6 +27,8 @@ import re
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
+from profiling import vocab
+
 if TYPE_CHECKING:
     from profiling.pipeline import ScoredProduct
     from profiling.ports import EmbeddingIndex
@@ -45,8 +47,7 @@ POOL_RULE_D_EMBED = "v2-d:exclude-search+embed+mmr+cap10+dedupe"   # 4 까지
 POOL_RULE_D_EMBED_FAILED = "v2-d:exclude-search+cap10+dedupe+embed-failed"   # 임베딩이 실패해 1~3 만(요청은 성공)
 
 _MODEL = re.compile(r"[A-Za-z]{1,6}-?\d{2,}[A-Za-z0-9-]*")   # WH-1000XM6 · ULT900N
-_NORM = re.compile(r"[\s·/_\-()\[\]'\".,]+")
-DISLIKED_MIN_LEN = 2         # 비선호 태그 · 상품 칸이 이보다 짧으면 글자 대조를 하지 않는다(한 글자가 아무 데나 걸리지 않게)
+DISLIKED_MIN_LEN = vocab.MIN_LEN   # 비선호 태그 · 상품 칸이 이보다 짧으면 글자 대조를 하지 않는다(한 글자가 아무 데나 걸리지 않게)
 
 
 class Tag(NamedTuple):
@@ -72,24 +73,11 @@ def dup_key(name: str, brand: str) -> tuple[str, str] | None:
     return (brand, m[0].upper()) if m else None
 
 
-def _norm(x: str | None) -> str:
-    return _NORM.sub("", (x or "").lower())
-
-
 def disliked_hit(p: ProductRecord, tag: Tag) -> bool:
-    """비선호 태그 하나가 이 상품에 걸리나 — 글자 대조(대소문자 · 띄어쓰기 · 가운뎃점 무시).
-    브랜드: 브랜드 칸에 태그가 들어 있거나(소니 → 소니 · 소니플레이스테이션) 상품명에 있다(SONY).
-    IP: 상품명에 있다. 카테고리: 상품 종류 · 소분류 이름 · 상품명에 있다(음향기기 → 영상·음향기기, 헤드폰 → 헤드폰)."""
-    t = _norm(tag.text)
-    if len(t) < DISLIKED_MIN_LEN:
-        return False
-    if tag.axis == "브랜드":
-        fields = (p.brand, p.name)
-    elif tag.axis == "IP":
-        fields = (p.name,)
-    else:
-        fields = (p.productKind, p.categoryName, p.name)
-    return any(t in _norm(f) for f in fields if f and len(_norm(f)) >= DISLIKED_MIN_LEN)
+    """비선호 태그 하나가 이 상품에 걸리나 — 축별 어휘로 대조(`vocab`: 브랜드 계열 · 별칭 · 다른 브랜드, IP 캐릭터, 카테고리 묶음).
+    어휘에 없는 태그는 글자 대조(대소문자 · 띄어쓰기 · 가운뎃점 무시): 브랜드 → 브랜드 칸 · 상품명(낱말), IP → 상품명,
+    카테고리 → 상품 종류 · 소분류 이름 · 상품명. 두 글자 미만은 대조하지 않는다(카테고리 묶음 말 '옷' · '술' 은 예외)."""
+    return vocab.matcher(tag.axis, tag.text)(p)
 
 
 def select_pool(ranked: Sequence[ScoredProduct], pool_size: int, *, allow_disliked: bool,

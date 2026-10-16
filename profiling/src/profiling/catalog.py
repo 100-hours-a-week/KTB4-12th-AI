@@ -42,6 +42,7 @@ import sqlalchemy as sa
 from pydantic import ValidationError
 from sqlalchemy.engine import Engine
 
+from profiling import vocab
 from profiling.ports import NoActiveCatalog
 from profiling.schemas import ProductRecord
 from profiling.types import ErrorCode
@@ -143,6 +144,7 @@ class FileCatalogReader:
 
         self._products = products
         self._by_id = {p.productId: p for p in products}
+        vocab.set_catalog_brands(p.brand for p in products)   # 협업 상대 확인용(상품 태그는 그 자리에서 계산)
         self.loaded_at = datetime.now(UTC)
         self.version_label = str(doc.get("schema_version") or doc.get("category_version") or "") if isinstance(doc, dict) else ""
         log.info("FileCatalogReader 로드 %s: 상품 %d건 (형식 오류 %d · 중복 %d · 재고 available %d · unknown %d) label=%s",
@@ -175,6 +177,8 @@ class FileCatalogReader:
 SCHEMA = "ai_catalog"
 
 _ACTIVE_VERSION = sa.text(f"select id, package_id from {SCHEMA}.catalog_versions where is_active")
+## 상품 태그(0011)의 판 — 이 코드(vocab)의 판과 같을 때만 DB 의 상품 태그를 쓴다. 다르거나 없으면 vocab 이 같은 함수로 그 자리에서 계산
+_TAGS_VERSION = sa.text(f"select tags_rule, tags_sha256 from {SCHEMA}.catalog_versions where id = :id")
 
 ## 활성 버전과 그 패키지의 상품을 **한 문장으로** 읽는다. 두 문장으로 나누면 그 사이에 카탈로그가 교체될 때
 ## "버전은 옛것, 상품은 새것"인 한 벌이 나온다 — PostgreSQL 기본 격리(READ COMMITTED)는 문장마다 스냅샷이
@@ -184,7 +188,7 @@ _ACTIVE_PRODUCTS = sa.text(f"""
     select v.id as version_id, v.package_id,
            p.id, p.name, p.brand, p.description, p.product_kind,
            p.category_id, c.name as category_name, c.parent_id, cp.name as parent_category_name,
-           p.unit_price, p.availability, p.view_count, p.updated_at
+           p.unit_price, p.availability, p.view_count, p.updated_at, p.tags
     from {SCHEMA}.catalog_versions v
     join {SCHEMA}.products p on p.package_id = v.package_id
     join {SCHEMA}.categories c on c.id = p.category_id
@@ -230,6 +234,7 @@ class DbCatalogReader:
         self._snapshot: tuple[UUID, list[ProductRecord]] | None = None   # active() 가 돌려주는 한 벌 — _load 끝에 통째로 바꾼다
         self._polled_at: float | None = None                              # 마지막 **성공한** 폴링 시각(monotonic). None = 아직 안 물었다
         self.loaded_at: datetime | None = None
+        self.tags_state = "none"                                          # 상품 태그(0011) — ok · stale · none (/health)
 
     # ---- ports.CatalogReader ------------------------------------------------
 
@@ -271,6 +276,15 @@ class DbCatalogReader:
             raise NoActiveCatalog(f"{SCHEMA}.catalog_versions 에 활성 버전이 없습니다 — tools/catalog/load_catalog.py 로 적재하세요")
         return row[0], row[1]                          # 부분 유니크 인덱스가 활성 1개를 보장한다
 
+    def _tags_state(self, version: UUID) -> str:
+        """활성 판의 상품 태그가 쓸 만한가 — ok(판이 코드와 같음) · stale(다름) · none(태그 없음)."""
+        with self._engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT")
+            row = conn.execute(_TAGS_VERSION, {"id": version}).first()
+        if row is None or row[0] is None:
+            return "none"
+        return "ok" if (row[0], row[1]) == (vocab.RULE, vocab.tags_sha256()) else "stale"
+
     def _load(self) -> None:
         """활성 버전 + 그 상품을 한 문장으로 읽어 캐시를 바꾼다. 버전은 **그 결과에서** 꺼낸다."""
         with self._engine.connect() as conn:
@@ -279,6 +293,7 @@ class DbCatalogReader:
         if not rows:
             raise NoActiveCatalog("활성 버전의 패키지에 상품이 없습니다 — tools/catalog/load_catalog.py 로 적재하세요")
         version, package_id = rows[0]["version_id"], rows[0]["package_id"]
+        tags_state = self._tags_state(version)
 
         products = [ProductRecord(
                 productId=r["id"], name=r["name"], brand=r["brand"], description=r["description"] or None,
@@ -286,17 +301,23 @@ class DbCatalogReader:
                 parentCategoryId=r["parent_id"], parentCategoryName=r["parent_category_name"],
                 productKind=r["product_kind"] or None, price=r["unit_price"],
                 availability=r["availability"], updatedAt=r["updated_at"], viewCount=r["view_count"] or 0,
+                tags=frozenset((t["axis"], t["tag"]) for t in r["tags"]) if tags_state == "ok" else None,
             ) for r in rows]
 
         products.sort(key=lambda p: p.productId)        # 7.9 export와 같은 순서
         by_id = {p.productId: p for p in products}      # products.id 가 PK 라 겹칠 수 없다
+        vocab.set_catalog_brands(p.brand for p in products)   # 협업 상대 확인용 — 적재 도구가 태그를 계산할 때와 같은 목록
 
         self._products, self._by_id, self._version = products, by_id, version
         self._snapshot = (version, products)                  # 튜플 하나를 통째로 바꿔 "버전은 옛것, 상품은 새것"인 순간이 없다
+        self.tags_state = tags_state
         self.loaded_at = datetime.now(UTC)
-        log.info("DbCatalogReader 로드 version=%s package=%s 상품 %d건 (재고 available %d · unknown %d)",
+        log.info("DbCatalogReader 로드 version=%s package=%s 상품 %d건 (재고 available %d · unknown %d) 상품 태그=%s",
                  version, package_id, len(products),
-                 sum(p.availability == "available" for p in products), sum(p.availability == "unknown" for p in products))
+                 sum(p.availability == "available" for p in products), sum(p.availability == "unknown" for p in products), tags_state)
+        if tags_state != "ok":
+            log.warning("상품 태그 %s — 비선호 대조는 같은 규칙으로 그 자리에서 계산한다(결과는 같고 조금 느림). "
+                        "적재: load_catalog --tags --if-changed", "없음" if tags_state == "none" else "판이 코드와 다름")
         del rows                                        # DB 행 4천 개를 아래 freeze 에 끌고 들어가지 않게
         _freeze_long_lived()
 

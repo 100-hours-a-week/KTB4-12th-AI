@@ -216,3 +216,74 @@ def test_has_active_catalog_reflects_active_version(engine) -> None:
             f"select exists(select 1 from {SCHEMA}.catalog_versions v join {SCHEMA}.products p on p.package_id = v.package_id "
             "where v.is_active)")).scalar())
     assert lc.has_active_catalog(engine) is expected
+
+
+# ---------------------------------------------------------------- 상품 축 태그 (0011)
+
+
+def test_0011_product_tags_columns_checks_and_run_index(engine) -> None:
+    with engine.begin() as c:
+        col = c.execute(sa.text("""select is_nullable, column_default, data_type from information_schema.columns
+                                   where table_schema = 'ai_catalog' and table_name = 'products' and column_name = 'tags'""")).one()
+        assert col[0] == "NO" and col[1].startswith("'[]'::jsonb") and col[2] == "jsonb"
+        checks = {r[0] for r in c.execute(sa.text("select conname from pg_constraint where conname like 'ck_%tags%'"))}
+        assert {"ck_products_tags_array", "ck_catalog_versions_tags_all_or_none"} <= checks
+        idx = c.execute(sa.text("select indexdef from pg_indexes where indexname = 'ix_profile_runs_open'")).scalar_one()
+        assert "WHERE" in idx and "RESULT_READY" in idx and "RUNNING" in idx
+        types = {r[0]: r[1] for r in c.execute(sa.text("""select table_name, data_type from information_schema.columns
+                                                          where table_schema = 'ai_profile' and column_name = 'prompt_version'"""))}
+        assert types == {"profile_runs": "text", "recipient_profiles": "text"}
+
+
+def test_0011_checks_reject_bad_values(engine, clean) -> None:
+    got = _load(engine)
+    with pytest.raises(sa.exc.IntegrityError), engine.begin() as c:
+        c.execute(sa.text(f"update {SCHEMA}.products set tags = '{{}}'::jsonb where id = :id"), {"id": FAKE_BE + 101})
+    with pytest.raises(sa.exc.IntegrityError), engine.begin() as c:   # 셋 중 하나만 채울 수 없다
+        c.execute(sa.text(f"update {SCHEMA}.catalog_versions set tags_rule = 'x' where id = :id"), {"id": got["version_id"]})
+
+
+@pytest.fixture
+def active_test_catalog(engine, clean):
+    """시험 패키지를 활성으로 — 끝나면 원래 활성 판으로 되돌린다(상품 태그는 활성 판에만 넣는다)."""
+    with engine.begin() as c:
+        prev = c.execute(sa.text(f"select id from {SCHEMA}.catalog_versions where is_active")).scalar()
+    got = lc.load(engine, _pkg(), PROD_IDS, CAT_IDS, activate=True)
+    yield got
+    with engine.begin() as c:
+        c.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = false where is_active"))
+        if prev is not None:
+            c.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = true where id = :id"), {"id": prev})
+
+
+def test_load_tags_fills_skips_when_same_and_replaces_when_changed(engine, active_test_catalog) -> None:
+    from profiling import vocab
+    from profiling.catalog import DbCatalogReader
+
+    first = lc.load_tags(engine, if_changed=True)
+    assert not first["skipped"] and first["products"] == 2 and first["version_id"] == active_test_catalog["version_id"]
+    with engine.begin() as c:
+        tags = c.execute(sa.text(f"select tags from {SCHEMA}.products where id = :id"), {"id": FAKE_BE + 101}).scalar_one()
+        v = c.execute(sa.text(f"select tags_rule, tags_sha256, tags_loaded_at from {SCHEMA}.catalog_versions where id = :id"),
+                      {"id": first["version_id"]}).one()
+    assert {"axis": "브랜드", "tag": "브랜드", "via": "field"} in tags
+    assert (v[0], v[1]) == (vocab.RULE, vocab.tags_sha256()) and v[2] is not None
+    reader = DbCatalogReader(engine)
+    _, products = reader.active()
+    assert reader.tags_state == "ok" and products[0].tags is not None and ("브랜드", "브랜드") in products[0].tags
+
+    assert lc.load_tags(engine, if_changed=True)["skipped"]           # 판이 같으면 건너뜀(배포마다 불러도 됨)
+    with engine.begin() as c:                                         # 어휘 · 규칙이 바뀐 배포 흉내
+        c.execute(sa.text(f"update {SCHEMA}.catalog_versions set tags_sha256 = :h where id = :id"), {"h": "0" * 64, "id": first["version_id"]})
+    stale = DbCatalogReader(engine)
+    _, products = stale.active()
+    assert stale.tags_state == "stale" and all(p.tags is None for p in products)    # 판이 다르면 DB 태그를 쓰지 않는다
+    again = lc.load_tags(engine, if_changed=True)
+    assert not again["skipped"] and again["products"] == 2
+
+    newer = lc.load(engine, _pkg(), PROD_IDS, CAT_IDS, activate=True)                # 새 카탈로그 판은 태그 없이 시작
+    with engine.begin() as c:
+        assert c.execute(sa.text(f"select tags_rule from {SCHEMA}.catalog_versions where id = :id"), {"id": newer["version_id"]}).scalar() is None
+    fresh = DbCatalogReader(engine)
+    fresh.active()
+    assert fresh.tags_state == "none"

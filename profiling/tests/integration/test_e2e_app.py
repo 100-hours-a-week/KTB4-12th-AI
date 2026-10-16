@@ -123,7 +123,7 @@ def test_health_reports_catalog_and_store(engine) -> None:
         res = client.get("/health")
     assert res.status_code == 200
     body = res.json()
-    assert body["catalog"] == {"active": True, "version": str(FILE_CATALOG_VERSION_ID), "products": 111}
+    assert body["catalog"] == {"active": True, "version": str(FILE_CATALOG_VERSION_ID), "products": 111, "productTags": "none"}
     assert body["store"]["backend"] == "db" and body["store"]["connected"] is True
 
 

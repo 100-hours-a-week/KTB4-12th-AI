@@ -21,6 +21,13 @@
   벡터 해시 · 차원 · 상품 번호 매칭 비율(90%)을 검사하고 틀리면 넣지 않는다. 활성 카탈로그 판에 벡터 정보(모델 · 해시)를 함께 남긴다.
   --if-empty 면 활성 판에 벡터가 이미 있을 때 건너뛴다.
 
+**상품 축 태그 적재(10-16, 0011).** 활성 판의 상품마다 축 태그(브랜드 · IP · 카테고리 묶음, 대표 이름)를 계산해 products.tags 에 넣고
+판 행에 규칙 판 · 지문(tags_rule · tags_sha256)을 남긴다. 계산은 이미지 안의 규칙 · 어휘(profiling.vocab)로 — LLM 없음 · 몇 초.
+  태그만:                 … --tags [--if-changed]
+  배포 워크플로:          … --bundle s3://… --embeddings s3://… --if-empty --tags --if-changed
+  --if-changed          활성 판의 규칙 판 · 지문이 이 코드와 같으면 건너뛴다(배포마다 불러도 됨 — 어휘 · 규칙이 바뀐 배포에서만 다시 계산).
+  트랜잭션 하나 — 실패하면 이전 태그 그대로. 새 카탈로그 판은 태그 없이 시작하고 그동안 앱은 같은 규칙으로 그 자리에서 계산한다.
+
 패키지는 `product-catalog-20260922-v1` 모양을 기대한다 (data/categories.json · data/products.jsonl · data/summary.json).
 적재는 트랜잭션 하나다 — 도중에 실패하면 아무것도 남지 않고 활성 버전도 그대로다.
 
@@ -39,10 +46,12 @@ import gzip
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import sqlalchemy as sa
 
+from profiling import vocab
 from profiling.embedding import (
     DIM_DB,
     MIN_MATCH_RATIO,
@@ -444,6 +453,71 @@ def _embeddings_step(engine: sa.Engine, src: str, *, if_empty: bool) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 상품 축 태그 — products.tags (0011)
+# ---------------------------------------------------------------------------
+
+_TAG_ROWS = sa.text(f"""
+    select p.id, p.name, p.brand, p.product_kind, c.name as category_name, cp.name as parent_category_name
+    from {SCHEMA}.products p
+    join {SCHEMA}.categories c on c.id = p.category_id
+    left join {SCHEMA}.categories cp on cp.id = c.parent_id
+    where p.package_id = :pkg""")
+
+
+def load_tags(engine: sa.Engine, *, if_changed: bool = False) -> dict[str, Any]:
+    """활성 판의 상품에 축 태그를 계산해 넣는다 — 트랜잭션 하나(실패하면 이전 그대로).
+    if_changed 면 활성 판의 규칙 판 · 지문이 이 코드(vocab)와 같을 때 아무것도 하지 않는다."""
+    rule, sha = vocab.RULE, vocab.tags_sha256()
+    with engine.begin() as conn:
+        v = conn.execute(sa.text(f"""select id, package_id, tags_rule, tags_sha256 from {SCHEMA}.catalog_versions
+                                     where is_active for update""")).first()
+        if v is None:
+            raise PackageError("활성 카탈로그가 없다 — 먼저 카탈로그를 적재한다(--bundle 또는 --package)")
+        if if_changed and (v.tags_rule, v.tags_sha256) == (rule, sha):
+            return {"skipped": True, "version_id": v.id, "products": 0, "tags": 0, "by_axis": {}}
+        rows = conn.execute(_TAG_ROWS, {"pkg": v.package_id}).mappings().all()
+        vocab.set_catalog_brands(r["brand"] for r in rows)        # 협업 상대 확인용 — 앱(DbCatalogReader)과 같은 목록
+        params, by_axis, total = [], {}, 0
+        for r in rows:
+            tags = vocab.product_tags(SimpleNamespace(brand=r["brand"] or "", name=r["name"] or "", productKind=r["product_kind"] or None,
+                                                      categoryName=r["category_name"] or "", parentCategoryName=r["parent_category_name"]))
+            for t in tags:
+                by_axis[t["axis"]] = by_axis.get(t["axis"], 0) + 1
+            total += len(tags)
+            params.append({"id": r["id"], "t": json.dumps(tags, ensure_ascii=False)})
+        if params:
+            conn.execute(sa.text(f"update {SCHEMA}.products set tags = cast(:t as jsonb) where id = :id"), params)
+        conn.execute(sa.text(f"""update {SCHEMA}.catalog_versions set tags_rule = :r, tags_sha256 = :h, tags_loaded_at = now()
+                                 where id = :id"""), {"r": rule, "h": sha, "id": v.id})
+    return {"skipped": False, "version_id": v.id, "products": len(params), "tags": total, "by_axis": by_axis}
+
+
+def _tags_step(engine: sa.Engine, *, if_changed: bool) -> int:
+    got = load_tags(engine, if_changed=if_changed)
+    if got["skipped"]:
+        print(f"  · 상품 태그 판이 이미 같다({vocab.RULE}) — --if-changed 라 다시 계산하지 않는다")
+    else:
+        axes = " · ".join(f"{a} {n}" for a, n in sorted(got["by_axis"].items()))
+        print(f"  ✓ 상품 태그 — 상품 {got['products']} · 태그 {got['tags']}({axes}) · 규칙 {vocab.RULE} · 카탈로그 판 {got['version_id']}")
+    return 0
+
+
+def _main_tags_only(args: argparse.Namespace) -> int:
+    """--tags 만 — 이미 적재된 활성 카탈로그에 상품 태그를 넣는다."""
+    engine = sa.create_engine(get_settings().DATABASE_URL, future=True)
+    try:
+        return _tags_step(engine, if_changed=args.if_changed)
+    except PackageError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+    except sa.exc.SQLAlchemyError as e:
+        print(f"✗ DB 오류: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # 재고 · 조회수 회신 반영
 # ---------------------------------------------------------------------------
 
@@ -498,7 +572,8 @@ def report(engine: sa.Engine) -> None:
 
         print(f"  카테고리        대분류 {q(f'select count(*) from {SCHEMA}.categories where level = 1')}"
               f" · 소분류 {q(f'select count(*) from {SCHEMA}.categories where level = 2')}")
-        print(f"  상품            {q(f'select count(*) from {SCHEMA}.products')}건 · 벡터 {q(f'select count(embedding) from {SCHEMA}.products')}건")
+        print(f"  상품            {q(f'select count(*) from {SCHEMA}.products')}건 · 벡터 {q(f'select count(embedding) from {SCHEMA}.products')}건"
+              f" · 태그 있는 상품 {q(f"select count(*) from {SCHEMA}.products where tags <> '[]'::jsonb")}건")
         print(f"  활성 버전       {q(f'select coalesce(max(id::text), chr(45)) from {SCHEMA}.catalog_versions where is_active')}")
         print(f"  Backend 번호    상품 {q(f'select coalesce(min(id), 0) from {SCHEMA}.products')}~{q(f'select coalesce(max(id), 0) from {SCHEMA}.products')}"
               f" · 카테고리 {q(f'select coalesce(min(id), 0) from {SCHEMA}.categories')}~{q(f'select coalesce(max(id), 0) from {SCHEMA}.categories')} (표의 키)")
@@ -530,7 +605,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bundle", help="합본 파일을 적재한다 — 로컬 경로 또는 s3://버킷/키 (서버 적재)")
     ap.add_argument("--if-empty", action="store_true", help="활성 카탈로그(· 벡터)가 이미 있으면 그 단계는 건너뛰고 성공 — 배포 워크플로용")
     ap.add_argument("--embeddings", help="상품 임베딩 벡터를 넣는다 — 폴더(manifest.json · vectors.f32) 또는 s3://버킷/접두어 (0009)")
+    ap.add_argument("--tags", action="store_true", help="활성 판의 상품 축 태그를 계산해 넣는다 — 이미지 안 규칙 · 어휘, LLM 없음 (0011)")
+    ap.add_argument("--if-changed", action="store_true", help="--tags 와 함께: 활성 판의 규칙 판 · 지문이 이 코드와 같으면 건너뜀 — 배포 워크플로용")
     args = ap.parse_args(argv)
+    if args.if_changed and not args.tags:
+        ap.error("--if-changed 는 --tags 와 함께 쓴다")
+    if args.tags and not (args.package or args.metrics or args.bundle or args.embeddings):
+        if args.dry_run:
+            print(f"상품 태그 규칙 {vocab.RULE} · 지문 {vocab.tags_sha256()[:12]}… — dry-run, 쓰지 않았다")
+            return 3
+        return _main_tags_only(args)
 
     if args.bundle:
         if args.package or args.id_map or args.category_id_map or args.metrics or args.write_bundle:
@@ -597,6 +681,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.metrics:
             r = apply_metrics(engine, args.metrics)
             print(f"  ✓ 재고·조회수 회신 — 채움 {r['updated']} · 값 없어 건너뜀 {r['skipped']} · 우리 표에 없는 ID {r['missing']}")
+        if args.tags:
+            _tags_step(engine, if_changed=args.if_changed)
         print("\n현재 상태")
         report(engine)
     except PackageError as e:
@@ -636,6 +722,8 @@ def _main_bundle(args: argparse.Namespace) -> int:
                   f"{'' if args.no_activate else ' (활성)'}")
         if args.embeddings:
             _embeddings_step(engine, args.embeddings, if_empty=args.if_empty)
+        if args.tags:
+            _tags_step(engine, if_changed=args.if_changed)
         print("\n현재 상태")
         report(engine)
     except PackageError as e:
@@ -661,7 +749,8 @@ def _main_embeddings_only(args: argparse.Namespace) -> int:
         return 3
     engine = sa.create_engine(get_settings().DATABASE_URL, future=True)
     try:
-        return _embeddings_step(engine, args.embeddings, if_empty=args.if_empty)
+        code = _embeddings_step(engine, args.embeddings, if_empty=args.if_empty)
+        return _tags_step(engine, if_changed=args.if_changed) if args.tags and code == 0 else code
     except PackageError as e:
         print(f"✗ {e}", file=sys.stderr)
         return 1
