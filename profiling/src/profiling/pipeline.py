@@ -331,8 +331,9 @@ def profile(
         store.save(ProfileOutcome(recipient_user_id=rid, source_version=sv, status=RunStatus.RUNNING, input_hash=h,
                                   validator_version=VALIDATOR_VERSION_V1))
     except Exception as e:
-        log.exception("profile recipient=%s source_version=%s 실행 기록(RUNNING) 저장 실패", rid, sv)
-        return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {type(e).__name__}: {e}", save=False)
+        log.error("profile recipient=%s source_version=%s 실행 기록(RUNNING) 저장 실패: %s", rid, sv, _brief(e))
+        log.debug("실행 기록 저장 실패 상세", exc_info=True)
+        return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {_brief(e)}", save=False)
 
     # 1) 활성 카탈로그 — 한 요청 안에서 한 번만 잡아 끝까지 같은 버전을 쓴다 (4단계 snapshot 원칙)
     try:
@@ -385,14 +386,15 @@ def profile(
         )
     except Exception as e:  # 업무 단계의 어떤 오류도 FAILED로 기록 — 백그라운드에서 조용히 죽지 않게
         log.exception("profile recipient=%s source_version=%s 실패", rid, sv)
-        return _fail(rq, store, ErrorCode.PIPELINE_ERROR, f"{type(e).__name__}: {e}")
+        return _fail(rq, store, ErrorCode.PIPELINE_ERROR, _brief(e))
 
     # 5) 실행 기록 갱신 — RESULT_READY + 콜백 본문. 저장 실패는 결과를 FAILED로 (콜백을 보냈는데 우리 쪽에 기록이 없는 상태를 만들지 않기 위해)
     try:
         store.save(outcome)
     except Exception as e:
-        log.exception("profile recipient=%s 저장 실패", rid)
-        return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {type(e).__name__}: {e}", save=False)
+        log.error("profile recipient=%s 저장 실패: %s", rid, _brief(e))
+        log.debug("실행 기록 저장 실패 상세", exc_info=True)
+        return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {_brief(e)}", save=False)
 
     # 6) 수신자 프로필 — 한 사람당 한 행. 낮은 버전이 늦게 오면 DB가 무시한다(should_replace와 같은 규칙을 SQL로).
     #    실패하면 FAILED로 되돌린다: 콜백은 나갔는데 Chat이 읽을 프로필이 없는 상태를 만들지 않기 위해.
@@ -400,9 +402,10 @@ def profile(
     _log_change(recipient_store, new_profile)
     try:
         recipient_store.upsert(new_profile)
-    except Exception as e:
-        log.exception("profile recipient=%s 수신자 프로필 저장 실패", rid)
-        return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {type(e).__name__}: {e}")
+    except Exception as e:   # DB 오류의 둘째 줄부터(DETAIL: Failing row contains …)에는 정리본 글이 실릴 수 있다 → 첫 줄만 남긴다
+        log.error("profile recipient=%s 수신자 프로필 저장 실패: %s", rid, _brief(e))
+        log.debug("수신자 프로필 저장 실패 상세", exc_info=True)
+        return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {_brief(e)}")
 
     log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d scores=%d tags=%d disliked_tags=%d tagger=%s "
              "catalog_version=%s rule=%s", rid, sv, len(search.product_ids), pool_size, len(rq.disliked_categories), len(scores), len(tags),
@@ -492,6 +495,12 @@ def _counts(c: Counter) -> str:
     return ",".join(f"{k}:{v}" for k, v in c.most_common()) or "-"
 
 
+def _brief(e: BaseException) -> str:
+    """실행 기록 · 로그에 남길 오류 한 줄 — 종류 + 첫 줄만(200자). DB 오류의 DETAIL · 바인드 값에 정리본 글이 실릴 수 있어서(10-17)."""
+    first = (str(e).splitlines() or [""])[0][:200]
+    return f"{type(e).__name__}: {first}" if first else type(e).__name__
+
+
 def _fail(rq: ProfileRequest, store: ProfileRunStore, code: ErrorCode, reason: str, *, save: bool = True) -> ProfileOutcome:
     """FAILED 결과(분류 코드 + 사유)를 만들고(가능하면) 저장한다. 콜백은 보내지 않는다."""
     outcome = ProfileOutcome(recipient_user_id=rq.recipient_user_id, source_version=rq.source_version, status=RunStatus.FAILED,
@@ -499,7 +508,8 @@ def _fail(rq: ProfileRequest, store: ProfileRunStore, code: ErrorCode, reason: s
     if save:
         try:
             store.save(outcome)
-        except Exception:
-            log.exception("profile recipient=%s FAILED 기록 저장도 실패", rq.recipient_user_id)
+        except Exception as e:
+            log.error("profile recipient=%s FAILED 기록 저장도 실패: %s", rq.recipient_user_id, _brief(e))
+            log.debug("FAILED 기록 저장 실패 상세", exc_info=True)
     log.warning("profile recipient=%s source_version=%s → FAILED %s: %s", rq.recipient_user_id, rq.source_version, code, reason)
     return outcome

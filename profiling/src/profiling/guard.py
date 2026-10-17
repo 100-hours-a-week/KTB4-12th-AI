@@ -6,6 +6,7 @@
   ④ 의미 없음   글자(한글 음절 · 영문) 비율이 낮음 · 자음/모음만(ㅋㅋㅋ) · 한두 글자 반복 · 키보드 막 치기 → 글을 버린다(별점은 그대로)
   ⑤ 인젝션 의심 "무시해 · 지시 · system · ignore previous · 중괄호 JSON" 꼴 → **그 글은 버린다**(별점 · 상품 정보는 그대로). 처음엔 표시만 했으나
                하네스(U13)에서 gemma4:12b 가 지시대로 태그를 만들어 검증기도 못 막았다(근거가 취향 문장이라) — 10-13 g2
+  ⑥ 길이 상한   가린 **뒤에** 글 하나 최대 MAX_TEXT_LEN 자(넘으면 앞부분만, truncated 표시) — 경계에 걸친 번호도 통째로 가려지고, 가림 표시로 늘어나도 넘지 않게
 
 결과는 GuardResult(정리된 글 또는 None, 표시 집합, 가린 개수). 원문은 로그에 남기지 않는다 — 표시와 개수만.
 사전 · 패턴은 작게 시작한다(우리 목록). 넓히려면 PROFANITY · INJECTION 에 더한다 — 바꾸면 GUARD_VERSION 을 올린다.
@@ -18,7 +19,8 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 
-GUARD_VERSION = "g4"   # g1: 인젝션 표시만 → g2: 인젝션 글 버림 → g3: 욕설 사전 갈래별 확장 + 오탐 예외 → g4: 주민 · 계좌 번호가 전화번호로 반만 가려지던 것 수정(10-13)
+GUARD_VERSION = "g5"   # g1: 인젝션 표시만 → g2: 인젝션 글 버림 → g3: 욕설 사전 갈래별 확장 + 오탐 예외 → g4: 주민 · 계좌 번호가 전화번호로 반만 가려지던 것 수정(10-13) → g5: 글 길이 상한(10-17)
+MAX_TEXT_LEN = 1000    # 글 하나(취향 문장 · 리뷰 글) 최대 글자 수 — BE 칸은 TEXT 라 상한이 없다. 넘으면 앞부분만 LLM 에 보내고 정리본으로 저장(시험 자료 최대 300자)
 
 # ---------------------------------------------------------------- ② 개인정보
 _PII: list[tuple[str, str, re.Pattern[str]]] = [          # 순서가 중요 — 긴 번호(주민 · 계좌 · 카드)를 먼저, 전화번호는 숫자 경계로
@@ -93,7 +95,7 @@ _KEYBOARD = ("qwer", "asdf", "zxcv", "wert", "sdfg", "xcvb", "ㅂㅈㄷㄱ", "�
 @dataclass
 class GuardResult:
     text: str | None                       # 정리된 글. 의미 없음 · 빈 글이면 None(별점은 그대로 쓴다)
-    flags: set[str] = field(default_factory=set)   # pii_masked · profanity · gibberish · injection_suspect · empty
+    flags: set[str] = field(default_factory=set)   # pii_masked · profanity · gibberish · injection_suspect · empty · truncated
     counts: Counter = field(default_factory=Counter)
 
 
@@ -148,8 +150,11 @@ def clean(text: str | None) -> GuardResult:
     """글 하나(취향 문장 또는 리뷰 글) → GuardResult. None · 공백이면 text=None + empty."""
     if text is None or not text.strip():
         return GuardResult(None, {"empty"})
-    res = GuardResult(normalize(text))
-    t = res.text or ""
+    res = GuardResult(None)
+    if len(text) > MAX_TEXT_LEN * 4:             # 정규화 전에 먼저 크게 자른다 — 아주 긴 글에서 정규식 시간이 커지지 않게.
+        text = re.sub(r"\S{1,40}$", "", text[:MAX_TEXT_LEN * 4])   # 잘린 끝 낱말은 버린다(반만 남은 번호가 가림을 피하지 않게)
+        res.flags.add("truncated")
+    t = normalize(text)
     for name, mark, pat in _PII:
         t, n = pat.subn(mark, t)
         if n:
@@ -169,8 +174,25 @@ def clean(text: str | None) -> GuardResult:
         res.flags.add("gibberish")
         res.text = None
         return res
+    if len(t) > MAX_TEXT_LEN:                    # 길이 상한은 **가린 뒤에** — 경계에 걸친 번호도 통째로 가려지고, 가림 표시로 늘어나도 상한을 지킨다
+        t = _strip_partial_mark(t[:MAX_TEXT_LEN])
+        res.flags.add("truncated")
+    if "truncated" in res.flags:
+        res.counts["truncated"] += 1
     res.text = t
     return res
+
+
+_MARKS = ("[연락처]", "[이메일]", "[링크]", "[번호]", "[가림]")
+
+
+def _strip_partial_mark(t: str) -> str:
+    """끝에서 잘린 가림 표시('[연락' 등)를 뗀다."""
+    for m in _MARKS:
+        for k in range(len(m) - 1, 0, -1):
+            if t.endswith(m[:k]):
+                return t[:-k].rstrip()
+    return t
 
 
 # ---------------------------------------------------------------- ③′ 태그 검사(검증기가 부른다)

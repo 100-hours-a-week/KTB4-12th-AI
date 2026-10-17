@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     )
     EMBEDDING_SOURCE: Literal["db", "file"] = Field(
         default="db",
-        description="상품 벡터를 어디서 읽나 — db: ai_catalog.product_embeddings(pgvector, 0009 · load_catalog --embeddings 로 적재) · "
+        description="상품 벡터를 어디서 읽나 — db: ai_catalog.products.embedding(pgvector, 0009 · load_catalog --embeddings 로 적재) · "
                     "file: EMBEDDING_DIR 의 data/ 파일(검색기가 만든 manifest.json · vectors.f32)",
     )
 

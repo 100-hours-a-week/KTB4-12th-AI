@@ -97,7 +97,7 @@ def test_pipeline_skips_llm_without_positive_signal(caplog) -> None:
     with caplog.at_level("INFO", logger="profiling.pipeline"):
         out, _ = _profile(rq, [_p(1, 1, 5)], tagger=spy)
     assert out.status is RunStatus.RESULT_READY and spy.prompts == [] and out.validation.preferred_tags == []
-    assert any(r.getMessage().startswith("tag_extract skip_no_signal") and "guard=g4:gibberish:1" in r.getMessage() for r in caplog.records)
+    assert any(r.getMessage().startswith("tag_extract skip_no_signal") and "guard=g5:gibberish:1" in r.getMessage() for r in caplog.records)
 
 
 def test_pipeline_sends_masked_prompt_and_logs_guard_counts(caplog) -> None:
@@ -136,7 +136,7 @@ def test_normal_words_are_not_masked(text) -> None:
 
 def test_profanity_groups_flatten() -> None:
     assert len(guard.PROFANITY) >= 140 and set(guard.PROFANITY_GROUPS) >= {"욕설", "자모 줄임", "패드립", "성적", "비하 · 혐오", "영어"}
-    assert guard.GUARD_VERSION == "g4"
+    assert guard.GUARD_VERSION == "g5"
 
 
 @pytest.mark.parametrize(("text", "out"), [
@@ -148,3 +148,35 @@ def test_profanity_groups_flatten() -> None:
 ])
 def test_long_numbers_masked_whole_and_numeric_text_kept(text, out) -> None:
     assert guard.clean(text).text == out
+
+
+def test_long_text_is_cut_to_max_len() -> None:
+    """글 하나는 MAX_TEXT_LEN 자까지만 — BE 칸은 TEXT 라 상한이 없어, 아주 긴 글이 LLM 비용 · 시간을 키우지 않게(10-17 g5)."""
+    long = "캠핑 용품을 좋아해요 " * 300
+    r = guard.clean(long)
+    assert r.text is not None and len(r.text) == guard.MAX_TEXT_LEN and "truncated" in r.flags
+    short = guard.clean("캠핑 용품을 좋아해요")
+    assert short.text == "캠핑 용품을 좋아해요" and "truncated" not in short.flags
+
+
+def test_number_on_the_cut_line_is_masked_whole() -> None:
+    """상한 경계에 걸친 전화번호도 통째로 가린다 — 자른 뒤에 가리면 '010-1234-' 가 남는다(10-17 검토)."""
+    head = ("캠핑 용품을 좋아해요 " * 100)[: guard.MAX_TEXT_LEN - 5]   # 같은 글자 반복은 정규화가 줄이므로 문장으로 채운다
+    r = guard.clean(head + " 010-1234-5678 로 연락 주세요")
+    assert r.text is not None and "1234" not in r.text and len(r.text) <= guard.MAX_TEXT_LEN and "truncated" in r.flags
+    assert not r.text.endswith("[") and not r.text.endswith("[연락")      # 반쯤 잘린 가림 표시는 뗀다
+
+
+def test_masked_text_stays_within_max_len() -> None:
+    """가림 표시가 원래 말보다 길어도(ㅅㅂ → [가림]) 정리본은 상한을 넘지 않는다."""
+    r = guard.clean("ㅅㅂ " * (guard.MAX_TEXT_LEN // 3))
+    assert r.text is None or len(r.text) <= guard.MAX_TEXT_LEN
+    r = guard.clean("향이 좋아요 ㅅㅂ " * 120)
+    assert r.text is not None and len(r.text) <= guard.MAX_TEXT_LEN and "profanity" in r.flags and "truncated" in r.flags
+
+
+def test_very_long_text_drops_the_broken_last_word() -> None:
+    """정규화 전 큰 자르기(상한 × 4)에서 잘린 끝 낱말은 버린다 — 공백이 많아 정규화 뒤 짧아져도 반쪽 번호가 남지 않게."""
+    text = "좋아요" + " " * (guard.MAX_TEXT_LEN * 4 - 13) + "010-1234-5678"
+    r = guard.clean(text)
+    assert r.text is not None and "1234" not in r.text and "truncated" in r.flags

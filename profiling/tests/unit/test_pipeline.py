@@ -442,6 +442,16 @@ def test_profile_recipient_store_failure_is_failed_no_callback() -> None:
     assert store.history[-1] is RunStatus.FAILED                                  # 실행 기록도 FAILED로 되돌림
 
 
+def test_store_failure_reason_keeps_only_the_first_line() -> None:
+    """DB 오류의 둘째 줄(DETAIL: Failing row contains …)에는 정리본 글이 실릴 수 있다 — 실행 기록 사유엔 첫 줄만(10-17)."""
+    class DetailStore(FakeRecipientStore):
+        def upsert(self, profile):
+            raise RuntimeError('new row violates check constraint "x"\nDETAIL: Failing row contains (9073, 아기가 좋아해요)')
+    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=FakeStore(), recipient_store=DetailStore())
+    assert out.status is RunStatus.FAILED and "check constraint" in out.failure_reason
+    assert "DETAIL" not in out.failure_reason and "아기가" not in out.failure_reason
+
+
 # ---------------------------------------------------------------- 바뀐 내용 로그(profile_change, 10-15 C안)
 
 

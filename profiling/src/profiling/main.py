@@ -214,6 +214,7 @@ def _connect_db(settings: Settings) -> sa.Engine:
                            "PROFILING_DB_POOL_SIZE 를 비우거나(자동) 늘린다")
     engine = sa.create_engine(
         _require_db_url(settings), pool_pre_ping=True, future=True,
+        hide_parameters=True,      # 오류 메시지 · 로그에 바인드 값(정리본 글)을 싣지 않는다(10-17)
         pool_size=pool_size, max_overflow=settings.DB_MAX_OVERFLOW, pool_timeout=settings.DB_POOL_TIMEOUT_S,
         connect_args={"connect_timeout": settings.DB_CONNECT_TIMEOUT_S, "options": db_session_options(settings)},
     )

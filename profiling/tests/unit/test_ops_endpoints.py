@@ -110,3 +110,22 @@ def test_strict_problems_refuse_public_app_role_name() -> None:
     """공개된 기본 계정 이름(로컬 기본)으로는 서버가 뜨지 않는다 — 서버는 비공개 이름(PROFILING_APP_DB_ROLE)."""
     probs = main.strict_problems(_settings(DATABASE_URL="postgresql+psycopg://ai_app:S3cret@db:5432/ai_chat"))
     assert len(probs) == 1 and "계정 이름" in probs[0] and "ai_app" not in probs[0]
+
+
+def test_service_token_check_accepts_only_the_exact_token() -> None:
+    """7.6 서비스 토큰 — 맞으면 통과, 없거나 Bearer 가 아니거나 틀리면 401. 비교는 시간 차가 없는 방식(10-17 hmac.compare_digest)."""
+    import asyncio
+
+    import pytest
+    from fastapi import HTTPException
+
+    from profiling import intake
+
+    s = _settings(SERVICE_TOKEN="right-token-0123456789")
+    run = lambda auth: asyncio.run(intake.require_service_token(authorization=auth, settings=s))
+    assert run("Bearer right-token-0123456789") is None
+    for bad in (None, "right-token-0123456789", "Bearer wrong-token", "Bearer right-token-012345678", "Bearer 한글토큰"):
+        with pytest.raises(HTTPException) as e:
+            run(bad)
+        assert e.value.status_code == 401
+    assert asyncio.run(intake.require_service_token(authorization=None, settings=_settings(SERVICE_TOKEN=""))) is None   # 로컬: 토큰 없으면 검사 안 함

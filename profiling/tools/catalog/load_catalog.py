@@ -8,8 +8,8 @@
   확인만:    … --dry-run
   재고·조회수만 다시: … --metrics <metrics.jsonl>          (패키지 없이)
 
-**서버(ECS) 적재 — 합본 파일 하나(10-15).** 패키지 · 번호표는 이미지에 없다. 로컬에서 Backend 번호로 합친 파일 하나를 만들어
-비공개 S3 에 올리고, 적재 Task 는 그 파일만 읽는다(Task Role 로 S3 읽기).
+**서버 적재 — 합본 파일 하나(10-15).** 패키지 · 번호표는 이미지에 없다. 로컬에서 Backend 번호로 합친 파일 하나를 만들고,
+첫 배포 전에 DB 에 한 번 넣는다(로컬 파일 또는 비공개 S3 — s3:// 는 Task Role 로 읽음). 합본은 팀 내부 자료 — 저장소 · 이미지에 넣지 않는다.
   합본 만들기(DB 안 씀):  … --package <패키지> --id-map … --category-id-map … --metrics … --write-bundle catalog-bundle.json.gz
   합본 적재:              … --bundle s3://<버킷>/<키>  (또는 로컬 경로)  [--if-empty]
   --if-empty            활성 카탈로그가 이미 있으면 아무것도 하지 않고 성공(0) — 배포 워크플로가 매번 불러도 된다
@@ -24,7 +24,8 @@
 **상품 축 태그 적재(10-16, 0011).** 활성 판의 상품마다 축 태그(브랜드 · IP · 카테고리 묶음, 대표 이름)를 계산해 products.tags 에 넣고
 판 행에 규칙 판 · 지문(tags_rule · tags_sha256)을 남긴다. 계산은 이미지 안의 규칙 · 어휘(profiling.vocab)로 — LLM 없음 · 몇 초.
   태그만:                 … --tags [--if-changed]
-  배포 워크플로:          … --bundle s3://… --embeddings s3://… --if-empty --tags --if-changed
+  첫 배포 전 한 번:        … --bundle <합본> --embeddings <벡터> --tags
+  배포 워크플로(매번):     … --tags --if-changed       (카탈로그 · 벡터는 미리 넣어 둠 — S3 주소를 남기면 DB 에 있어도 S3 부터 읽는다)
   --if-changed          활성 판의 규칙 판 · 지문이 이 코드와 같으면 건너뛴다(배포마다 불러도 됨 — 어휘 · 규칙이 바뀐 배포에서만 다시 계산).
   트랜잭션 하나 — 실패하면 이전 태그 그대로. 새 카탈로그 판은 태그 없이 시작하고 그동안 앱은 같은 규칙으로 그 자리에서 계산한다.
 
@@ -658,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             write_bundle(bundle, args.write_bundle)
             print(f"  ✓ 합본 {args.write_bundle} — 카테고리 {len(bundle['categories'])} · 상품 {len(bundle['products'])} · "
-                  f"{args.write_bundle.stat().st_size:,} bytes (팀 내부 자료 — 비공개 S3 에만 올린다)")
+                  f"{args.write_bundle.stat().st_size:,} bytes (팀 내부 자료 — 저장소 · 이미지에 넣지 않는다)")
             return 0
         if args.dry_run:
             print("dry-run — 쓰지 않았다")

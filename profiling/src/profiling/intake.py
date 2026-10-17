@@ -15,6 +15,7 @@ Transport 역할만 한다: 인증 → 스키마 검증 → 활성 카탈로그 
 
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 from collections.abc import Callable
@@ -117,7 +118,7 @@ async def require_service_token(
         return
     if not authorization or not authorization.startswith("Bearer "):
         raise _error(401, "UNAUTHORIZED", "서비스 토큰이 없습니다.")
-    if authorization.removeprefix("Bearer ").strip() != expected:
+    if not hmac.compare_digest(authorization.removeprefix("Bearer ").strip().encode(), expected.encode()):   # 비교 시간으로 토큰이 새지 않게
         raise _error(401, "UNAUTHORIZED", "서비스 토큰이 올바르지 않습니다.")
 
 

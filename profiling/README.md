@@ -17,7 +17,7 @@ flowchart LR
 
 | | |
 |---|---|
-| 상태 | **v2 개발 · 통합 중** (브랜치 `feature/#14-profiling-product-tags` — 이슈 #11 → #12 → #13 → #14 순서로 쌓음, develop 머지 전) |
+| 상태 | **v2 개발 · 통합 중** (이슈 #11 · #12 · #13 · #14) |
 | 언어 · 런타임 | Python 3.13 · FastAPI · SQLAlchemy · Alembic · uv |
 | 저장소 | PostgreSQL 16 + pgvector (마이그레이션 `0011` — 상품 임베딩 벡터 `0009` · 비선호 태그 `0010` · 상품 축 태그 `0011`) |
 | 외부 LLM | OpenRouter (태그 추출 — 꺼도 추천은 동작) |
@@ -74,6 +74,8 @@ docker compose up -d --build     # ai-db → ai-migrate(마이그레이션 한 �
 docker compose run --rm -v <합본 폴더>:/b:ro ai-migrate \
   python -m tools.catalog.load_catalog --bundle /b/<카탈로그 합본>.json.gz --if-empty --tags --if-changed
 ```
+
+> compose 의 앱은 `.env` 에서 토큰 · Backend 주소만 받아 **태그 추출 · 임베딩이 꺼진 채** 뜹니다. 켜려면 `docker-compose.yml` 의 `ai-app` environment 에 `PROFILING_TAGGER` · `PROFILING_OPENROUTER_API_KEY` · `PROFILING_EMBEDDING_DIR=/app/product-search` 를 더하고 벡터를 적재합니다(`--embeddings`).
 
 ---
 
@@ -150,7 +152,7 @@ DB 연결 수 · 시간 상한 · 재시도 같은 나머지 설정은 `settings
 3. **분석**
    1. 리뷰 별점으로 소분류별 선호 점수를 쌓습니다.
    2. 취향 문장 · 좋게 준 리뷰(4~5점)가 있으면 **태그를 뽑습니다** — 좋아하는 것(선호 태그)과 글에서 분명히 싫다고 한 것(비선호 태그).
-      - 가드레일: 개인정보 · 욕설은 가리고, 의미 없는 글 · 프롬프트 공격 의심 글은 버립니다.
+      - 가드레일: 개인정보 · 욕설은 가리고, 의미 없는 글 · 프롬프트 공격 의심 글은 버립니다. 글 하나는 최대 1,000자(넘으면 앞부분만).
       - LLM 을 한 번 부르고, 검증기가 근거 없는 태그 · 판촉 단어 · 문장형 태그를 버립니다.
       - LLM 이 실패해도 요청은 실패하지 않습니다(태그 없이 계속).
    3. **추천 30개를 고릅니다.**
@@ -223,7 +225,7 @@ uv run ruff check src tests tools alembic     # 린트
 
 | 묶음 | 무엇을 보나 | 필요한 것 |
 |---|---|---|
-| `tests/unit` (348개) | 업무 규칙 · 어댑터(가짜 HTTP) · 설정 · 기동 검사 | 없음 |
+| `tests/unit` (354개) | 업무 규칙 · 어댑터(가짜 HTTP) · 설정 · 기동 검사 | 없음 |
 | `tests/integration` (87개) | 마이그레이션 · 저장소 · 앱 끝에서 끝 | PostgreSQL (`PROFILING_DATABASE_URL`) |
 
 실험 도구(시험 장치 · 부하 시험 · 모델 비교 · 가짜 Backend)는 이 브랜치에 없습니다. 필요하면 프로파일링 담당에게 요청합니다.
@@ -236,19 +238,26 @@ uv run ruff check src tests tools alembic     # 린트
 
 ```bash
 alembic upgrade head                                                     # 마이그레이션 Task (소유자 계정)
-python -m tools.catalog.load_catalog --bundle s3://<버킷>/<키> \
-  --embeddings s3://<버킷>/<벡터 접두어> --if-empty --tags --if-changed       # 적재 Task — 카탈로그 · 상품 벡터(있으면 건너뜀) · 상품 축 태그(규칙이 같으면 건너뜀)
+python -m tools.catalog.load_catalog --tags --if-changed                 # 상품 축 태그 — 규칙이 같으면 건너뜀(같은 이미지 · 소유자 계정)
 uvicorn profiling.main:app --host 0.0.0.0 --port 8000                    # 앱 (이미지 기본 명령)
 ```
+
+**첫 배포 전에 한 번** — 카탈로그 · 상품 벡터를 DB 에 미리 넣는다(팀 내부 자료, 로컬 파일 또는 `s3://` 경로).
+
+```bash
+python -m tools.catalog.load_catalog --bundle <카탈로그 합본> --embeddings <벡터 폴더> --tags
+```
+
+상품이 바뀌면 같은 명령을 다시 돌린다 — 새 카탈로그 판을 넣고 한 트랜잭션에서 활성 판을 바꾼다(앱은 1초 안에 새 판을 읽음).
 
 | 항목 | 값 |
 |---|---|
 | 포트 | 8000 |
 | 헬스 체크 | Liveness `/healthz` · Readiness `/readyz` |
-| 권장 자원 | 임베딩 끔: `cpu` 256 · `memoryReservation` 256 MiB · `memory` 512 MiB / **임베딩 켬: `cpu` 512 · `memoryReservation` 512 MiB · `memory` 1024 MiB**(질의 인코더 Node 몫, 실측 최대 약 375MiB) |
+| 권장 자원 | 임베딩 끔: `cpu` 256 · `memoryReservation` 256 MiB · `memory` 512 MiB / **임베딩 켬: `cpu` 1024 · `memoryReservation` 512 MiB · `memory` 1024 MiB** — 부하 시험(흉내 LLM): `cpu` 512 는 1분에 100건이 몰리면 대기열이 차 503, 1024 는 503 0 · 메모리 최대 약 400MiB |
 | 종료 유예 | `PROFILING_SHUTDOWN_DRAIN_S=35` · 컨테이너 `stopTimeout` 60 |
 | 동시 분석 | `PROFILING_SLOTS=8` (DB 연결은 Task 당 14) |
-| 카탈로그 합본 | **비공개** S3 (팀 내부 자료) |
+| 카탈로그 · 벡터 | 팀 내부 자료 — 저장소 · 이미지에 넣지 않고 첫 배포 전에 DB 에 적재 |
 
 - 새 마이그레이션을 더하면 `main.EXPECTED_MIGRATION` 도 같은 커밋에서 올립니다. 다음 번호는 `0012`.
 - 상품 축 태그 규칙(`vocab.py` · `vocab_data/`)을 바꿔 결과가 달라지면 `vocab.RULE` 을 올립니다(지문 시험이 알려 줌). 배포 적재의 `--tags --if-changed` 가 다음 배포 때 태그를 다시 계산합니다.

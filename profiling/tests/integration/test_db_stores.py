@@ -11,7 +11,7 @@ import pytest
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
-from profiling import intake, pipeline
+from profiling import guard, intake, pipeline
 from profiling import stores as stores_mod
 from profiling.catalog import (
     FILE_CATALOG_VERSION_ID,
@@ -303,7 +303,7 @@ def test_pipeline_with_reviews_writes_scores_and_review_rows(stores, engine) -> 
     assert [r.product_id for r in prof.reviews] == [900001, 900004] and prof.gift_preference_hash == preference_hash("육아용품 좋아요")
     # 원문 그대로는 없고 정리본만(10-13 DR-039) — 이 글들은 가릴 것이 없어 정리본 = 원문이므로 정리본 칸에 그대로 있다
     assert prof.gift_preference_clean == "육아용품 좋아요" and [r.text_clean for r in prof.reviews] == ["아기가 좋아해요", None]
-    assert prof.tag_status == "off" and len(prof.recommended_product_ids) == len(out.search.product_ids) and prof.guard_version == "g4"
+    assert prof.tag_status == "off" and len(prof.recommended_product_ids) == len(out.search.product_ids) and prof.guard_version == guard.GUARD_VERSION
 
 
 # ---------------------------------------------------------------- 앱 전체 (진짜 DB)
