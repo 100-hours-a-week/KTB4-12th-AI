@@ -12,3 +12,24 @@ docker-compose.override.yml
 *.p12
 *.jks
 secrets/
+
+# Generated environments, runtime state and verification evidence stay outside source.
+.venv/
+node_modules/
+.pytest_cache/
+.ruff_cache/
+.integration/
+artifacts/
+verification/
+reports/
+*.log
+*.db
+*.sqlite*
+*.dump
+*.onnx*
+*.safetensors
+*.pt
+*.ckpt
+*.tar
+*.tar.gz
+*.zip

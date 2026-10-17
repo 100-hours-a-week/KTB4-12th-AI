@@ -32,6 +32,7 @@ from profiling import intake, status
 from profiling.backend import HttpBackendPort
 from profiling.catalog import DbCatalogReader, FileCatalogReader
 from profiling.ports import NoActiveCatalog
+from profiling.profile_read import router as profile_read_router
 from profiling.schemas import ErrorBody, ErrorResponse
 from profiling.settings import Settings, get_settings
 from profiling.stores import (
@@ -102,8 +103,10 @@ def strict_problems(settings: Settings) -> list[str]:
         problems.append("PROFILING_DATABASE_URL 의 비밀번호가 공개 기본값")
     if settings.BACKEND_BASE_URL.rstrip("/") == _DEFAULT_BACKEND:
         problems.append("PROFILING_BACKEND_BASE_URL 이 로컬 가짜 BE 기본값")
-    if settings.CATALOG_SOURCE != "db":
+    if settings.CATALOG_SOURCE not in ("db", "search_http"):
         problems.append("PROFILING_CATALOG_SOURCE 가 db 가 아님(서버 이미지에는 카탈로그 파일이 없다)")
+    if settings.CATALOG_SOURCE == "search_http" and not settings.SEARCH_BASE_URL:
+        problems.append("PROFILING_SEARCH_BASE_URL required for shared catalog")
     return problems
 
 
@@ -125,12 +128,20 @@ async def lifespan(app: FastAPI):
     # 카탈로그 — 설정 한 줄로 DB(배포)와 파일(로컬) 중 하나. 로드 실패해도 앱은 띄운다: 7.6이 503을 내고, /health가 active=false를 보이게.
     try:
         ## 상품DB연결
-        app.state.catalog = (DbCatalogReader(app.state.engine, poll_ttl_s=settings.CATALOG_POLL_TTL_S) if settings.CATALOG_SOURCE == "db"
-                             else FileCatalogReader(Path(settings.CATALOG_FILE)))
+        if settings.CATALOG_SOURCE == "search_http":
+            from profiling.search_api import SearchCatalog
+            app.state.catalog = SearchCatalog(settings.SEARCH_BASE_URL,
+                settings.SEARCH_TOKEN.get_secret_value() if settings.SEARCH_TOKEN else settings.SERVICE_TOKEN)
+        else:
+            app.state.catalog = (DbCatalogReader(app.state.engine, poll_ttl_s=settings.CATALOG_POLL_TTL_S) if settings.CATALOG_SOURCE == "db"
+                                 else FileCatalogReader(Path(settings.CATALOG_FILE)))
         version_id, products = app.state.catalog.active()
         log.info("카탈로그 로드 source=%s version=%s products=%d (%s)", settings.CATALOG_SOURCE, version_id, len(products),
                  f"ai_catalog poll_ttl_s={settings.CATALOG_POLL_TTL_S}" if settings.CATALOG_SOURCE == "db" else settings.CATALOG_FILE)
     except NoActiveCatalog as e:
+        if settings.CATALOG_SOURCE == "search_http":
+            # A shared generation must never degrade into local/no-vector ranking.
+            raise
         if settings.CATALOG_SOURCE == "db":
             # DB 카탈로그는 1초마다 활성 버전을 다시 묻는다 — 기동 뒤에 적재해도 재시작 없이 살아난다(10-15: 대역으로 바꾸면 영영 503 이었다)
             log.error("활성 카탈로그 없음: %s — 적재될 때까지 7.6 은 503 · /readyz 503(적재되면 재시작 없이 회복)", e)
@@ -164,7 +175,11 @@ async def lifespan(app: FastAPI):
             app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, settings.OPENROUTER_API_KEY.get_secret_value(),
                                                       settings.tagger_model, timeout_s=settings.TAGGER_TIMEOUT_S)
             log.info("태그 추출기 openrouter model=%s url=%s", settings.tagger_model, settings.OPENROUTER_URL)   # 키는 남기지 않음
-    if settings.EMBEDDING_DIR:
+    if settings.CATALOG_SOURCE == "search_http":
+        app.state.embedding = app.state.catalog
+        app.state.embedding_status = {"enabled": True, "version": app.state.embedding.version,
+            "matched": app.state.embedding.matched, "total": app.state.embedding.total}
+    elif settings.EMBEDDING_DIR:
         try:
             from profiling.embedding import DbEmbedding, ProductSearchEmbedding
             index = DbEmbedding if settings.EMBEDDING_SOURCE == "db" else ProductSearchEmbedding
@@ -290,6 +305,7 @@ class _NoCatalog:
 
 app = FastAPI(title="profiling", version="0.1.0", lifespan=lifespan)
 app.include_router(intake.router)
+app.include_router(profile_read_router)
 
 
 def _error_response(status: int, code: str, message: str, trace_id: str | None = None, *, retry_after: int | None = None) -> JSONResponse:
@@ -386,14 +402,21 @@ async def health(request: Request) -> dict:
 
 
 def _health_sync(state) -> dict:
-    try:
-        version_id, products = state.catalog.active()
-        catalog = {"active": True, "version": str(version_id), "products": len(products),
-                   "productTags": getattr(state.catalog, "tags_state", "none")}     # 0011 — ok · stale · none(없거나 다르면 그 자리에서 계산)
-    except NoActiveCatalog as e:
-        catalog = {"active": False, "reason": str(e)}
-    return {"status": "ok", "catalog": catalog, "store": _store_health(state), "supervisor": state.supervisor.stats(),
-            "llm": status.LLM.snapshot(), "embedding": getattr(state, "embedding_status", {"enabled": False})}
+    snapshot = getattr(state.catalog, "health_snapshot", None)
+    if callable(snapshot):
+        # Managed shared mode can rebind after startup. Read all generation
+        # fields from one retained snapshot, not the startup embedding_status.
+        projection = snapshot()
+    else:
+        try:
+            version_id, products = state.catalog.active()
+            catalog = {"active": True, "version": str(version_id), "products": len(products),
+                       "productTags": getattr(state.catalog, "tags_state", "none")}
+        except NoActiveCatalog as e:
+            catalog = {"active": False, "reason": str(e)}
+        projection = {"catalog": catalog, "embedding": getattr(state, "embedding_status", {"enabled": False})}
+    return {"status": "ok", **projection, "store": _store_health(state), "supervisor": state.supervisor.stats(),
+            "llm": status.LLM.snapshot()}
 
 
 def _store_health(state) -> dict:

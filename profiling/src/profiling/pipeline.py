@@ -346,6 +346,11 @@ def profile(
 
     try:
         # 2) 리뷰 별점 → 소분류 편향 + (추출기가 있으면) 글 · 취향 → 4축 태그(LLM 한 번 → 코드 검증기)
+        # 공용 Search는 상품이 없는 분류도 포함한 같은 세대의 taxonomy를 검증한다.
+        # 기존 file/db 어댑터의 분류·랭킹 정책은 변경하지 않는다.
+        validate_dislikes = getattr(catalog, "validate_disliked_categories", None)
+        if validate_dislikes is not None:
+            validate_dislikes(rq.disliked_categories)
         scores = category_scores(rq, products, catalog)
         disliked_names = [c.category_name for c in rq.disliked_categories]
         validation = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_category_names=disliked_names, log=[])

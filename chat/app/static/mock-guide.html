@@ -1,0 +1,35 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>고정 응답 API 테스트</title><link rel="stylesheet" href="/static/admin.css"><link rel="stylesheet" href="/static/guide.css">
+<body><main class="guide"><a href="/">← 고정 응답 테스트</a><h1>고정 응답 API 테스트</h1>
+<p><strong>이 서버는 LLM·검색 API를 호출하지 않습니다.</strong> 실제 모델 서버와 같은 인증·대화·SSE·취소 계약을 사용하며 생성 내용만 정해진 시나리오로 대체합니다. 대화·이벤트·QA는 테스트 전용 PostgreSQL에 저장됩니다.</p>
+<p><a href="/docs">Swagger</a> · <a href="/openapi.json">OpenAPI JSON</a> · <a href="/guide/backend-client.py" download>Python 클라이언트 다운로드</a> · <a href="https://wjo-ai-chat-demo.hf.space/guide">실제 모델 서버 안내</a></p>
+<section><h2>연결</h2><p>Base URL: <code>https://wjo-ai-chat-mock.hf.space</code>. API에는 기존과 같은 팀 공유 토큰을 <code>Authorization: Bearer &lt;token&gt;</code>으로 보냅니다. 웹은 접속 토큰, 관리자는 별도 관리자 비밀번호를 사용합니다.</p>
+<p>기존 클라이언트의 서버 주소만 바꾸면 됩니다. <code>/healthz</code>·<code>/readyz</code>의 <code>mode: mock</code> 또는 응답의 <code>X-Chat-Mode: mock</code>으로 목적지를 확인하세요.</p>
+<pre><code># Bash · Python 3.10+ · httpx 필요
+export AI_CHAT_URL='https://wjo-ai-chat-mock.hf.space'
+read -r -s -p 'API token: ' AI_SERVICE_TOKEN; export AI_SERVICE_TOKEN
+curl --fail-with-body "$AI_CHAT_URL/guide/backend-client.py" \
+  -H "Authorization: Bearer $AI_SERVICE_TOKEN" -o backend_client.py
+python backend_client.py probe
+python backend_client.py start --state mock-cards.json --sender 7 --recipient 42 \
+  --message '/mock cards'
+python backend_client.py resume --state mock-cards.json
+python backend_client.py cancel --state mock-cards.json</code></pre>
+<p>클라이언트 설치: <code>python3 -m venv .venv</code>, <code>. .venv/bin/activate</code>, <code>python -m pip install 'httpx&gt;=0.28,&lt;1'</code>. 새 시험에는 새 상태 파일명을 사용하고, 실패한 요청 복구에는 원래 파일을 유지합니다.</p></section>
+<section><h2>고정 시나리오</h2><p>질문 body는 그대로 <code>{"message":"/mock cards"}</code>입니다. 임의의 일반 질문도 cards 시나리오로 처리합니다. 입력의 의미나 수신자 취향은 해석하지 않습니다.</p><ul>
+<li><code>/mock cards</code> — 진행 안내 → 답변 조각 → 가상 카드 3개 → COMPLETED.</li>
+<li><code>/mock text</code> — 한글·이모지를 포함한 답변 조각 → COMPLETED. 카드 없음.</li>
+<li><code>/mock no_match</code> — 검색 결과 없음 문구 → COMPLETED. 외부 검색은 실행하지 않음.</li>
+<li><code>/mock slow</code> — 진행 안내 후 약 15초 대기, 답변 → COMPLETED. heartbeat·재연결·중간 취소 시험용.</li>
+<li><code>/mock failed</code> — 부분 답변을 저장한 후 FAILED와 오류 메시지. HTTP 200 SSE를 성공으로 오인하지 않는지 확인.</li>
+</ul><p>없는 <code>/mock</code> 시나리오는 400으로 거부하며 질문을 생성하지 않습니다. 취소 시험은 slow 요청 도중 cancellation API를 호출하세요. 취소 후 부분 답변은 보존되고 최종 상태는 CANCELLED입니다.</p></section>
+<p><strong>현재 Mock은 v1.5 계약입니다.</strong> 차기 v1.6의 BE 프로필 GET은 호출하지 않습니다. 고정 응답 성공은 실사용자 취향 조회 검증을 뜻하지 않습니다.</p>
+<section><h2>동일한 API 계약</h2><ol>
+<li><code>PUT /v1/chat/conversations/{conversationId}</code> — senderUserId, recipientUserId.</li>
+<li><code>PUT /v1/chat/conversations/{conversationId}/turns/{turnId}</code> — message.</li>
+<li><code>GET /v1/chat/conversations/{conversationId}/turns/{turnId}/events?afterEventId=0</code> — 저장형 SSE.</li>
+<li><code>PUT /v1/chat/conversations/{conversationId}/turns/{turnId}/cancellation</code> — 생성 취소.</li>
+</ol><p>UUID v4, 정수 ID, trim 후 200자, 같은 ID·내용의 멱등성, HTTP {message,data} 포장, SSE의 최종 Turn 전체, afterEventId 복구 규칙은 실제 모델 서버와 같습니다. EOF만으로 성공 처리하지 말고 최종 status를 확인하세요. 접수 응답 유실 시 같은 Turn ID를 유지합니다.</p></section>
+<section><h2>검증 범위</h2><p>상품 ID <code>900000001–900000003</code>은 명시적인 가상 fixture입니다. 실제 Backend 카탈로그 ID가 아니므로 실제 상품 상세 결합 시험에는 사용할 수 없습니다. 화면의 상품명·가격도 가상 값입니다.</p>
+<p>이 서버는 통신·화면·예외 처리를 반복 시험하는 용도입니다. 모델 품질·검색 적합성·수신자 개인화·실제 모델 지연은 검증하지 않습니다. 테스트 전용 DB를 사용하지만 NUC 서버와 HF 기반 시설은 실제 서버와 공유하므로 그 장애까지 분리되지는 않습니다.</p>
+<p>전역 동시 8턴·24시간 2,000턴, 웹 세션당 시간당 30턴입니다. 기존 토큰 인증을 유지합니다. 실제 모델 키·검색 키는 이 Space에 등록하지 않습니다.</p></section></main></body></html>

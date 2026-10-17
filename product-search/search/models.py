@@ -20,6 +20,7 @@ class Filters(Model):
     exclude_brands: list[str] = Field(default_factory=list, max_length=50)
     product_types: list[Literal["Shipping", "Pickup", "Voucher"]] = Field(default_factory=list)
     exclude_product_ids: list[ProductId] = Field(default_factory=list, max_length=500)
+    include_product_ids: list[ProductId] = Field(default_factory=list, max_length=500)
     availability: Literal["any", "available", "unavailable", "unknown", "available_or_unknown"] = "any"
 
     @model_validator(mode="after")

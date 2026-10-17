@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>__CHAT_TITLE__ · 선잘알</title>
+  <link rel="stylesheet" href="/static/style.css?v=models-1">
+  <script src="/static/http.js" defer></script>
+  <script src="/static/stream-renderer.js" defer></script>
+  <script src="/static/chat.js?v=models-1" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-heading"><h1><a id="home" href="/">__CHAT_TITLE__</a></h1><span>선잘알 V2</span></div>
+    <nav class="tools" aria-label="도구">
+      <a href="/minimal-chat/">간단한 채팅</a>
+      <a href="/guide">API 안내</a>
+      <button id="report-session" type="button" disabled>대화 신고</button>
+      <button id="my-reports" type="button" disabled>내 신고</button>
+      <button id="logout" type="button" hidden>로그아웃</button>
+    </nav>
+    <button id="new" type="button" disabled>새 대화</button>
+  </header>
+  <aside class="sidebar">
+    <h2>최근 대화</h2>
+    <nav id="history" class="history-list" aria-label="최근 대화"></nav>
+  </aside>
+  <main>
+    <div class="conversation-toolbar">
+      <button id="history-toggle" class="history-toggle" type="button" aria-haspopup="dialog" aria-controls="recent" disabled>최근 대화</button>
+      <span id="conversation-title">새 대화</span>
+      <span class="status" id="status" role="status">연결 중</span>
+    </div>
+    <p id="runtime-notice" class="runtime-notice" hidden></p>
+    <label class="fixture-control"><input id="protocol-fixture" type="checkbox" disabled> 연동 테스트</label>
+    <section id="mock-controls" class="fixture-control" hidden aria-label="연동 테스트 시나리오">
+      <label for="mock-scenario">시나리오<select id="mock-scenario" disabled><option value="">시나리오 선택</option></select></label>
+      <button id="mock-resume" type="button" hidden>답변 다시 연결</button>
+    </section>
+    <section id="recipient-panel" class="recipient-panel" aria-label="테스트 수신자">
+      <label for="recipient">수신자<select id="recipient" disabled><option value="none">선택 안 함 · 대화로 지정</option></select></label>
+      <div class="recipient-info"><p id="recipient-preferences">수신자를 선택하면 테스트 취향을 볼 수 있습니다.</p><span id="recipient-help">테스트 프로필이며 대화를 시작하면 수신자가 고정됩니다.</span></div>
+    </section>
+    <div class="conversation">
+      <div id="scroll" tabindex="0" aria-label="대화 내용">
+        <section id="welcome">
+          <h2>새 대화</h2>
+          <p id="welcome-description">질문을 입력하거나 아래 예시를 골라 시작하세요.</p>
+          <div class="examples" aria-label="질문 예시 불러오기">
+            <button type="button" data-question="커피 좋아하는 동료에게 3만원 이하 선물을 추천해줘">예산 조건</button>
+            <button type="button" data-question="친구 집들이 선물, 식품과 향 제품은 빼고 4만원 이하로 추천해줘">제외 조건</button>
+            <button type="button" data-question="3만원 이하 드립백과 무드등을 각각 추천해줘">종류 비교</button>
+          </div>
+        </section>
+        <section id="messages" aria-label="질문과 답변"></section>
+      </div>
+      <button id="latest" type="button" hidden>최신 답변 ↓</button>
+    </div>
+    <div class="composer-wrap">
+      <div id="notice" role="status"></div>
+      <button id="reconnect" type="button" hidden>답변 이어받기</button>
+      <form id="composer">
+        <label class="sr-only" for="message">테스트 질문</label>
+        <textarea id="message" rows="2" placeholder="질문을 입력하세요" aria-describedby="input-help count"></textarea>
+        <div class="composer-actions">
+          <span id="count">0 / 200</span>
+          <button id="stop" type="button" hidden>생성 중지</button>
+          <button id="send" type="submit" disabled>전송</button>
+        </div>
+      </form>
+      <div class="composer-meta"><span id="input-help">Enter 전송 · Shift + Enter 줄바꿈</span><span>대화·신고 자동 저장</span></div>
+    </div>
+  </main>
+  <dialog id="recent" aria-labelledby="recent-title">
+    <div class="dialog-heading"><h2 id="recent-title">최근 대화</h2><button type="button" id="recent-close">닫기</button></div>
+    <nav id="recent-history" class="history-list" aria-label="최근 대화 선택"></nav>
+  </dialog>
+  <dialog id="feedback" aria-labelledby="feedback-title">
+    <form method="dialog" id="feedback-form">
+      <h2 id="feedback-title">문제 신고</h2>
+      <p>이 답변과 앞선 최대 4개 답변의 대화·성능 정보를 함께 보냅니다.</p>
+      <label>문제 종류<select id="report-category"><option value="quality">답변 내용</option><option value="constraints">상품·조건</option><option value="latency">응답 속도</option><option value="error">오류·답변 없음</option><option value="other">기타</option></select></label>
+      <label>평가<select id="verdict"><option value="helpful">정상</option><option value="unhelpful">개선 필요</option><option value="issue">오류</option></select></label>
+      <label>문제와 기대한 동작<textarea id="note" maxlength="2000" rows="4" placeholder="무엇이 잘못됐고 어떤 동작을 기대했는지 적어 주세요 (문제 신고 3~1500자)"></textarea></label>
+      <label>작성자 (선택)<input id="reporter" maxlength="80"></label>
+      <p id="feedback-status" role="status"></p>
+      <div class="dialog-actions"><button type="button" id="feedback-close">닫기</button><button type="submit">신고 저장</button></div>
+    </form>
+  </dialog>
+  <dialog id="reports-dialog"><div class="dialog-heading"><h2>내 신고</h2><button id="reports-close" type="button">닫기</button></div><div id="reports-list"></div></dialog>
+  <dialog id="access" aria-labelledby="access-title">
+    <form id="access-form">
+      <h2 id="access-title">채팅 테스트 접속</h2>
+      <label for="access-token">체험 코드</label>
+      <input id="access-token" type="password" autocomplete="off" maxlength="2048" required>
+      <p id="access-status" role="status"></p>
+      <div class="dialog-actions"><button id="access-submit" type="submit">접속</button></div>
+      <p class="access-help">한 번 접속하면 8시간 동안 이용할 수 있습니다.</p>
+    </form>
+  </dialog>
+</body>
+</html>
