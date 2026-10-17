@@ -206,3 +206,42 @@ def test_sample_initial_only_cannot_replace_catalog(sync_case):
     def forbidden(): pytest.fail('must refuse before reading sample')
     with pytest.raises(ValueError,match='Refusing'):
         sync(root,forbidden,apply=True,initial_only=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_hot_reload_closes_unpublished_index(sync_case, monkeypatch):
+    import threading
+
+    root, _, _, _, publish = sync_case
+    initial = SearchService(root/'data')
+    manager = ReloadingSearch(root, initial, None, encoder_fingerprint='test-encoder')
+    publish()
+    entered, release = threading.Event(), threading.Event()
+    built = []
+    def slow_load(directory):
+        entered.set()
+        assert release.wait(2), 'synthetic loader watchdog'
+        candidate = SearchService(directory)
+        built.append(candidate)
+        return candidate
+    monkeypatch.setattr(manager, '_load_candidate', slow_load)
+    task = asyncio.create_task(manager.refresh())
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(100):
+            if built:
+                break
+            await asyncio.sleep(.01)
+        assert built and manager.current is initial
+        assert built[0].pool._shutdown, 'cancelled reload leaked its unpublished executor'
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        for candidate in built:
+            candidate.close()
+        await manager.close()

@@ -1,0 +1,48 @@
+name: AI integration contracts
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  free-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      HF_HUB_OFFLINE: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.12.17"
+          enable-cache: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+      - name: Install only locked test dependencies
+        run: |
+          uv sync --project chat --frozen --group test --python 3.12
+          uv sync --project profiling --frozen --python 3.13
+          uv sync --project product-search --frozen --python 3.13
+      - name: Verify source boundary and exact Compose configuration
+        run: python3 -B integration/tools/check_release.py --compose
+      - name: Free synthetic contracts
+        run: python3 -B integration/tests/run_upgrade_offline.py --environment-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/ai-contracts"
+      - name: Require unchanged lock files
+        run: git diff --exit-code -- '**/uv.lock' '**/package-lock.json'
+
+# No provider secrets, production DB, model download, deployment, or automatic paid run.
+# Native PG18 + pgvector/CPU assets and Compose startup are separate release gates;
+# see integration/QUICKSTART.md and RELEASE_READINESS.md.

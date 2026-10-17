@@ -187,8 +187,16 @@ def _send_and_record(
     rid, sv = outcome.recipient_user_id, outcome.source_version
     attempts = 0
     while True:
+        try:
+            res = backend.send_profile_callback(outcome)
+        except NoActiveCatalog:
+            # A retained result may now contain a confirmed deleted product.
+            # Do not rewrite its IDs or count a call that never reached BE.
+            log.warning("7.7 visibility unavailable recipient=%s source_version=%s", rid, sv)
+            if attempts == 0:
+                return
+            break
         attempts += 1
-        res = backend.send_profile_callback(outcome)
         log.info("7.7 콜백 결과 recipient=%s source_version=%s 시도 %d/%d → %s%s", rid, sv, attempts, max_attempts, res.status,
                  f" ({res.code}: {res.message})" if res.code else "")
         if res.status is not RunStatus.RESULT_READY or attempts >= max_attempts:

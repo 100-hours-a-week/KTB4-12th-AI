@@ -1,0 +1,41 @@
+{
+  "source": "PC /home/johnas/product-agent-lab, main 1ea3cdefe3137503be6725651452f0a25f0a1892 plus captured uncommitted source",
+  "protocol": "stable-v4.12",
+  "helpers": {
+    "evaluation_cases.py": {
+      "sourcePath": "scripts/finetuning/evaluation_cases.py",
+      "sha256": "f856c8d5a7f5519090939f571a66d959a18d232752848c8f57ecd5151be43d90",
+      "mode": "exact file copy"
+    },
+    "supervision_quality.py": {
+      "sourcePath": "scripts/finetuning/supervision_quality.py",
+      "sha256": "d06f13644e307ed0a967944a379c6df67c39e61959895e8f924649e7fe71ac0f",
+      "mode": "exact file copy"
+    },
+    "training_contract.py": {
+      "sourcePath": "scripts/finetuning/training_contract.py",
+      "sha256": "47f24e16e13b90b015400433ff28634de49bc01cccb130a2ef6181087ad27ea7",
+      "mode": "exact file copy"
+    },
+    "stable_supervision.py": {
+      "sourcePath": "scripts/finetuning/stable_supervision.py",
+      "sha256": "ab03aa6c6f19297a2941aae8d14ccd5e86de4b50676325bebbd2b304db45fa00",
+      "mode": "pure definitions extracted into stable_supervision.py"
+    },
+    "adaptive_cycle.py": {
+      "sourcePath": "scripts/finetuning/adaptive_cycle.py",
+      "sha256": "f04c14177bf0dcfdb51020758a74f466d2c22ffd8199eb8e491ba80abc3eec6a",
+      "mode": "pure definitions extracted into stable_supervision.py"
+    },
+    "gemma_runtime.py": {
+      "sourcePath": "scripts/finetuning/gemma_runtime.py",
+      "sha256": "318c8b74b666d9584d81341b26a679de0d2f39a649153064e684dc7db2c883d2",
+      "mode": "pure definitions extracted; HFProvider omitted"
+    },
+    "decision_masking.py": {
+      "sourcePath": "scripts/finetuning/decision_masking.py",
+      "sha256": "96c4597bdb20adae500246f28af7c72731db6990056cb3bf520618682c29ff45",
+      "mode": "exact file copy"
+    }
+  }
+}

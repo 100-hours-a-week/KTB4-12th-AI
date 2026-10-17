@@ -1,0 +1,89 @@
+{
+  "contractStatus": "local-draft-not-agreed-with-BE",
+  "synthetic": true,
+  "realBEConnected": false,
+  "export": {
+    "message": "synthetic export draft",
+    "data": {
+      "generatedAt": "2026-10-16T00:00:00Z",
+      "products": [
+        {
+          "productId": 1,
+          "name": "합성 머그",
+          "brand": "합성",
+          "description": "합성 계약 검증",
+          "categoryId": 11,
+          "categoryName": "합성 주방",
+          "price": 1000,
+          "available": false,
+          "viewCount": null,
+          "updatedAt": "2026-10-15T23:00:00Z"
+        },
+        {
+          "productId": 3,
+          "name": "합성 컵",
+          "brand": "합성",
+          "description": null,
+          "categoryId": 11,
+          "categoryName": "합성 주방",
+          "price": 0,
+          "available": true,
+          "updatedAt": "2026-10-15T23:00:00Z"
+        }
+      ],
+      "snapshot": {
+        "id": "12121212-1212-4212-8212-121212121212",
+        "complete": true,
+        "productCount": 2,
+        "sha256": "6228b47e577df9baaa3608ff02da65138a4b16f7d662ee5cc4d57177eb03a4fd"
+      }
+    }
+  },
+  "categories": {
+    "message": "synthetic taxonomy",
+    "data": {
+      "categories": [
+        {
+          "categoryId": 10,
+          "name": "합성 생활",
+          "children": [
+            {
+              "categoryId": 11,
+              "name": "합성 주방"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "previousCatalog": {
+    "export_generated_at": "2026-10-15T00:00:00Z",
+    "products": [
+      {
+        "id": 1,
+        "source_product_id": "SYNTHETIC:1",
+        "view_count": 17,
+        "kind": "머그",
+        "image": "synthetic.svg"
+      },
+      {
+        "id": 2,
+        "source_product_id": "SYNTHETIC:2",
+        "view_count": 5,
+        "kind": "접시"
+      }
+    ]
+  },
+  "productMap": {
+    "SYNTHETIC:1": 1,
+    "SYNTHETIC:2": 2
+  },
+  "categoryMap": {
+    "SYNTHETIC:parent": 10,
+    "SYNTHETIC:leaf": 11
+  },
+  "expectedIds": [
+    1,
+    3
+  ]
+}

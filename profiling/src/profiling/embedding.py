@@ -85,8 +85,28 @@ def read_vector_files(data: Path) -> tuple[dict, np.ndarray]:
 
 
 def normalize(raw: np.ndarray) -> np.ndarray:
-    """L2 정규화(float32) — 파일 방식 · DB 적재가 같은 함수를 써서 같은 값이 나온다."""
-    return raw / np.linalg.norm(raw, axis=1, keepdims=True)
+    """Shared file/DB normalization; retain ordinary float32 results exactly.
+
+    Scale only when float32 norm arithmetic over/underflows. Reject invalid
+    rows before pgvector ingestion or query execution, without data in errors.
+    """
+    values = np.asarray(raw)
+    if values.dtype.kind not in "fi" or values.ndim != 2 or not values.shape[1]:
+        raise ValueError("Invalid embedding matrix")
+    values = values.astype(np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("Invalid embedding matrix")
+    scale = np.max(np.abs(values), axis=1, keepdims=True)
+    if np.any(scale == 0):
+        raise ValueError("Invalid embedding matrix")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        ordinary = values.astype(np.float32)
+        ordinary = ordinary / np.linalg.norm(ordinary, axis=1, keepdims=True)
+    safe = np.isfinite(ordinary).all(axis=1) & np.isclose(np.linalg.norm(ordinary.astype(np.float64), axis=1), 1, atol=1e-5)
+    if not safe.all():
+        scaled = values[~safe] / scale[~safe]
+        ordinary[~safe] = scaled / np.linalg.norm(scaled, axis=1, keepdims=True)
+    return ordinary
 
 
 def version_of(model: str, model_sha256: str, vectors_sha256: str) -> str:
@@ -139,8 +159,10 @@ class QueryEncoder:
                 if not select.select([self._proc.stdout], [], [], 15)[0]:
                     self.close()
                     raise RuntimeError("임베딩 응답 시간 초과")
-                v = np.asarray(json.loads(self._proc.stdout.readline())["vector"], dtype=np.float32)
-                vecs.append(v / np.linalg.norm(v))
+                v = np.asarray(json.loads(self._proc.stdout.readline())["vector"])
+                if v.shape != (DIM_DB,):
+                    raise ValueError("Invalid query embedding dimensions")
+                vecs.append(normalize(v[None, :])[0])
             return np.stack(vecs)
 
     def _start(self) -> None:

@@ -1,0 +1,14 @@
+{
+  "synthetic": true,
+  "generation": "fixture-catalog-v1",
+  "categories": [
+    {"id": 1, "sourceId": "GROUP-TEST", "parent": null, "name": "합성 선물"},
+    {"id": 11, "sourceId": "CAT-CUP", "parent": "GROUP-TEST", "name": "컵"},
+    {"id": 12, "sourceId": "CAT-AUDIO", "parent": "GROUP-TEST", "name": "음향"}
+  ],
+  "products": [
+    {"id": 101, "sourceId": "SYNTHETIC:101", "category": "CAT-CUP", "name": "합성 휴대용 텀블러", "price": 10000, "availability": "available", "views": 10, "imageUrl": "https://example.invalid/source-101.png", "displayImagePath": "/media/synthetic-101.svg", "imageAssetId": "synthetic-image-101", "productUrl": "https://example.invalid/products/101"},
+    {"id": 102, "sourceId": "SYNTHETIC:102", "category": "CAT-AUDIO", "name": "합성 무선 스피커", "price": 20000, "availability": "unknown", "views": 5},
+    {"id": 103, "sourceId": "SYNTHETIC:103", "category": "CAT-CUP", "name": "합성 품절 머그컵", "price": 5000, "availability": "unavailable", "views": 3}
+  ]
+}
