@@ -13,7 +13,7 @@ D 의 규칙
   3. **같은 브랜드 + 같은 모델 코드는 하나만**(색상 · 옵션만 다른 상품). 코사인으로는 못 가른다 — SONY WH-1000XM6 색상끼리 0.91~0.96,
      다른 모델(WF 이어폰)과도 0.94(10-12 측정).
   0. **리뷰한 상품은 고르지 않는다**(10-12 사용자 결정) — 이미 받은 선물을 다시 추천하지 않는다. 그 상품의 별점 · 태그는 취향 신호로만 쓴다.
-  4. (태그와 임베딩이 있을 때만) 태그마다 비선호 밖에서 코사인 상위 PER_TAG 의 합집합이 후보 → 점수 = SIM_WEIGHT × 축 가중 유사도 백분위
+  4. (태그와 임베딩이 있을 때만) 태그마다(한 글자 태그는 검색어로 풀어 쓰거나 뺌 — search_tags) 비선호 밖에서 코사인 상위 PER_TAG 의 합집합이 후보 → 점수 = SIM_WEIGHT × 축 가중 유사도 백분위
      + 인기 + 편향 → **MMR**(λ = MMR_LAMBDA, 관련도는 후보 안 순위 백분위)로 섞으며 고른다. 태그가 없으면 이 단계 없이 순위대로.
 
 입력 · 출력은 순수 값이다(DB · HTTP 없음). 임베딩은 `ports.EmbeddingIndex` 모양으로만 받는다 — 없으면(None) 1~3 만 한다.
@@ -73,10 +73,16 @@ def dup_key(name: str, brand: str) -> tuple[str, str] | None:
     return (brand, m[0].upper()) if m else None
 
 
+def search_tags(tags: Sequence[Tag]) -> list[Tag]:
+    """선호 태그 → 임베딩 검색에 쓸 태그. 한 글자 태그는 검색에서 엉뚱한 말에 붙어(10-17 D06: '차' → 차량용품 9개) 묶음 이름 · 브랜드
+    대표 이름으로 풀어 쓰고, 못 풀면 뺀다(`vocab.query_text`). 축은 그대로(가중에 씀). 저장되는 태그는 바꾸지 않는다."""
+    return [Tag(t.axis, q) for t in tags if (q := vocab.query_text(t.axis, t.text))]
+
+
 def disliked_hit(p: ProductRecord, tag: Tag) -> bool:
     """비선호 태그 하나가 이 상품에 걸리나 — 축별 어휘로 대조(`vocab`: 브랜드 계열 · 별칭 · 다른 브랜드, IP 캐릭터, 카테고리 묶음).
     어휘에 없는 태그는 글자 대조(대소문자 · 띄어쓰기 · 가운뎃점 무시): 브랜드 → 브랜드 칸 · 상품명(낱말), IP → 상품명,
-    카테고리 → 상품 종류 · 소분류 이름 · 상품명. 두 글자 미만은 대조하지 않는다(카테고리 묶음 말 '옷' · '술' 은 예외)."""
+    카테고리 → 상품 종류 · 소분류 이름 · 상품명. 두 글자 미만은 대조하지 않는다(카테고리 묶음 말 '옷' · '술' · '차' 는 예외)."""
     return vocab.matcher(tag.axis, tag.text)(p)
 
 
@@ -112,10 +118,14 @@ def select_pool(ranked: Sequence[ScoredProduct], pool_size: int, *, allow_dislik
     rule, cands, query = POOL_RULE_D, 0, ""
     if disliked_tags:
         log.info("비선호 태그 %d개(%s)로 후보 %d개를 뺌", len(disliked_tags), ",".join(f"{t.axis}:{len(t.text)}자" for t in disliked_tags), len(disliked_excluded))
-    if tags and embedding is not None and ok:
+    search = search_tags(tags)
+    if [t.text for t in search] != [t.text for t in tags]:
+        log.info("선호 태그 %d개 중 한 글자 %d개를 검색어에서 풀어 쓰거나 뺌(검색어 %d개)", len(tags),
+                 sum(len(vocab.norm(t.text)) < vocab.MIN_LEN for t in tags), len(search))
+    if search and embedding is not None and ok:
         try:
-            cands = _embedding_pick(ranked, ok, tags, embedding, pool_size, lambda i: take(i, cap=True), picked)
-            rule, query = POOL_RULE_D_EMBED, " ".join(t.text for t in tags)
+            cands = _embedding_pick(ranked, ok, search, embedding, pool_size, lambda i: take(i, cap=True), picked)
+            rule, query = POOL_RULE_D_EMBED, " ".join(t.text for t in search)
         except Exception as e:  # noqa: BLE001 — 임베딩(질의 인코더 · DB 유사도)이 실패해도 요청은 실패시키지 않는다(LLM 실패와 같은 원칙)
             # 외부 호출(encode · similarities · product_vectors)은 모두 고르기 전에 끝나므로, 여기서는 아직 고른 것이 없다 — 그래도 비우고 순위대로
             log.warning("임베딩 단계 실패 — 태그 없이 순위대로 고른다(%s)", type(e).__name__)

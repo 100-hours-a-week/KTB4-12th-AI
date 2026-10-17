@@ -144,3 +144,28 @@ def test_embedding_failure_falls_back_to_rank_order_instead_of_failing() -> None
     got = _pick(products, 20, tags=tags, embedding=emb)
     assert got.rule == selection.POOL_RULE_D_EMBED_FAILED and got.query_text == "" and got.candidates == 0
     assert got.product_ids == _pick(products, 20).product_ids                 # 임베딩 없이 고른 결과와 같다
+
+
+class RecordingEmbedding(FakeEmbedding):
+    """질의 인코더에 들어간 검색어를 기록한다."""
+
+    def __init__(self, *a, **kw) -> None:
+        super().__init__(*a, **kw)
+        self.queries: list[str] = []
+
+    def encode(self, texts):
+        self.queries += list(texts)
+        return np.stack([np.eye(self.dim)[0] for _ in texts])
+
+
+def test_one_letter_tags_are_spelled_out_or_left_out_of_the_search() -> None:
+    """한 글자 선호 태그는 검색에서 엉뚱한 말에 붙는다(10-17 D06: '차' → 차량용품 9개) — 묶음 이름으로 풀어 쓰고, 못 풀면 검색어에서 뺀다.
+    두 글자 이상은 그대로. 모두 빠지면 임베딩 없이 순위대로(태그가 없을 때와 같다)."""
+    products = [_p(i, 1 + i % 3, 100 - i) for i in range(1, 20)]
+    emb = RecordingEmbedding({p.productId: p.categoryId for p in products})
+    tags = [selection.Tag("카테고리", "차"), selection.Tag("카테고리", "죽"), selection.Tag("브랜드", "TWG Tea")]
+    sel = _pick(products, 10, tags=tags, embedding=emb)
+    assert "죽" not in emb.queries and "차" not in emb.queries and "TWG Tea" in emb.queries and len(emb.queries) == 2
+    assert any("잎차" in q for q in emb.queries) and sel.rule == selection.POOL_RULE_D_EMBED
+    only_unknown = _pick(products, 10, tags=[selection.Tag("카테고리", "죽")], embedding=RecordingEmbedding({p.productId: p.categoryId for p in products}))
+    assert only_unknown.rule == selection.POOL_RULE_D and only_unknown.product_ids == _pick(products, 10).product_ids

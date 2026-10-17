@@ -223,7 +223,7 @@ uv run ruff check src tests tools alembic     # 린트
 
 | 묶음 | 무엇을 보나 | 필요한 것 |
 |---|---|---|
-| `tests/unit` (344개) | 업무 규칙 · 어댑터(가짜 HTTP) · 설정 · 기동 검사 | 없음 |
+| `tests/unit` (348개) | 업무 규칙 · 어댑터(가짜 HTTP) · 설정 · 기동 검사 | 없음 |
 | `tests/integration` (87개) | 마이그레이션 · 저장소 · 앱 끝에서 끝 | PostgreSQL (`PROFILING_DATABASE_URL`) |
 
 실험 도구(시험 장치 · 부하 시험 · 모델 비교 · 가짜 Backend)는 이 브랜치에 없습니다. 필요하면 프로파일링 담당에게 요청합니다.

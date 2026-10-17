@@ -15,10 +15,12 @@
            협업 이름이면 나눠서(반얀트리X하겐다즈 → 둘 다). 카탈로그 브랜드 목록은 카탈로그를 읽는 쪽이 `set_catalog_brands` 로 준다.
   IP     — IP · 캐릭터 · 별칭(ip.tsv). 상품명에 그 IP 의 이름이 나오면 IP 대표 이름, 캐릭터 이름(별칭 포함)이 나오면 캐릭터 대표 이름.
            짧거나 흔한 이름('~')은 낱말로 떨어져 있고 같은 IP 의 다른 이름이 상품명 · 브랜드에 함께 있을 때만.
-  카테고리 — 묶음 말(category_groups.tsv): 묶음 정의(소분류 · 대분류 · 종류 정규식)에 들면 `via=field`, 상품명에 묶음 이름이 나오면 `via=name`.
+  카테고리 — 묶음 말(category_groups.tsv): 묶음 정의(소분류 · 대분류 · 종류 정규식)에 들면 `via=field`, 상품명에 묶음 이름이 나오거나
+           상품명 규칙(N:, 종류 칸이 '카페세트' 처럼 뭉뚱그려진 상품 — 10-17)에 맞으면 `via=name`.
            상품 종류 자체는 `product_kind` 열에 있으므로 태그로 넣지 않는다.
 사람 태그가 대표 이름으로 안 바뀌면(어휘에 없음) 글자 대조(#13 규칙: 종류 · 소분류 · 상품명에 들어 있으면, '세트 · 장비' 꼬리 떼고)로 본다.
-두 글자 미만은 대조하지 않는다(카테고리 묶음 말 '옷' · '술' 은 예외).
+두 글자 미만은 대조하지 않는다(카테고리 묶음 말 '옷' · '술' · '차' 는 예외).
+선호 태그의 검색어(`query_text`): 한 글자 태그는 묶음 이름 · 브랜드 대표 이름으로 풀어 쓰고, 못 풀면 검색어에서 뺀다(10-17).
 
 입력은 상품 칸(브랜드 · 상품명 · 종류 · 소분류 · 대분류)뿐이고 DB · HTTP 를 쓰지 않는다.
 """
@@ -28,13 +30,13 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache, lru_cache
 from pathlib import Path
 from typing import Protocol
 
 DATA = Path(__file__).parent / "vocab_data"
-RULE = "vocab-v2"                  # 상품 태그 계산 규칙의 판 — 계산 결과가 바뀌면 올린다(test_vocab 의 지문 시험이 알려 준다)
+RULE = "vocab-v3"                  # 상품 태그 계산 규칙의 판 — 계산 결과가 바뀌면 올린다(test_vocab 의 지문 시험이 알려 준다). v3(10-17): 상품명 규칙 N: · 차 묶음
 MIN_LEN = 2                        # 이보다 짧은 태그 · 표기는 대조하지 않는다(selection.DISLIKED_MIN_LEN 과 같음)
 LOOSE_LEN = 3                      # 이 길이 이상 한글 표기만 '들어 있으면' 대조. 짧으면 낱말로 떨어져 있어야
 _NORM = re.compile(r"[\s·/_\-()\[\]'\".,&:!]+")
@@ -305,6 +307,13 @@ class Group:
     top: frozenset[str]          # 대분류 이름
     kind: re.Pattern[str] | None
     drop: re.Pattern[str] | None
+    names: re.Pattern[str] | None = None        # N: 상품명 — 종류 칸이 뭉뚱그려진 상품('카페세트' 의 아메리카노)
+    name_drop: re.Pattern[str] | None = None    # NX: 상품명에 있으면 N 으로는 묶지 않음('아메리카노 쿠폰 증정' 케이크)
+    aliases: tuple[str, ...] = ()               # 대표 이름 + 별칭 — 한 글자 선호 태그를 검색어로 풀어 쓸 때(query_text)
+
+
+def _pat(parts: list[str]) -> re.Pattern[str] | None:
+    return re.compile("|".join(parts)) if parts else None
 
 
 @cache
@@ -312,15 +321,15 @@ def _groups() -> dict[str, Group]:
     raw = {g: (a, d) for g, a, d, _ in _rows("category_groups.tsv")}
 
     def build(g: str, seen: frozenset[str] = frozenset()) -> Group:
-        sub, top, kinds, drops = set(), set(), [], []
+        sub, top, kinds, drops, names, name_drops = set(), set(), [], [], [], []
         for part in raw[g][1].split():
             tag, _, val = part.partition(":")
             if part.startswith("@") and part not in seen:
                 inner = build(part, seen | {g})
                 sub |= inner.sub
                 top |= inner.top
-                kinds += [inner.kind.pattern] if inner.kind else []
-                drops += [inner.drop.pattern] if inner.drop else []
+                for got, pat in ((kinds, inner.kind), (drops, inner.drop), (names, inner.names), (name_drops, inner.name_drop)):
+                    got += [pat.pattern] if pat else []
             elif tag == "S":
                 sub.add(norm(val))
             elif tag == "R":
@@ -329,12 +338,16 @@ def _groups() -> dict[str, Group]:
                 kinds.append(val)
             elif tag == "X":
                 drops.append(val)
-        return Group(g[1:], frozenset(sub), frozenset(top), re.compile("|".join(kinds)) if kinds else None,
-                     re.compile("|".join(drops)) if drops else None)
+            elif tag == "N":
+                names.append(val)
+            elif tag == "NX":
+                name_drops.append(val)
+        return Group(g[1:], frozenset(sub), frozenset(top), _pat(kinds), _pat(drops), _pat(names), _pat(name_drops))
     idx: dict[str, Group] = {}
     for g, (aliases, _) in raw.items():
-        grp = build(g)
-        for a in [g[1:], *_split(aliases)]:
+        words = tuple(dict.fromkeys([g[1:], *_split(aliases)]))
+        grp = replace(build(g), aliases=words)
+        for a in words:
             idx.setdefault(norm(a), grp)
     return idx
 
@@ -345,6 +358,12 @@ def _in_group(g: Group, p: Product) -> bool:
         return False
     return (norm(p.categoryName) in g.sub or norm(p.parentCategoryName) in g.top
             or bool(g.kind and kind and g.kind.search(kind)))
+
+
+def _named_in_group(g: Group, p: Product) -> bool:
+    """N: 상품명 규칙 — 종류 칸으로는 못 잡는 상품(10-17 D06: 종류 '카페세트' 의 아메리카노가 커피 비선호를 빠져나감)."""
+    name = p.name or ""
+    return bool(g.names and g.names.search(name)) and not (g.name_drop and g.name_drop.search(name))
 
 
 def _group_of(text: str) -> Group | None:
@@ -396,7 +415,7 @@ def _compute(brand: str, name: str, kind: str | None, category: str, parent: str
             continue                                         # 뺄 종류(커피잔 · 와인잔 …)는 이름에 묶음 말이 있어도 아니다
         if _in_group(g, p):
             out.setdefault(("카테고리", g.name), "field")
-        elif len(norm(g.name)) >= MIN_LEN and norm(g.name) in nn:
+        elif _named_in_group(g, p) or (len(norm(g.name)) >= MIN_LEN and norm(g.name) in nn):
             out.setdefault(("카테고리", g.name), "name")
     return tuple((a, t, v) for (a, t), v in out.items())
 
@@ -469,3 +488,21 @@ def matcher(axis: str, text: str) -> Matcher:
 
 def _never(p: Product) -> bool:
     return False
+
+
+@lru_cache(maxsize=4096)
+def query_text(axis: str, text: str) -> str | None:
+    """선호 태그 → 임베딩 검색어. 두 글자 이상은 그대로. 한 글자는 검색에서 엉뚱한 말에 붙는다(10-17 D06: '차' → 차량용품 9개) —
+    카테고리 묶음 말이면 묶음의 두 글자 이상 이름들로, 브랜드면 두 글자 이상 대표 이름으로 풀어 쓰고, 그 밖은 None(검색어에서 뺌).
+    저장되는 태그(`preferred_tags`)는 그대로다 — 바뀌는 것은 검색어뿐."""
+    if len(norm(text)) >= MIN_LEN:
+        return text
+    if axis == "브랜드":
+        words = sorted(c for c in canonicals(axis, text) if len(norm(c)) >= MIN_LEN)
+    elif axis == "카테고리":
+        g = _group_of(text)
+        one = text.strip()                               # 그 한 글자가 낱말로 남은 별칭('차 선물')은 같은 혼동을 다시 부른다('새차선물')
+        words = [a for a in g.aliases if len(norm(a)) >= MIN_LEN and one not in a.split()] if g else []
+    else:
+        words = []
+    return " ".join(words) or None

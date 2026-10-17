@@ -120,13 +120,15 @@ def test_rule_fingerprint_pins_rule_version():
               _p(brand="포맨트", name="포맨트 헬로키티 고체향수"), _p(name="카카오프렌즈 콘 인형"), _p(name="실리콘 콘 받침"),
               _p(kind="기타캠핑용품", cat="스포츠·레저용품", top="취미·여가"), _p(kind="TV", cat="영상·음향기기", top="디지털·가전"),
               _p(brand="레고트", name="레고트 텀블러"), _p(kind="한우 선물세트", cat="정육·수산", top="식품"),
-              _p(brand="지티기어", name="로지텍 G29 레이싱휠 PS5 PS4 PC"), _p(brand="반얀트리X하겐다즈", name="케이크")]
+              _p(brand="지티기어", name="로지텍 G29 레이싱휠 PS5 PS4 PC"), _p(brand="반얀트리X하겐다즈", name="케이크"),
+              _p(kind="카페세트", cat="커피·차·음료", name="아메리카노 R 2잔"), _p(kind="차 선물세트", cat="커피·차·음료", name="제주 티 선물세트"),
+              _p(kind="차량용 방향제", cat="홈프래그런스", name="새차선물 차량용 방향제"), _p(kind="스위터 꿀스틱", name="꿀스틱 15포")]
     got = hashlib.sha256(_json.dumps([sorted(_tags(p)) for p in sample], ensure_ascii=False).encode()).hexdigest()[:16]
-    assert (vocab.RULE, got) == ("vocab-v2", PINNED), f"규칙 결과가 바뀜 — RULE 을 올리고 PINNED 를 {got} 로"
+    assert (vocab.RULE, got) == ("vocab-v3", PINNED), f"규칙 결과가 바뀜 — RULE 을 올리고 PINNED 를 {got} 로"
     assert len(vocab.tags_sha256()) == 64
 
 
-PINNED = "36a8db2a6bc7a379"   # vocab-v2 결과 지문(10-16 — 기기 이름 · 협업 반영)
+PINNED = "7013ec93a84c098f"   # vocab-v3 결과 지문(10-17 — 상품명 규칙 N: · 차 묶음)
 
 
 def test_device_names_and_collab_brands():
@@ -144,3 +146,34 @@ def test_device_names_and_collab_brands():
         assert {("브랜드", "반얀트리", "field"), ("브랜드", "하겐다즈", "field")} <= _tags(_p(brand="반얀트리X하겐다즈", name="케이크"))
     finally:
         vocab.set_catalog_brands([])
+
+
+# ---- 10-17 vocab-v3: 상품명 규칙(N:) · 차 묶음 · 한 글자 선호 태그 검색어
+
+def test_coffee_group_catches_cafe_sets_by_name_but_not_coupons_or_tea():
+    """종류 칸이 '카페세트' 라 커피 비선호를 빠져나가던 아메리카노 세트(10-17 D06 1위)를 상품명으로 잡는다."""
+    cafe = _p(kind="카페세트", cat="커피·차·음료", name="아메리카노 R 2잔")
+    assert ("카테고리", "커피", "name") in _tags(cafe) and hit("카테고리", "커피", cafe)
+    assert hit("카테고리", "커피", _p(kind="카페세트", cat="케이크", name="아이스 카라멜 마키아또 T + 아이스 카페 모카 T + 하트 파이"))
+    assert not hit("카테고리", "커피", _p(kind="케이크", cat="케이크", name="고디바 다크 초콜릿 케이크 + 아메리카노 쿠폰 증정"))   # 쿠폰은 케이크
+    assert not hit("카테고리", "커피", _p(kind="차 선물세트", cat="커피·차·음료", name="오설록 콜드브루 티 세트"))            # 콜드브루 티 = 차
+    assert not hit("카테고리", "커피", _p(kind="카페세트", cat="케이크", name="마카롱 1종 + (ICE)딸기라떼"))                  # 커피 없음
+
+
+def test_tea_group_is_tea_and_never_car_goods():
+    tea = _p(kind="차 선물세트", cat="커피·차·음료", name="제주 티 4종 선물세트")
+    assert hit("카테고리", "차", tea) and hit("카테고리", "차 종류", tea) and hit("카테고리", "차", _p(kind="홍차", name="얼그레이"))
+    assert hit("카테고리", "꿀", _p(kind="스위터 꿀스틱", name="꿀스틱 15포")) and not hit("카테고리", "꿀", _p(kind="바디필로우", name="꿀잠 바디필로우"))
+    assert not hit("카테고리", "차", _p(kind="차량용 방향제", cat="홈프래그런스", name="새차선물 차량용 방향제"))
+    assert not hit("카테고리", "차", _p(kind="주차용품/차량장식용품", cat="차량용품", name="차 스크래치 방지 도어가드"))
+
+
+def test_query_text_spells_out_one_letter_preferred_tags():
+    """선호 태그 검색어 — 두 글자 이상은 그대로, 한 글자는 묶음 이름 · 브랜드 대표 이름으로, 못 풀면 None(검색어에서 뺌)."""
+    assert vocab.query_text("카테고리", "홍차") == "홍차" and vocab.query_text("브랜드", "TWG Tea") == "TWG Tea"
+    tea = vocab.query_text("카테고리", "차")
+    assert tea and "잎차" in tea and "차량" not in tea and "차 선물" not in tea     # '차' 가 낱말로 남은 별칭은 빼야 '새차선물' 에 안 붙는다
+    assert vocab.query_text("카테고리", "옷") == "의류 의복 옷가지"
+    assert "맥(MAC)" in (vocab.query_text("브랜드", "맥") or "")
+    assert vocab.query_text("카테고리", "꿀") == "벌꿀 허니"                            # 꿀 묶음(10-17 재생 시험: 빼면 꿀스틱이 빠졌다)
+    assert vocab.query_text("카테고리", "죽") is None and vocab.query_text("IP", "꿀") is None   # '죽' 은 '가죽' 과 겹쳐 묶음을 두지 않음
