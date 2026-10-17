@@ -114,7 +114,8 @@ def test_profile_tagger_failure_still_delivers_without_tags(caplog) -> None:
         out, _ = _profile(_rq(pref="아무거나"), products, tagger=FakeTagger(fail=True))
     assert out.status is RunStatus.RESULT_READY and out.validation.preferred_tags == [] and out.prompt_version is None
     assert out.search.product_ids == [1, 2, 3, 4, 5]
-    assert any(r.message.startswith("tag_extract fail:unknown") and r.exc_info for r in caplog.records)   # 분류 못 한 실패는 스택까지
+    assert any(r.message.startswith("tag_extract fail:unknown") and "err=TimeoutError" in r.message for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)  # 실패 분류만 남기고 입력이 실릴 수 있는 traceback은 기록하지 않는다.
 
 
 def test_profile_skips_tagger_when_no_text_input() -> None:

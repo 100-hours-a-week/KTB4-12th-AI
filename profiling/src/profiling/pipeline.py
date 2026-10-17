@@ -165,7 +165,8 @@ def needs_model(rq: ProfileRequest) -> bool:
 
 
 def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int, catalog_version_id: UUID, *,
-               dislike_mode: DislikeMode = DislikeMode.EXCLUDE, scores: list[CategoryScore] | None = None) -> SearchResult:
+               dislike_mode: DislikeMode = DislikeMode.EXCLUDE, scores: list[CategoryScore] | None = None,
+               disliked_tags: Sequence[selection.Tag] = ()) -> SearchResult:
     """상품을 **점수 내림차순**으로 pool_size개. 점수 = 인기 + 리뷰 별점 편향 (+ 비선호 감점). 비선호는 빼거나(EXCLUDE) 감점(PENALTY).
 
     점수 (두 모드 공통, v2 2단계 · 가이드 10-11 보강 A·D):
@@ -200,7 +201,9 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
     """
     ranked = rank_products(rq, products, dislike_mode=dislike_mode, scores=scores)
     seen = reviewed_ids(rq)                         # 리뷰한 상품(이미 받은 선물)은 추천하지 않는다(10-12)
-    picked = [s.product.productId for s in ranked if s.product.productId not in seen][:pool_size]
+    # 순위를 계산한 뒤 명시적 비선호 태그를 제외해 기존 인기 백분위와 상대 순서를 보존한다.
+    picked = [s.product.productId for s in ranked if s.product.productId not in seen
+              and not any(selection.disliked_hit(s.product, tag) for tag in disliked_tags)][:pool_size]
     return SearchResult(product_ids=picked, query_text="", catalog_version_id=catalog_version_id)
 
 
@@ -221,7 +224,8 @@ def make_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int,
     """
     if pool_strategy is PoolStrategy.S0:
         rule = POOL_RULE_V2 if dislike_mode is DislikeMode.EXCLUDE else POOL_RULE_V2_PENALTY
-        return build_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores), rule
+        return build_pool(rq, products, pool_size, catalog_version_id, dislike_mode=dislike_mode, scores=scores,
+                          disliked_tags=disliked_tags), rule
     ranked = rank_products(rq, products, dislike_mode=dislike_mode, scores=scores)
     sel = selection.select_pool(ranked, pool_size, allow_disliked=dislike_mode is DislikeMode.PENALTY, tags=tags, embedding=embedding,
                                 exclude_ids=reviewed_ids(rq), disliked_tags=disliked_tags)
@@ -330,16 +334,15 @@ def profile(
     try:
         store.save(ProfileOutcome(recipient_user_id=rid, source_version=sv, status=RunStatus.RUNNING, input_hash=h,
                                   validator_version=VALIDATOR_VERSION_V1))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 저장 장애는 FAILED로 반환하며 입력 보호를 위해 traceback을 남기지 않는다.
         log.error("profile recipient=%s source_version=%s 실행 기록(RUNNING) 저장 실패: %s", rid, sv, _brief(e))
-        log.debug("실행 기록 저장 실패 상세", exc_info=True)
         return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {_brief(e)}", save=False)
 
     # 1) 활성 카탈로그 — 한 요청 안에서 한 번만 잡아 끝까지 같은 버전을 쓴다 (4단계 snapshot 원칙)
     try:
         catalog_version_id, products = catalog.active()
     except NoActiveCatalog as e:
-        return _fail(rq, store, ErrorCode.NO_ACTIVE_CATALOG, f"활성 카탈로그 없음: {e}")
+        return _fail(rq, store, ErrorCode.NO_ACTIVE_CATALOG, f"활성 카탈로그 없음: {_brief(e)}")
 
     try:
         # 2) 리뷰 별점 → 소분류 편향 + (추출기가 있으면) 글 · 취향 → 4축 태그(LLM 한 번 → 코드 검증기)
@@ -384,16 +387,15 @@ def profile(
             prompt_version=prompt_version, validator_version=validator_version,
             tag_status=tag_status, llm_cost_usd=llm_cost,
         )
-    except Exception as e:  # 업무 단계의 어떤 오류도 FAILED로 기록 — 백그라운드에서 조용히 죽지 않게
-        log.exception("profile recipient=%s source_version=%s 실패", rid, sv)
+    except Exception as e:  # noqa: BLE001 — 업무 오류는 FAILED로 반환하며 입력 보호를 위해 traceback을 남기지 않는다.
+        log.error("profile recipient=%s source_version=%s 실패: %s", rid, sv, _brief(e))
         return _fail(rq, store, ErrorCode.PIPELINE_ERROR, _brief(e))
 
     # 5) 실행 기록 갱신 — RESULT_READY + 콜백 본문. 저장 실패는 결과를 FAILED로 (콜백을 보냈는데 우리 쪽에 기록이 없는 상태를 만들지 않기 위해)
     try:
         store.save(outcome)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 저장 장애는 FAILED로 반환하며 입력 보호를 위해 traceback을 남기지 않는다.
         log.error("profile recipient=%s 저장 실패: %s", rid, _brief(e))
-        log.debug("실행 기록 저장 실패 상세", exc_info=True)
         return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {_brief(e)}", save=False)
 
     # 6) 수신자 프로필 — 한 사람당 한 행. 낮은 버전이 늦게 오면 DB가 무시한다(should_replace와 같은 규칙을 SQL로).
@@ -402,9 +404,8 @@ def profile(
     _log_change(recipient_store, new_profile)
     try:
         recipient_store.upsert(new_profile)
-    except Exception as e:   # DB 오류의 둘째 줄부터(DETAIL: Failing row contains …)에는 정리본 글이 실릴 수 있다 → 첫 줄만 남긴다
+    except Exception as e:  # noqa: BLE001 — 저장 장애는 FAILED로 반환하며 입력 보호를 위해 traceback을 남기지 않는다.
         log.error("profile recipient=%s 수신자 프로필 저장 실패: %s", rid, _brief(e))
-        log.debug("수신자 프로필 저장 실패 상세", exc_info=True)
         return _fail(rq, store, ErrorCode.STORE_FAILED, f"프로필 저장 실패: {_brief(e)}")
 
     log.info("profile recipient=%s source_version=%s → RESULT_READY pool=%d/%d disliked=%d scores=%d tags=%d disliked_tags=%d tagger=%s "
@@ -467,11 +468,11 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
         reply = tagger.extract(spec.system, prompt, spec.schema)
     except TagExtractError as e:                     # 분류된 실패 — 시간 초과 · 연결 실패 · 모델 없음 · 잘림
         log.warning("tag_extract fail:%s %s wall_ms=%.0f %s err=%s — 태그 없이 진행", e.kind, head, (time.perf_counter() - t0) * 1000,
-                    _usage_fields(e.usage), e)
+                    _usage_fields(e.usage), _brief(e))
         return TagRun(empty, [], None, f"fail:{e.kind}", e.usage)
-    except Exception as e:                           # 분류 못 한 실패 — 스택을 남긴다(메시지엔 URL · 모델만, 원문 없음)
+    except Exception as e:  # noqa: BLE001 — 기존 태그 없는 fallback을 유지하며 입력 보호를 위해 traceback을 남기지 않는다.
         log.warning("tag_extract fail:unknown %s wall_ms=%.0f err=%s — 태그 없이 진행", head, (time.perf_counter() - t0) * 1000,
-                    type(e).__name__, exc_info=True)
+                    type(e).__name__)
         return TagRun(empty, [], None, "fail:unknown")
     wall_ms = (time.perf_counter() - t0) * 1000
     raw, usage = (reply.text, reply.usage) if isinstance(reply, TagReply) else (str(reply), None)
@@ -496,9 +497,8 @@ def _counts(c: Counter) -> str:
 
 
 def _brief(e: BaseException) -> str:
-    """실행 기록 · 로그에 남길 오류 한 줄 — 종류 + 첫 줄만(200자). DB 오류의 DETAIL · 바인드 값에 정리본 글이 실릴 수 있어서(10-17)."""
-    first = (str(e).splitlines() or [""])[0][:200]
-    return f"{type(e).__name__}: {first}" if first else type(e).__name__
+    """실행 기록 · 로그에는 예외 종류만 남긴다. 메시지 첫 줄에도 입력·바인드 값이 실릴 수 있다."""
+    return type(e).__name__
 
 
 def _fail(rq: ProfileRequest, store: ProfileRunStore, code: ErrorCode, reason: str, *, save: bool = True) -> ProfileOutcome:
@@ -508,8 +508,7 @@ def _fail(rq: ProfileRequest, store: ProfileRunStore, code: ErrorCode, reason: s
     if save:
         try:
             store.save(outcome)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — FAILED 반환을 보장하며 입력 보호를 위해 traceback을 남기지 않는다.
             log.error("profile recipient=%s FAILED 기록 저장도 실패: %s", rq.recipient_user_id, _brief(e))
-            log.debug("FAILED 기록 저장 실패 상세", exc_info=True)
     log.warning("profile recipient=%s source_version=%s → FAILED %s: %s", rq.recipient_user_id, rq.source_version, code, reason)
     return outcome

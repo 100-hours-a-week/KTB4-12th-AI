@@ -6,11 +6,12 @@ from uuid import UUID
 import pytest
 
 from profiling import pipeline, selection
-from profiling.ports import NoActiveCatalog
+from profiling.ports import NoActiveCatalog, TagExtractError
 from profiling.schemas import ProductRecord, ProfileExtractRequest
 from profiling.types import (
     CategoryScore,
     DislikedCategory,
+    ErrorCode,
     ProfileRequest,
     Review,
     RunStatus,
@@ -188,6 +189,30 @@ def test_pool_without_parent_info_falls_back_to_leaf_only() -> None:
 
 def test_pool_size_cap() -> None:
     assert len(pipeline.build_pool(_rq(), PRODUCTS, 5, CV).product_ids) == 5
+
+
+@pytest.mark.parametrize("mode", list(pipeline.DislikeMode))
+@pytest.mark.parametrize("pool_size", [2, 30])
+@pytest.mark.parametrize("with_disliked_tag", [False, True])
+def test_s0_disliked_tags_preserve_ranking_and_category_policy(mode, pool_size, with_disliked_tag) -> None:
+    """태그만 하드 제외하고 기존 점수·카테고리 감점·리뷰 제외·개수 제한은 유지한다."""
+    products = [
+        _product(1, 10, "일반", views=100).model_copy(update={"brand": "소니"}),
+        _product(2, 10, "일반", views=60), _product(3, 12, "선호", views=40),
+        _product(4, 20, "비선호", views=20), _product(5, 10, "일반", views=0),
+        _product(6, 10, "일반", views=1000, availability="unavailable"),
+    ]
+    rq = _rq(disliked=[(20, "비선호")], reviews=[Review(product_id=5, rating=3)])
+    scores = [CategoryScore(category_id=12, n=3, score_sum=3)]  # 편향 0.6: 3번(1.6)이 2번(1.5)보다 앞
+    tags = [selection.Tag("브랜드", "소니")] if with_disliked_tag else []
+    result, rule = pipeline.make_pool(rq, products, pool_size, CV, dislike_mode=mode, scores=scores,
+                                      pool_strategy=pipeline.PoolStrategy.S0, disliked_tags=tags)
+    expected = [3, 2] if with_disliked_tag else [1, 3, 2]
+    if mode is pipeline.DislikeMode.PENALTY:
+        expected.append(4)
+    assert result.product_ids == expected[:pool_size]
+    assert result.catalog_version_id == CV and result.query_text == ""
+    assert rule == (pipeline.POOL_RULE_V2 if mode is pipeline.DislikeMode.EXCLUDE else pipeline.POOL_RULE_V2_PENALTY)
 
 
 # ---------------------------------------------------------------- build_pool — 비선호 감점(PENALTY, v2) · 10-11 결정
@@ -442,14 +467,70 @@ def test_profile_recipient_store_failure_is_failed_no_callback() -> None:
     assert store.history[-1] is RunStatus.FAILED                                  # 실행 기록도 FAILED로 되돌림
 
 
-def test_store_failure_reason_keeps_only_the_first_line() -> None:
-    """DB 오류의 둘째 줄(DETAIL: Failing row contains …)에는 정리본 글이 실릴 수 있다 — 실행 기록 사유엔 첫 줄만(10-17)."""
-    class DetailStore(FakeRecipientStore):
-        def upsert(self, profile):
-            raise RuntimeError('new row violates check constraint "x"\nDETAIL: Failing row contains (9073, 아기가 좋아해요)')
-    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=FakeStore(), recipient_store=DetailStore())
-    assert out.status is RunStatus.FAILED and "check constraint" in out.failure_reason
-    assert "DETAIL" not in out.failure_reason and "아기가" not in out.failure_reason
+@pytest.mark.parametrize("stage,code,history", [
+    ("running", ErrorCode.STORE_FAILED, []),
+    ("result", ErrorCode.STORE_FAILED, [RunStatus.RUNNING]),
+    ("recipient", ErrorCode.STORE_FAILED, [RunStatus.RUNNING, RunStatus.RESULT_READY, RunStatus.FAILED]),
+    ("pipeline", ErrorCode.PIPELINE_ERROR, [RunStatus.RUNNING, RunStatus.FAILED]),
+    ("failed_save", ErrorCode.PIPELINE_ERROR, [RunStatus.RUNNING]),
+    ("catalog", ErrorCode.NO_ACTIVE_CATALOG, [RunStatus.RUNNING, RunStatus.FAILED]),
+])
+def test_failure_reason_and_debug_logs_omit_exception_text(stage, code, history, monkeypatch, caplog) -> None:
+    """예외 첫 줄과 DEBUG traceback에도 입력이 들어갈 수 있다. 상태 전이는 그대로 둔다."""
+    marker = "SYNTHETIC_PRIVATE_PAYLOAD_97531"
+    catalog, store, recipients = FakeCatalog(PRODUCTS), FakeStore(), FakeRecipientStore()
+
+    def fail(*args, **kwargs):
+        error = NoActiveCatalog if stage == "catalog" else RuntimeError
+        raise error(marker + "\nDETAIL: " + marker)
+
+    save = store.save
+
+    def save_or_fail(outcome):
+        failed_status = {"running": RunStatus.RUNNING, "result": RunStatus.RESULT_READY, "failed_save": RunStatus.FAILED}.get(stage)
+        if outcome.status is failed_status:
+            fail()
+        save(outcome)
+
+    monkeypatch.setattr(store, "save", save_or_fail)
+    if stage == "recipient":
+        monkeypatch.setattr(recipients, "upsert", fail)
+    elif stage in ("pipeline", "failed_save"):
+        monkeypatch.setattr(pipeline, "make_pool", fail)
+    elif stage == "catalog":
+        monkeypatch.setattr(catalog, "active", fail)
+    with caplog.at_level("DEBUG", logger="profiling.pipeline"):
+        out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=catalog, store=store, recipient_store=recipients)
+    assert out.status is RunStatus.FAILED and out.failure_code is code and out.search is None
+    assert store.history == history and not recipients.rows
+    assert marker not in out.failure_reason and marker not in caplog.text
+    assert all(marker not in row.model_dump_json() for row in store.saved.values())
+    records = [record for record in caplog.records if record.name == "profiling.pipeline"]
+    assert records and all(record.exc_info is None for record in records)
+    assert ("NoActiveCatalog" if stage == "catalog" else "RuntimeError") in out.failure_reason
+
+
+@pytest.mark.parametrize("classified", [False, True])
+def test_tagger_errors_keep_fallback_without_logging_exception_text(classified, caplog) -> None:
+    marker = "SYNTHETIC_PRIVATE_TAGGER_97531"
+
+    class BrokenTagger:
+        model = "synthetic"
+
+        def extract(self, system, prompt, schema):
+            if classified:
+                raise TagExtractError("timeout", marker)
+            raise RuntimeError(marker)
+
+    store, recipients = FakeStore(), FakeRecipientStore()
+    with caplog.at_level("DEBUG", logger="profiling.pipeline"):
+        out = pipeline.profile(_rq(pref="캠핑 선물을 좋아해요"), catalog=FakeCatalog(PRODUCTS), store=store,
+                               recipient_store=recipients, tagger=BrokenTagger())
+    assert out.status is RunStatus.RESULT_READY and out.failure_code is None
+    assert out.tag_status == ("fail:timeout" if classified else "fail:unknown")
+    assert store.history == [RunStatus.RUNNING, RunStatus.RESULT_READY] and recipients.get(9073) is not None
+    assert marker not in caplog.text and marker not in out.model_dump_json()
+    assert all(record.exc_info is None for record in caplog.records if record.name == "profiling.pipeline")
 
 
 # ---------------------------------------------------------------- 바뀐 내용 로그(profile_change, 10-15 C안)
