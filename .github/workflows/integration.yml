@@ -45,4 +45,4 @@ jobs:
 
 # No provider secrets, production DB, model download, deployment, or automatic paid run.
 # Native PG18 + pgvector/CPU assets and Compose startup are separate release gates;
-# see integration/QUICKSTART.md and RELEASE_READINESS.md.
+# see integration/README.md and integration/RECOVERY.md.

@@ -1,10 +1,10 @@
 # 백엔드 ↔ AI 채팅 연동 명세
 
-대화를 만들 때 senderUserId·recipientUserId를 보내고, 질문을 보낼 때 message를 보냅니다. 답변과 처리 상태는 Turn으로 반환됩니다. 상품 추천이 있으면 카드에 상품 ID와 추천 이유를 담습니다. 아래 예시는 현재 배포 API의 필수 필드로 구성한 기본 요청입니다.
+대화를 만들 때 senderUserId·recipientUserId를 보내고, 질문을 보낼 때 message를 보냅니다. 답변과 처리 상태는 Turn으로 반환됩니다. 상품 추천이 있으면 카드에 상품 ID와 추천 이유를 담습니다. 아래 예시는 필수 필드로 구성한 기본 요청입니다.
 
 ## 1. 연결과 인증
 
-- 서비스 API Base URL: `https://wjo-ai-chat-demo.hf.space/v1/chat/conversations`
+- 서비스 API Base URL: `<팀 서버 HTTPS origin>/v1/chat/conversations`
 - 인증: 모든 요청에 `Authorization: Bearer <AI_SERVICE_TOKEN>`
 - JSON PUT: `Content-Type: application/json`; SSE GET: `Accept: text/event-stream`
 
@@ -133,31 +133,28 @@ Heartbeat는 약 10초마다 `: keep-alive` 주석과 빈 줄로 오며 id는 �
 ```json
 {"turnId":"11111111-1111-4111-8111-111111111111","status":"FAILED","message":"3만원 이하 선물 추천해줘","blocks":[],"lastEventId":1,"error":{"message":"답변 생성에 실패했습니다."}}
 ```
-HF gateway의 502/503은 위 JSON 형식과 다를 수 있으므로 Content-Type과 HTTP 상태도 확인합니다. 오류 식별에는 error.traceId를 사용합니다.
+앞단 프록시의 502/503은 위 JSON 형식과 다를 수 있으므로 Content-Type과 HTTP 상태도 확인합니다. 오류 식별에는 error.traceId를 사용합니다.
 
-고정 응답으로 통신을 확인하는 방법은 [연동 테스트](https://wjo-ai-chat-demo.hf.space/guide#testing)를 참고합니다.
-
+고정 응답으로 통신을 확인하는 방법은 [연동 테스트](TESTING.md)를 참고합니다.
 
 ## 5. 요청 제한과 자원 보호
 
-생성 제한과 HTTP/SSE 자원 보호는 별도입니다. 아래는 소스 기본 설정이며 측정된 처리량이나 응답 시간 약속이 아닙니다. HF 실행 소스의 기준은 2026-10-13에 확인한 commit `1266d9693e2067a6b333eeaa0e8ec94fe266ea14`, revision `408cc2e36841671c`입니다. 이 문서의 보호 패치 적용 여부는 현재 `/healthz` revision과 해당 배포 검증 기록으로 확인합니다. 오래된 로컬 release 파일만으로 실행 버전이나 설정을 판단하지 않습니다.
+아래 값은 소스 기본값입니다. 실제 배포 설정을 확인하고, 사용자별 업무 할당량이나 서버 처리량으로 해석하지 마세요.
 
 | 구분 | 적용 범위·기본 설정 | 초과·복구 |
 |---|---|---|
-| 생성 중인 턴 | 대화당 1턴; 같은 대화 DB 전체 `CHAT_MAX_ACTIVE=4` | 같은 대화의 추가 턴은 409, DB 전체 동시 한도는 429 |
-| 최근 24시간 턴 | 같은 DB 전체 `CHAT_DAILY_LIMIT=200`; 자정 초기화가 아닌 최근 24시간 | 429; 실패·취소·무료 protocolFixture도 저장한 신규 턴이면 포함 |
-| 접수 전 대기 작업 | Runtime의 미접수 작업 `CHAT_MAX_PENDING_ADMISSIONS=8` | 새 작업/저장/모델 호출 전에 503과 `Retry-After`; 영속 FIFO 큐나 대기 순번은 제공하지 않음 |
-| SSE 연결 | Runtime 전체 `CHAT_MAX_SSE_CONNECTIONS=32`, 같은 turnId에 `CHAT_MAX_SSE_PER_TURN=4` | 연결 시작 전 503과 `Retry-After`; 기존 커서로 다시 연결 |
-| 자원 보호 재시도 간격 | `CHAT_RESOURCE_RETRY_AFTER_SECONDS=2` | 재접수 성공 시각 보장이 아닌 최소 대기 안내; 횟수 제한·간격 증가를 함께 적용 |
+| 생성 중인 턴 | 대화당 1턴; 같은 DB 전체 `CHAT_MAX_ACTIVE=4` | 같은 대화는 409, DB 전체 한도는 429 |
+| 최근 24시간 턴 | 같은 DB 전체 `CHAT_DAILY_LIMIT=200`; 자정 초기화가 아닌 최근 24시간 | 429. 실패·취소·무료 protocolFixture도 저장한 신규 턴이면 포함 |
+| 접수 전 대기 작업 | Runtime의 미접수 작업 `CHAT_MAX_PENDING_ADMISSIONS=8` | 새 작업·저장·모델 호출 전에 503과 Retry-After. 영속 대기열은 없음 |
+| SSE 연결 | Runtime 전체 `CHAT_MAX_SSE_CONNECTIONS=32`, 같은 턴 `CHAT_MAX_SSE_PER_TURN=4` | 연결 시작 전 503과 Retry-After. 기존 cursor로 재연결 |
+| 재시도 간격 | `CHAT_RESOURCE_RETRY_AFTER_SECONDS=2` | 최소 대기 안내. 횟수 제한과 간격 증가를 함께 적용 |
 
-생성·24시간 한도는 Store를 실행하는 프로세스에서 적용합니다. 현재 HF의 bridge 구성에서는 AI 소유 NUC 저장 worker의 설정이며 HF Space 변수만 바꿔도 이 값이 바뀐다고 가정하지 않습니다. 2026-10-13 읽기 전용 확인에서 해당 저장 worker는 4/200 설정이었습니다. 접수/SSE 보호는 단일 활성 Runtime의 프로세스 설정이며 제품·무료 테스트 경로가 함께 사용합니다. 현재 실행은 단일 worker/DB lease 전제이고 worker를 늘려 용량이 비례한다고 가정하지 않습니다.
+생성·24시간 한도는 Store 프로세스, 접수·SSE 제한은 단일 활성 Runtime에 적용됩니다. 제품·무료 테스트 경로가 한도를 함께 사용하며 설정값은 양의 정수여야 합니다. worker 수를 늘려 용량이 비례한다고 가정하지 않습니다.
 
-보호 기본값 8은 접수 중 저장소·모델 메타데이터를 기다리는 작업을 제한하면서 기존 생성 4건과 별도 여유를 두기 위한 값입니다. SSE의 턴당 4는 프록시·탭·재연결의 일시 중첩을 허용하고, 전체 32는 저장소 조회 연결의 상한을 두기 위한 값입니다. 설정은 양의 정수여야 하며 사용자별 업무 할당량이나 측정된 서버 용량을 뜻하지 않습니다.
+진행 중인 동일 UUID·동일 body 재전송은 기존 접수 작업을 공유합니다. 종료 턴 PUT도 접수 제한에 걸릴 수 있으므로 GET으로 저장 상태를 확인합니다. 거절된 새 요청은 턴이나 유료 호출을 만들지 않으며 저장된 종료 턴을 다시 생성하지 않습니다.
 
-이미 Runtime이 소유한 동일 UUID·동일 body의 재전송은 원래 접수 작업을 공유합니다. 저장된 종료 턴을 새로 조회하는 PUT도 접수 보호가 가득 차면 먼저 503을 받을 수 있으므로 GET 턴으로 저장 상태를 확인하고 같은 UUID/body를 유지합니다. 상한 때문에 거절된 새 요청은 턴이나 유료 호출을 만들지 않습니다. 이미 저장된 실패·취소·완료 턴은 재생성하지 않습니다.
+SSE 종료·연결 끊김·저장소 오류 때 연결 슬롯을 회수합니다. SSE를 닫아도 생성은 계속되므로 취소는 cancellation PUT으로 요청하세요. 여러 탭이나 재연결은 모델 호출 수를 늘리지 않지만 연결·저장소 조회 자원을 사용합니다.
 
-SSE의 종료·연결 끊김·저장소 오류 때 연결 슬롯을 회수하고, 구독자와 실행 작업이 없는 턴의 알림 자원을 정리합니다. SSE를 닫아도 생성은 계속되며 취소는 기존 cancellation PUT을 사용합니다. 연결을 반복하거나 여러 탭을 열면 모델 호출 수는 늘지 않지만 저장소 조회와 연결 자원을 사용합니다. 생성 횟수 제한을 재연결 연결 수 제한으로 해석하지 않습니다.
+HTTP 오류는 `{message,error:{code,traceId}}`, 실패 턴은 `error.message` 형식입니다. 일일 한도·비용 부족·일시 혼잡을 구분하는 추가 오류 필드는 없습니다. 모든 429에 Retry-After가 있는 것은 아니며, 202 이후 비용·공급자·저장소 오류는 FAILED 또는 연결 중단으로 나타날 수 있습니다. 완료는 HTTP 200/EOF가 아니라 저장된 턴 상태로 확인합니다.
 
-기존 HTTP 오류의 `{message,error:{code,traceId}}`, 429 `TOO_MANY_REQUESTS`, 503 `SERVICE_UNAVAILABLE`와 최종 FAILED의 `error.message` 형식은 유지합니다. 일일 한도·비용 부족·일시 혼잡을 구분하는 새로운 오류 필드는 아직 합의하지 않았습니다. 모든 429에 Retry-After가 있다고 가정하지 않으며 202 이후 비용/공급자/저장소 오류는 HTTP 오류 대신 FAILED 또는 연결 중단으로 나타날 수 있습니다. HTTP 200/EOF로 완료를 판정하지 않고 저장된 턴 상태와 커서를 복구합니다.
-
-사용자별 신규 턴 한도·동시 처리 한도, 공급자 계정별 요청 속도와 확장된 제한 사유 계약은 별도 합의 항목입니다. 체험 화면의 사용자별 30회/시간 PUT 제한은 BE 서비스 API의 업무 할당량이 아닙니다. 같은 ID 재시도도 체험 PUT 요청 제한에는 포함됩니다. 누적 USD 5 원장은 기존 실험 비용 계정이며 사용자 크레딧 정책이 아닙니다. 실패·취소·연결 종료만으로 미확정 모델 비용 예약을 환급하거나 초기화하지 않습니다.
+체험 화면의 사용자별 30회/시간 PUT 제한에는 같은 ID 재시도도 포함됩니다. BE 서비스 API의 업무 할당량과는 별개입니다. 사용자별 신규 턴·동시 처리 한도와 공급자별 속도 제한은 별도 합의 항목입니다. 기존 누적 USD 5 원장도 사용자 크레딧 정책이 아니며 실패·취소·연결 종료만으로 미확정 비용 예약을 환급하거나 초기화하지 않습니다.
