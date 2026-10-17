@@ -42,6 +42,27 @@ from profiling.supervisor import Supervisor
 
 log = logging.getLogger(__name__)
 
+
+class _ASGIExceptionLogFilter(logging.Filter):
+    """Starlette가 500 전송 뒤 재전파한 예외도 Uvicorn에서 종류만 기록한다. 다른 서버 진단은 유지한다."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.error" or not isinstance(record.msg, str) or record.msg.rstrip() != "Exception in ASGI application":
+            return True
+        error_type = record.exc_info[0].__name__ if record.exc_info and record.exc_info[0] else "UnknownException"
+        record.msg = "Exception in ASGI application: %s"
+        record.args = (error_type,)
+        record.exc_info = None
+        record.exc_text = None  # 앞선 formatter가 만든 traceback 캐시도 제거한다.
+        record.stack_info = None
+        record.message = record.getMessage()
+        return True
+
+
+_asgi_error_log = logging.getLogger("uvicorn.error")
+if not any(isinstance(f, _ASGIExceptionLogFilter) for f in _asgi_error_log.filters):
+    _asgi_error_log.addFilter(_ASGIExceptionLogFilter())
+
 # 이 코드가 기대하는 DB 마이그레이션 판 — alembic head 와 같아야 한다(tests/unit/test_ops_endpoints.py 가 지킨다).
 # 새 마이그레이션을 더하면 여기도 올린다. /readyz 와 STRICT_STARTUP 이 이 값과 DB 의 alembic_version 을 비교한다(10-15).
 # 비교는 "DB 판 ≥ 기대 판"이다 — 롤링 배포는 마이그레이션을 먼저 돌리므로 그동안 옛 Task 는 한 판 높은 DB 위에서 돈다.
