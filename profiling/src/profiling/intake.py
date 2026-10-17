@@ -148,8 +148,8 @@ def run_and_callback(
         outcome = pipeline.profile(rq, catalog=catalog, store=store, recipient_store=recipient_store, pool_size=pool_size,
                                    dislike_mode=pipeline.DislikeMode(dislike_mode), pool_strategy=pipeline.PoolStrategy(pool_strategy),
                                    tagger=tagger, embedding=embedding, tag_spec=tag_spec)
-    except Exception:  # 백그라운드에서는 무엇이든 잡아 기록한다
-        log.exception("profile 실패 recipient=%s source_version=%s", rid, rq.source_version)
+    except Exception as e:  # noqa: BLE001 — 백그라운드 예외는 격리하며 입력이 실릴 수 있는 traceback은 남기지 않는다.
+        log.error("profile 실패 recipient=%s source_version=%s: %s", rid, rq.source_version, type(e).__name__)
         return
 
     if outcome.status != RunStatus.RESULT_READY:
@@ -199,8 +199,8 @@ def _send_and_record(
     try:
         store.save(outcome.model_copy(update={"status": res.status, "callback_attempts": outcome.callback_attempts + attempts,
                                               "failure_code": res.code, "failure_reason": res.message}))
-    except Exception:
-        log.exception("7.7 콜백 결과 저장 실패 recipient=%s source_version=%s (콜백은 %s)", rid, sv, res.status)
+    except Exception as e:  # noqa: BLE001 — 송신이 끝난 콜백을 반복하지 않으며 입력이 실릴 수 있는 traceback은 남기지 않는다.
+        log.error("7.7 콜백 결과 저장 실패 recipient=%s source_version=%s (콜백은 %s): %s", rid, sv, res.status, type(e).__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -256,9 +256,9 @@ def _existing_run(store: ProfileRunStore, rq: ProfileRequest) -> ProfileOutcome 
     """그 (수신자, 버전)의 기존 실행 기록. 조회가 실패하면 None — 판정을 못 한다고 접수를 막지는 않는다(분석을 한 번 더 돌릴 뿐)."""
     try:
         return store.get_run(rq.recipient_user_id, rq.source_version)
-    except Exception:
-        log.exception("중복 판정용 조회 실패 recipient=%s source_version=%s — 평소대로 분석한다",
-                      rq.recipient_user_id, rq.source_version)
+    except Exception as e:  # noqa: BLE001 — 조회 실패 시 분석을 계속하며 입력이 실릴 수 있는 traceback은 남기지 않는다.
+        log.error("중복 판정용 조회 실패 recipient=%s source_version=%s — 평소대로 분석한다: %s",
+                  rq.recipient_user_id, rq.source_version, type(e).__name__)
         return None
 
 

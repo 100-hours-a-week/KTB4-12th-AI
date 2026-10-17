@@ -130,8 +130,8 @@ class Supervisor:
                 self._running += 1
             try:
                 fn(*args, **kwargs)
-            except Exception:                                  # 한 건의 예외가 워커를 죽이지 않는다(격리)
-                log.exception("Supervisor: 작업 예외 — 다음 작업으로")
+            except Exception as e:  # noqa: BLE001 — 작업 예외는 격리하며 입력이 실릴 수 있는 traceback은 남기지 않는다.
+                log.error("Supervisor: 작업 예외 — 다음 작업으로: %s", type(e).__name__)
                 with self._lock:
                     self._failed += 1
             finally:
@@ -154,8 +154,8 @@ class Supervisor:
             fn, args, kwargs = item
             try:
                 fn(*args, **kwargs)
-            except Exception:
-                log.exception("Supervisor.run_pending: 작업 예외")
+            except Exception as e:  # noqa: BLE001 — 작업 예외는 격리하며 입력이 실릴 수 있는 traceback은 남기지 않는다.
+                log.error("Supervisor.run_pending: 작업 예외: %s", type(e).__name__)
                 with self._lock:
                     self._failed += 1
             finally:

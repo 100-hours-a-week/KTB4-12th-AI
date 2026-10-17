@@ -312,7 +312,7 @@ async def on_http_error(request: Request, exc: StarletteHTTPException) -> JSONRe
 async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
     """잡히지 않은 예외 → 500 INTERNAL_SERVER_ERROR. Backend 는 재시도 가능 실패로 보고 틱을 끝내며 디바운스를 1회 재시작한다
     (통합 수정점 v0.7 ②③, 10-08 실측 — 위키 7.6 의 "다음 디바운스 주기에 재시도"는 옛 문구)."""
-    log.exception("500 %s", request.url.path)
+    log.error("500 INTERNAL_SERVER_ERROR: %s", type(exc).__name__)
     return _error_response(500, "INTERNAL_SERVER_ERROR", "서버 오류가 발생했습니다.")
 
 

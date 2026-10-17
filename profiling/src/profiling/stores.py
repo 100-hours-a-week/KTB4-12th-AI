@@ -248,8 +248,8 @@ class DbProfileRunStore:
             conn = self._engine.connect()                                     # pre-ping 은 여기서 끝난다(스스로 autocommit 을 켰다 끈다)
             conn.execution_options(isolation_level="AUTOCOMMIT")              # 첫 execute 전에. 트랜잭션을 열지 않으니 BEGIN/COMMIT 왕복이 없다
             got = bool(conn.execute(sa.text("select pg_try_advisory_lock(:k)"), {"k": key}).scalar_one())
-        except Exception:      # SQLAlchemyError 뿐 아니라 execution_options 가 감싸지 않고 올리는 psycopg 원본 오류까지 — 못 걸면 진행
-            log.exception("잠금을 걸지 못함 recipient=%s source_version=%s — 잠금 없이 진행", recipient_user_id, source_version)
+        except Exception as e:  # noqa: BLE001 — 원본 드라이버 오류도 기존대로 처리하며 입력이 실릴 수 있는 traceback은 남기지 않는다.
+            log.error("잠금을 걸지 못함 recipient=%s source_version=%s — 잠금 없이 진행: %s", recipient_user_id, source_version, type(e).__name__)
             if conn is not None:
                 conn.close()
             yield True
@@ -266,8 +266,9 @@ class DbProfileRunStore:
             if got:
                 try:
                     conn.execute(sa.text("select pg_advisory_unlock(:k)"), {"k": key})
-                except sa.exc.SQLAlchemyError:
-                    log.exception("잠금 해제 실패 recipient=%s source_version=%s — 이 커넥션을 버린다", recipient_user_id, source_version)
+                except sa.exc.SQLAlchemyError as e:
+                    log.error("잠금 해제 실패 recipient=%s source_version=%s — 이 커넥션을 버린다: %s", recipient_user_id, source_version,
+                              type(e).__name__)
                     conn.invalidate()
             conn.close()                                                      # 풀로 돌아가며 격리 수준은 기본값으로 복원된다(왕복 없음)
 
@@ -398,8 +399,8 @@ def _save_locked(conn: sa.Connection, key: int, params: dict[str, Any]) -> int:
     finally:
         try:
             conn.execute(_PROFILE_UNLOCK, {"k": key})
-        except sa.exc.SQLAlchemyError:
-            log.exception("수신자 저장 잠금 해제 실패 — 이 커넥션을 버린다")
+        except sa.exc.SQLAlchemyError as e:
+            log.error("수신자 저장 잠금 해제 실패 — 이 커넥션을 버린다: %s", type(e).__name__)
             conn.invalidate()
 
 
