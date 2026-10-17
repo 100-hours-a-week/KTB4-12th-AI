@@ -1,0 +1,21 @@
+{
+  "message": "합성 예제",
+  "data": {
+    "categories": [
+      {
+        "categoryId": 1,
+        "name": "테스트",
+        "children": [
+          {
+            "categoryId": 11,
+            "name": "음료"
+          },
+          {
+            "categoryId": 12,
+            "name": "전자"
+          }
+        ]
+      }
+    ]
+  }
+}

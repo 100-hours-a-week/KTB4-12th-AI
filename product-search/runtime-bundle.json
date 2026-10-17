@@ -1,8 +1,0 @@
-{
-  "archive": "product-search-runtime-20260922-v1.zip",
-  "bytes": 12540250,
-  "sha256": "5ab9fe11866fd5cf4347533db2df33ed3f475ca432ccd9d8c7379652151cfba6",
-  "catalogSha256": "dba5846d0213e1f988d321aed0f2490dc0fdb2da1df14c22c7ff80acf1ac2f48",
-  "products": 4231,
-  "modelWeightSha256": "6857e07e7e93f4de8855904f86090c51a6117e855272530aaf559a284114229c"
-}

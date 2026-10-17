@@ -1,43 +1,53 @@
-"""Run the HTTP integration sequence against a locally running QA search service."""
-import argparse
-import json
-import httpx
+"""Call the search server from a separate Chat/Profile client process."""
 
-def main():
+import argparse
+import asyncio
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from search_client import SearchClient
+
+
+async def run(args: argparse.Namespace) -> None:
+    async with SearchClient(args.base_url, source=args.source) as client:
+        health = await client.ready()
+        result = await client.search({
+            'query': args.query,
+            'filters': {'maxPrice': args.max_price},
+            'limit': 5,
+        }, snapshot_id=health['snapshotId'])
+        ids = [hit['productId'] for hit in result['hits']]
+        details = await client.get_products(ids, snapshot_id=result['snapshotId']) if ids else {
+            'products': [], 'missingIds': [],
+        }
+        print(json.dumps({
+            'source': args.source,
+            'ready': health['status'],
+            'snapshotId': result['snapshotId'],
+            'status': result['status'],
+            'timing': result['timing'],
+            'products': [{
+                'productId': hit['productId'],
+                'sourceProductId': hit['sourceProductId'],
+                'name': hit['name'],
+                'price': hit['price'],
+                'availability': hit['availability'],
+            } for hit in result['hits']],
+            'details': len(details['products']),
+            'missingIds': details['missingIds'],
+        }, ensure_ascii=False, indent=2))
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base-url', default='http://127.0.0.1:4325')
+    parser.add_argument('--source', choices=['chat', 'profile'], default='chat')
     parser.add_argument('--query', default='텀블러')
     parser.add_argument('--max-price', type=int, default=50000)
-    args = parser.parse_args()
-    with httpx.Client(base_url=args.base_url, timeout=30) as client:
-        # 1. 서버 준비 상태와 활성 스냅샷을 확인한다.
-        response = client.get('/healthz')
-        response.raise_for_status()
-        health = response.json()
-        # 2. Backend 숫자 ID 대신 현 카탈로그의 source ID가 반환된다.
-        response = client.post('/api/search', json={
-            'query': args.query, 'filters': {'maxPrice':args.max_price},
-            'mode':'hybrid', 'limit':5,
-        })
-        response.raise_for_status()
-        search = response.json()
-        # 3. 같은 스냅샷의 원문/속성을 조회한다. ids=[]는 HTTP에서 허용하지 않는다.
-        source_ids = [p['id'] for p in search['hits']]
-        details = {'products':[], 'missingIds':[]}
-        if source_ids:
-            response = client.post('/api/products', json={
-                'ids':source_ids, 'snapshotId':search['snapshotId'],
-            })
-            response.raise_for_status()
-            details = response.json()
-        print(json.dumps({
-            'ready':health['status'], 'snapshotId':search['snapshotId'],
-            'searchId':search['searchId'], 'status':search['status'],
-            'hits':len(search['hits']), 'details':len(details['products']),
-            'missingIds':details['missingIds'],
-            'identifiers':[{'sourceProductId':p['id'], 'backendProductId':p['backendProductId'],
-                            'availability':p['availability']} for p in search['hits']],
-        },ensure_ascii=False,indent=2))
+    asyncio.run(run(parser.parse_args()))
+
 
 if __name__ == '__main__':
     main()

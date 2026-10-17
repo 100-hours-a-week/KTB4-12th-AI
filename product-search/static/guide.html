@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light"><title>API 안내 · 상품 검색</title>
+  <link rel="icon" href="data:,">
+  <link rel="modulepreload" href="/assets/__ASSET_VERSION__/json.js">
+  <link rel="stylesheet" href="/assets/__ASSET_VERSION__/app.css">
+  <link rel="stylesheet" href="/assets/__ASSET_VERSION__/guide.css">
+  <script type="module" src="/assets/__ASSET_VERSION__/guide.js"></script>
+</head>
+<body class="guide-page">
+  <header class="topbar">
+    <div class="topbar-start"><a class="brand" href="/" aria-label="상품 검색 홈"><strong>상품 검색</strong></a><nav class="page-tabs" aria-label="페이지"><a href="/">검색</a><a href="/guide" aria-current="page">API 안내</a></nav></div>
+    <a class="schema-link" href="/docs" target="_blank" rel="noopener">OpenAPI 문서 ↗</a>
+  </header>
+  <div class="guide-layout">
+    <aside class="guide-nav" aria-label="안내 목차"><span>연동 가이드</span><a href="#start">요청 실행</a><a href="#endpoints">엔드포인트</a><a href="#parameters">요청 파라미터</a><a href="#response">응답 읽기</a><a href="#ids">상품 ID·상세 조회</a><a href="#errors">오류 처리</a><a href="/openapi.json" target="_blank" rel="noopener" class="raw-schema">스키마 JSON ↗</a></aside>
+    <main class="guide-main">
+      <section class="guide-intro" id="start"><h1>상품 검색 API</h1><p>HTTP 요청 예제와 파라미터. 아래 콘솔에서 현재 서버에 직접 요청할 수 있습니다.</p><div class="connection"><code id="base-url"></code><span id="server-status" role="status">연결 확인 중</span></div><p class="guide-note">현재 서버의 주소입니다. 127.0.0.1은 이 맥에서만 연결됩니다. X-Search-Source는 호출 구분용이며 인증 키가 아닙니다.</p></section>
+      <section class="playground" aria-labelledby="playground-title">
+        <div class="section-heading"><div><h2 id="playground-title">요청 실행</h2><p>본문을 수정하면 호출 예제에도 반영됩니다.</p></div><span class="endpoint"><b>POST</b> /v1/search</span></div>
+        <div class="request-grid">
+          <div class="request-panel"><div class="panel-toolbar"><label for="request-body">요청 본문 · JSON</label><label class="source-select">호출 주체 <select id="request-source"><option value="chat">chat</option><option value="profile">profile</option></select></label></div><textarea id="request-body" spellcheck="false" aria-describedby="request-help">{
+  "query": "방수 스피커",
+  "filters": {"maxPrice": 100000},
+  "mode": "hybrid",
+  "limit": 3,
+  "offset": 0
+}</textarea><div class="request-actions"><p id="request-help">현재 카탈로그에서 실제로 검색합니다.</p><button class="primary" id="run-request">실행</button></div></div>
+          <div class="code-panel"><div class="panel-toolbar"><div class="code-languages" role="group" aria-label="호출 예제 언어"><button data-language="curl" aria-pressed="true">cURL</button><button data-language="python" aria-pressed="false">Python</button><button data-language="javascript" aria-pressed="false">JavaScript</button></div><button class="copy-code" id="copy-code">복사</button></div><pre tabindex="0"><code id="request-code"></code></pre></div>
+        </div>
+        <p id="playground-error" class="error-banner" role="alert" hidden></p>
+        <details class="response-panel" id="live-response"><summary><span>실제 응답</span><span id="response-status" role="status">실행 후 표시됩니다</span></summary><pre tabindex="0"><code id="response-json">요청을 실행하면 HTTP 상태와 원본 JSON 응답을 확인할 수 있습니다.</code></pre><div class="detail-actions"><button class="secondary" id="fetch-details" disabled>검색된 상품 상세 조회</button><span>같은 snapshotId와 hits[].productId를 사용합니다.</span></div></details>
+        <p class="guide-note">Python 예제는 httpx 설치가 필요합니다. JavaScript 예제는 Node.js 또는 같은 출처의 브라우저용입니다. 다른 출처의 브라우저를 위한 CORS 설정은 현재 없습니다. /v1 호출은 QA 검색 기록으로 저장되지 않습니다.</p>
+      </section>
+      <section class="guide-section" id="endpoints"><h2>엔드포인트</h2><div class="endpoint-list"><div><code><b>GET</b> /readyz</code><p>검색 준비 상태와 현재 snapshotId 확인</p></div><div><code><b>GET</b> /v1/metadata</code><p>사용 가능한 카테고리 ID, 브랜드, 상품 유형 조회</p></div><div><code><b>POST</b> /v1/search</code><p>조건에 맞는 상품 후보 검색</p></div><div><code><b>POST</b> /v1/products</code><p>상품 ID로 설명·속성·원본 링크 조회</p></div></div><p class="guide-note">헤더: Content-Type: application/json · X-Search-Source: chat 또는 profile (기본 profile). 앱에서는 /v1 경로를 사용하세요. /api 경로는 QA 기록·평가용입니다.</p></section>
+      <section class="guide-section" id="parameters"><h2>요청 파라미터</h2><p>모든 검색 필드는 생략할 수 있습니다. 빈 요청 {}는 전체 상품을 조회합니다. 필드명은 camelCase를 사용하세요.</p><div class="table-scroll"><table><thead><tr><th>필드</th><th>자료형 · 기본값</th><th>동작</th></tr></thead><tbody>
+        <tr><td><code>query</code></td><td>string · ""</td><td>최대 500자. 비어 있으면 필터 기반 전체 조회</td></tr><tr><td><code>mode</code></td><td>string · hybrid</td><td>hybrid 통합 / lexical 키워드 / dense 의미 검색</td></tr><tr><td><code>limit</code></td><td>integer · 30</td><td>1–100. 한 번에 받을 상품 수</td></tr><tr><td><code>offset</code></td><td>integer · 0</td><td>0 이상 정수. 건너뛸 후보 수</td></tr><tr><td><code>snapshotId</code></td><td>string | null · null</td><td>카탈로그 버전 고정. 다르면 409</td></tr><tr><td><code>filters</code></td><td>object · {}</td><td>검색 대상에 반드시 적용할 조건</td></tr><tr><td><code>preferences</code></td><td>object · {}</td><td>검색 후보 순위에 적용할 선호 조건</td></tr>
+      </tbody></table></div>
+      <h3>filters · 필수 조건</h3><div class="table-scroll"><table><thead><tr><th>필드</th><th>자료형 · 기본값</th><th>값 / 제한</th></tr></thead><tbody>
+        <tr><td><code>minPrice / maxPrice</code></td><td>integer | null · null</td><td>0 이상 원 단위 정수. 최소 ≤ 최대</td></tr><tr><td><code>categoryIds / excludeCategoryIds</code></td><td>integer[] · []</td><td>포함 / 제외 카테고리 번호. 상위 분류도 허용하며 각각 최대 100개</td></tr><tr><td><code>brands / excludeBrands</code></td><td>string[] · []</td><td>포함 / 제외 브랜드명. 각각 최대 50개</td></tr><tr><td><code>productTypes</code></td><td>string[] · []</td><td>Shipping, Voucher, Pickup. 빈 배열은 모든 유형</td></tr><tr><td><code>excludeProductIds</code></td><td>integer[] · []</td><td>제외할 검색 상품 ID. 최대 500개</td></tr><tr><td><code>availability</code></td><td>string · any</td><td>any / available / available_or_unknown / unavailable / unknown. available_or_unknown은 판매 불가만 제외</td></tr>
+      </tbody></table></div><p class="guide-note">가격·카테고리·브랜드 등 서로 다른 조건은 모두 만족해야 합니다. 포함 배열 안의 값은 하나라도 일치하면 되고, 제외 조건이 우선합니다. 카테고리는 /v1/metadata의 categories[].id 또는 groups[].id를 사용하세요. <code>categoryIds: [1]</code>은 뷰티 전체, <code>[11]</code>은 스킨케어입니다. 문자열 CAT 식별자는 입력할 수 없습니다. 브랜드명도 metadata 값을 사용하세요. Pickup은 API에서 허용되지만 검색 화면의 선택지에서는 제외되어 있습니다.</p>
+      <h3>preferences · 순위 조정</h3><p><code>preferredCategoryIds</code>는 가점, <code>downrankCategoryIds</code>는 감점입니다. 둘 다 integer[]이며 기본 [], 각각 최대 100개입니다. 상위 분류를 지정하면 하위 분류 전체에 적용됩니다. 상품을 반드시 제외해야 한다면 filters를 사용하세요.</p>
+      <details class="metadata-panel"><summary>현재 카테고리·브랜드 값 보기</summary><pre tabindex="0"><code id="metadata-json">불러오는 중</code></pre></details></section>
+      <section class="guide-section" id="response"><h2>응답 읽기</h2><p>검색 후보는 <code>hits</code> 배열에 담깁니다. 후보 자체가 없으면 HTTP 200과 <code>status: "NO_MATCH"</code>를 반환합니다. 후보가 있지만 offset이 끝을 넘으면 <code>status: "OK"</code>, 빈 hits, nextOffset: null입니다. OK는 상품의 적합성을 보장하지 않습니다.</p><div class="table-scroll"><table><thead><tr><th>필드</th><th>의미</th></tr></thead><tbody>
+        <tr><td><code>hits[]</code></td><td>상품 요약과 순위. productId, sourceProductId, name, brand, categoryId, parentCategoryId, sourceCategoryId, category, categoryGroup, price, description, productType, availability, 이미지 경로</td></tr><tr><td><code>hits[].rank / score</code></td><td>순위 / 통합 순위 점수. 적합도 확률이 아닙니다.</td></tr><tr><td><code>lexicalScore / denseScore</code></td><td>키워드 점수 / 의미 유사도. lexicalRank, denseRank, matchedFields도 제공. 의미 검색을 실행하지 않으면 denseScore는 null</td></tr><tr><td><code>eligibleCount</code></td><td>필터를 통과한 전체 상품 수</td></tr><tr><td><code>candidateCount / hasMore / nextOffset</code></td><td>전체 후보 수 / 다음 페이지 여부 / 다음 offset. nextOffset이 null이면 종료합니다.</td></tr><tr><td><code>snapshotId / algorithm</code></td><td>상품 내용·벡터·모델·순위 설정의 버전 / 검색 알고리즘 식별자</td></tr><tr><td><code>timing</code></td><td>totalMs, embeddingMs, retrievalMs, cached, embeddingCached</td></tr>
+      </tbody></table></div><p class="guide-note">페이지를 넘길 때 같은 조건과 snapshotId를 유지하고 응답의 nextOffset을 다음 offset으로 보내세요. null이면 종료합니다. 검색어가 있으면 키워드·의미 검색은 각각 최대 100개, 통합은 최대 200개 후보입니다. 빈 검색어의 전체 조회에는 이 후보 제한이 없습니다. metadata와 /readyz의 exportGeneratedAt은 Backend export 시각이며 미동기화 시 null입니다. 내용이 같은 export는 시각만 갱신되고 snapshotId는 유지됩니다. 이미지 경로는 검색 서버 기준 상대 URL이므로 서버 주소와 결합하세요. 원본 연결 정보가 없으면 sourceProductId·sourceCategoryId·productType은 null일 수 있고 이미지·원본 링크는 비어 있을 수 있습니다.</p></section>
+      <section class="guide-section" id="ids"><h2>상품 ID와 상세 조회</h2><p><code>productId</code>는 Backend 초기 적재 SQL에 맞춘 양의 BIGINT입니다. 범위는 1–9223372036854775807이며 JSON 정수로 전달합니다. <code>sourceProductId</code>는 <code>KAKAO_GIFT:…</code> 형태의 원본 수집처 식별자입니다. 운영 DB에 실제 적용된 번호와의 조인은 아직 확인하지 않았습니다.</p><p><code>categoryId</code>와 <code>parentCategoryId</code>는 Backend 기준 정수 번호입니다. <code>sourceCategoryId</code>는 원본 CAT 식별자이며 필터에 사용하지 않습니다. metadata의 categories[].parentId로 상위 분류와 연결합니다.</p><p>POST /v1/products에 <code>{"ids": [3670], "snapshotId": "검색 응답의 snapshotId"}</code>를 보냅니다. ids는 1–100개의 정수 배열이고 snapshotId는 선택입니다. 제외 조건의 <code>excludeProductIds</code>도 같은 productId를 사용합니다.</p><p>응답은 <code>products</code>, <code>missingIds</code>, <code>snapshotId</code>입니다. 상품 요약에 전체 description, attributes, tags, sourceText, productUrl, descriptionOrigin, tokenCount, embeddingTruncated가 추가됩니다. 없는 ID는 missingIds에 따로 반환합니다.</p><p class="guide-note">JavaScript Number는 9007199254740991을 넘는 정수를 정확히 표현하지 못합니다. 큰 ID에는 BigInt와 정밀도를 보존하는 JSON 처리가 필요합니다. 이 콘솔은 <a href="/assets/__ASSET_VERSION__/json.js">JSON 헬퍼</a>의 parseJSON / stringifyJSON을 사용합니다. JavaScript 호출 예제는 요청·응답을 JSON 텍스트로 다뤄 원래 숫자를 보존합니다. Python int는 이 범위를 그대로 처리합니다.</p></section>
+      <section class="guide-section" id="errors"><h2>오류 처리</h2><p>오류 응답은 <code>{"message":"설명","error":{"code":"오류 코드","issues":[{"field":"필드","message":"설명"}]}}</code>입니다. issues는 필요한 경우에만 포함합니다. message를 파싱하지 말고 code로 분기하세요.</p><div class="table-scroll"><table><thead><tr><th>상태</th><th>호출 측 처리</th></tr></thead><tbody><tr><td><code>422</code></td><td>INVALID_REQUEST / UNKNOWN_CATEGORY / UNKNOWN_BRAND. 잘못된 필드·값을 수정하세요. message와 error.code를 확인하고 error.issues의 field·message로 입력을 수정하세요.</td></tr><tr><td><code>409</code></td><td>SNAPSHOT_MISMATCH. snapshotId가 변경됐습니다. 이전 결과와 섞지 말고 새 검색부터 시작하세요.</td></tr><tr><td><code>503</code></td><td>SEARCH_BUSY / SEARCH_TIMEOUT / ENCODER_FAILURE / SEARCH_NOT_READY. 준비·실행·부하 오류입니다. 빈 검색 결과로 처리하지 마세요. Retry-After가 있으면 재시도 대기 시간에 반영하세요.</td></tr></tbody></table></div><p>연결 시간 초과와 HTTP 오류를 구분해 처리하세요. 호출 예제는 30초 제한을 사용하며 자동 재시도하지 않습니다. 반복 호출하는 앱에서는 HTTP 클라이언트를 재사용하고 재시도 정책은 한 곳에서 관리하세요.</p><p class="guide-note">현재 전체 동시 검색은 최대 12개, profile은 그중 최대 4개입니다. 검색 점수는 추천 확률이 아니며, 최종 상품 선택과 사용자 응답은 호출 앱에서 결정합니다.</p></section>
+      <footer class="guide-footer">상품 검색 API <span>실행 중인 서버 기준 · <a href="/docs">전체 입력 스키마 ↗</a></span></footer>
+    </main>
+  </div><div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
