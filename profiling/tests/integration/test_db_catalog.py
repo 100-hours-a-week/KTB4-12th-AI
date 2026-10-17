@@ -1,7 +1,7 @@
-"""마이그레이션 0003(ai_catalog) 과 적재 SQL — 진짜 PostgreSQL. DB 없으면 skip.
+"""ai_catalog(키 = Backend 번호) 표와 적재 SQL — 진짜 PostgreSQL. DB 없으면 skip.
 실행: docker compose up -d && uv run alembic upgrade head && uv run pytest tests/integration -q
 
-시험용 ID(TEST-… · TEST_SRC:…)를 쓰고 끝에 지운다. 활성 버전 포인터는 건드리지 않는다(activate=False)."""
+시험용 번호(9,000,000,000 대 — 실제 Backend 번호 1~수천과 겹치지 않음)를 쓰고 끝에 지운다. 활성 버전 포인터는 건드리지 않는다(activate=False)."""
 
 import json
 
@@ -12,9 +12,11 @@ from profiling.settings import get_settings
 from tools.catalog import load_catalog as lc
 
 SCHEMA = "ai_catalog"
-GID, CID = "TEST-GROUP", "TEST-CAT-01"
-FAKE_BE = 9_000_000_000            # 실제 Backend 번호(1~수천)와 겹치지 않는 시험용 번호대
+GID, CID = "TEST-GROUP", "TEST-CAT-01"                 # 패키지 안의 수집처 ID(적재할 때 Backend 번호로 바뀐다)
 PIDS = ["TEST_SRC:1", "TEST_SRC:2"]
+FAKE_BE = 9_000_000_000
+CAT_IDS = {GID: FAKE_BE + 1, CID: FAKE_BE + 2}         # 수집처 → Backend 카테고리 번호
+PROD_IDS = {PIDS[0]: FAKE_BE + 101, PIDS[1]: FAKE_BE + 102}
 
 
 @pytest.fixture(scope="module")
@@ -33,8 +35,9 @@ def engine():
 def clean(engine):
     def _wipe():
         with engine.begin() as c:
-            c.execute(sa.text(f"delete from {SCHEMA}.products where source_product_id like 'TEST_SRC:%'"))
-            c.execute(sa.text(f"delete from {SCHEMA}.categories where source_category_id like 'TEST-%'"))
+            c.execute(sa.text(f"delete from {SCHEMA}.products where id >= :lo"), {"lo": FAKE_BE})
+            c.execute(sa.text(f"delete from {SCHEMA}.categories where id >= :lo and level = 2"), {"lo": FAKE_BE})
+            c.execute(sa.text(f"delete from {SCHEMA}.categories where id >= :lo"), {"lo": FAKE_BE})
             c.execute(sa.text(f"delete from {SCHEMA}.catalog_versions where package_id = 'test-pkg'"))
     _wipe()
     yield
@@ -53,6 +56,10 @@ def _pkg(products=2):
             "taxonomy_version": "2026-09-15.final57", "categories": cats, "products": prods}
 
 
+def _load(engine, pkg=None):
+    return lc.load(engine, pkg or _pkg(), PROD_IDS, CAT_IDS, activate=False)
+
+
 # ---------------------------------------------------------------- 마이그레이션 결과
 
 
@@ -64,13 +71,19 @@ def test_tables_and_constraints_exist(engine) -> None:
         checks = {r[0] for r in c.execute(sa.text(
             "select constraint_name from information_schema.table_constraints "
             "where table_schema = :s and constraint_type = 'CHECK'"), {"s": SCHEMA})}
-        assert {"ck_categories_level", "ck_categories_parent_by_level", "ck_products_type",
-                "ck_products_unit_price", "ck_products_backend_id", "ck_products_availability"} <= checks
-        # Backend ID 는 아직 없을 수 있어야 한다
-        assert c.execute(sa.text(
-            "select is_nullable from information_schema.columns "
-            "where table_schema = :s and table_name = 'products' and column_name = 'backend_product_id'"),
-            {"s": SCHEMA}).scalar_one() == "YES"
+        assert {"ck_categories_level", "ck_categories_parent_by_level", "ck_categories_id", "ck_products_type",
+                "ck_products_unit_price", "ck_products_id", "ck_products_availability"} <= checks
+        cols = {(r[0], r[1]): r[2] for r in c.execute(sa.text(
+            "select table_name, column_name, is_nullable from information_schema.columns where table_schema = :s"), {"s": SCHEMA})}
+        # 키는 Backend 번호 — 수집처 키 열은 없고, 수집처 상품 ID 는 키가 아닌 일반 열
+        assert cols[("categories", "id")] == "NO" and cols[("products", "id")] == "NO" and cols[("products", "category_id")] == "NO"
+        assert ("categories", "source_category_id") not in cols and ("products", "source_category_id") not in cols
+        assert ("products", "backend_product_id") not in cols and cols[("products", "source_product_id")] == "YES"
+        pks = {r[0]: r[1] for r in c.execute(sa.text(
+            "select tc.table_name, kcu.column_name from information_schema.table_constraints tc "
+            "join information_schema.key_column_usage kcu on kcu.constraint_name = tc.constraint_name and kcu.table_schema = tc.table_schema "
+            "where tc.table_schema = :s and tc.constraint_type = 'PRIMARY KEY' and tc.table_name in ('categories', 'products')"), {"s": SCHEMA})}
+        assert pks == {"categories": "id", "products": "id"}
 
 
 def test_only_one_active_version(engine, clean) -> None:
@@ -90,9 +103,8 @@ def test_only_one_active_version(engine, clean) -> None:
 
 def test_leaf_must_have_parent(engine, clean) -> None:
     with pytest.raises(sa.exc.IntegrityError), engine.begin() as c:
-        c.execute(sa.text(f"insert into {SCHEMA}.categories "
-                          "(source_category_id, parent_source_category_id, name, level, product_count, taxonomy_version) "
-                          "values ('TEST-CAT-X', null, '부모없는소분류', 2, 0, 'v')"))
+        c.execute(sa.text(f"insert into {SCHEMA}.categories (id, parent_id, name, level, product_count, taxonomy_version) "
+                          "values (:id, null, '부모없는소분류', 2, 0, 'v')"), {"id": FAKE_BE + 9})
 
 
 # ---------------------------------------------------------------- 적재
@@ -100,97 +112,178 @@ def test_leaf_must_have_parent(engine, clean) -> None:
 
 def test_load_inserts_and_is_idempotent(engine, clean) -> None:
     pkg = _pkg()
-    first = lc.load(engine, pkg, activate=False)
+    first = _load(engine, pkg)
     assert first["products"] == 2 and first["categories"] == 2
     with engine.begin() as c:
-        row = c.execute(sa.text(f"select name, brand, unit_price, attributes, availability, view_count, backend_product_id "
-                                f"from {SCHEMA}.products where source_product_id = :p"), {"p": PIDS[0]}).mappings().one()
+        row = c.execute(sa.text(f"select source_product_id, category_id, name, unit_price, attributes, availability, view_count "
+                                f"from {SCHEMA}.products where id = :i"), {"i": PROD_IDS[PIDS[0]]}).mappings().one()
+        parent = c.execute(sa.text(f"select parent_id from {SCHEMA}.categories where id = :i"), {"i": CAT_IDS[CID]}).scalar_one()
+    assert row["source_product_id"] == PIDS[0] and row["category_id"] == CAT_IDS[CID]      # 키 · 소분류는 Backend 번호
+    assert parent == CAT_IDS[GID]
     assert row["name"] == "상품0" and row["unit_price"] == 1000 and row["attributes"] == {"k": "v"}
-    assert row["availability"] == "unknown" and row["view_count"] is None and row["backend_product_id"] is None
+    assert row["availability"] == "unknown" and row["view_count"] is None
 
     pkg["products"][0]["productName"] = "이름바뀜"
-    lc.load(engine, pkg, activate=False)                     # 같은 패키지를 다시 — 상품 수는 그대로, 값은 갱신
+    _load(engine, pkg)                                       # 같은 패키지를 다시 — 상품 수는 그대로, 값은 갱신
     with engine.begin() as c:
-        assert c.execute(sa.text(f"select count(*) from {SCHEMA}.products where source_product_id like 'TEST_SRC:%'")).scalar_one() == 2
-        assert c.execute(sa.text(f"select name from {SCHEMA}.products where source_product_id = :p"),
-                         {"p": PIDS[0]}).scalar_one() == "이름바뀜"
+        assert c.execute(sa.text(f"select count(*) from {SCHEMA}.products where id >= :lo"), {"lo": FAKE_BE}).scalar_one() == 2
+        assert c.execute(sa.text(f"select name from {SCHEMA}.products where id = :i"),
+                         {"i": PROD_IDS[PIDS[0]]}).scalar_one() == "이름바뀜"
 
 
-def test_load_keeps_backend_id_and_availability(engine, clean) -> None:
-    """재적재가 Backend ID·재고 상태를 지우면 안 된다 — 그 두 열은 다른 경로(회신·7.9)로 채운다."""
-    lc.load(engine, _pkg(), activate=False)
+def test_load_refuses_without_backend_id(engine, clean) -> None:
+    """Backend 번호가 없는 상품 · 카테고리가 하나라도 있으면 적재하지 않는다 — 키를 만들 수 없다(0008)."""
+    with pytest.raises(lc.PackageError, match="Backend 번호가 없는 상품 1건"):
+        lc.load(engine, _pkg(), {PIDS[0]: FAKE_BE + 101}, CAT_IDS, activate=False)
+    with pytest.raises(lc.PackageError, match="Backend 번호가 없는 카테고리 1건"):
+        lc.load(engine, _pkg(), PROD_IDS, {CID: FAKE_BE + 2}, activate=False)
     with engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :be, availability = 'available', view_count = 42 "
-                          "where source_product_id = :p"), {"p": PIDS[0], "be": FAKE_BE + 777})
-    lc.load(engine, _pkg(), activate=False)
+        assert c.execute(sa.text(f"select count(*) from {SCHEMA}.products where id >= :lo"), {"lo": FAKE_BE}).scalar_one() == 0
+
+
+def test_load_refuses_duplicate_backend_id(engine, clean) -> None:
+    """두 상품이 같은 Backend 번호를 받으면 적재 전에 막는다(DB PK 까지 가기 전에)."""
+    with pytest.raises(lc.PackageError, match="번호가 겹친다"):
+        lc.load(engine, _pkg(), {PIDS[0]: FAKE_BE + 101, PIDS[1]: FAKE_BE + 101}, CAT_IDS, activate=False)
+
+
+def test_load_keeps_availability_and_views(engine, clean) -> None:
+    """재적재가 재고 상태 · 조회수를 지우면 안 된다 — 그 두 열은 --metrics(Backend 회신)가 채운다."""
+    _load(engine)
     with engine.begin() as c:
-        row = c.execute(sa.text(f"select backend_product_id, availability, view_count from {SCHEMA}.products "
-                                "where source_product_id = :p"), {"p": PIDS[0]}).mappings().one()
-    assert row["backend_product_id"] == FAKE_BE + 777 and row["availability"] == "available" and row["view_count"] == 42
-
-
-# ---------------------------------------------------------------- Backend ID 회신
-
-
-def test_apply_id_map_fills_and_reports(engine, clean, tmp_path) -> None:
-    lc.load(engine, _pkg(), activate=False)
-    path = tmp_path / "product-id-map.jsonl"
-    path.write_text("\n".join(json.dumps(x) for x in [
-        {"sourceProductId": PIDS[0], "backendProductId": FAKE_BE + 101},
-        {"sourceProductId": PIDS[1], "backendProductId": None},        # 아직 안 준 것 → 건너뜀
-        {"sourceProductId": "TEST_SRC:없음", "backendProductId": FAKE_BE + 999},   # 우리 표에 없는 것
-    ]), encoding="utf-8")
-
-    r = lc.apply_id_map(engine, path, kind="product")
-    assert r == {"updated": 1, "skipped": 1, "missing": 1}
+        c.execute(sa.text(f"update {SCHEMA}.products set availability = 'available', view_count = 42 where id = :i"),
+                  {"i": PROD_IDS[PIDS[0]]})
+    _load(engine)
     with engine.begin() as c:
-        assert c.execute(sa.text(f"select backend_product_id from {SCHEMA}.products where source_product_id = :p"),
-                         {"p": PIDS[0]}).scalar_one() == FAKE_BE + 101
-        assert c.execute(sa.text(f"select backend_product_id from {SCHEMA}.products where source_product_id = :p"),
-                         {"p": PIDS[1]}).scalar_one() is None
+        row = c.execute(sa.text(f"select availability, view_count from {SCHEMA}.products where id = :i"),
+                        {"i": PROD_IDS[PIDS[0]]}).mappings().one()
+    assert row["availability"] == "available" and row["view_count"] == 42
 
 
-def test_backend_product_id_is_unique(engine, clean) -> None:
-    """두 상품이 같은 Backend ID 를 가질 수 없다 — 회신 파일이 잘못돼도 DB가 막는다."""
-    lc.load(engine, _pkg(), activate=False)
-    with engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :be where source_product_id = :p"),
-                  {"p": PIDS[0], "be": FAKE_BE + 555})
-    with pytest.raises(sa.exc.IntegrityError), engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :be where source_product_id = :p"),
-                  {"p": PIDS[1], "be": FAKE_BE + 555})
+# ---------------------------------------------------------------- 재고 · 조회수 회신
 
 
 def test_apply_metrics_fills_only_stock_and_views(engine, clean, tmp_path) -> None:
-    """재고·조회수 회신은 그 두 열만 바꾼다 — Backend ID·이름·가격은 그대로."""
-    lc.load(engine, _pkg(), activate=False)
-    with engine.begin() as c:
-        c.execute(sa.text(f"update {SCHEMA}.products set backend_product_id = :be where source_product_id = :p"),
-                  {"p": PIDS[0], "be": FAKE_BE + 888})
-
+    """재고·조회수 회신은 그 두 열만 바꾼다 — 이름·가격은 그대로. Backend 번호(productId)로도, 옛 형식(sourceProductId)으로도 찾는다."""
+    _load(engine)
     path = tmp_path / "metrics.jsonl"
     path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in [
-        {"sourceProductId": PIDS[0], "availability": "available", "viewCount": 47753},
+        {"productId": PROD_IDS[PIDS[0]], "availability": "available", "viewCount": 47753},
         {"sourceProductId": PIDS[1], "availability": "unavailable", "viewCount": 0},
-        {"sourceProductId": "TEST_SRC:없음", "availability": "available", "viewCount": 1},   # 우리 표에 없는 것
+        {"productId": FAKE_BE + 999, "availability": "available", "viewCount": 1},   # 우리 표에 없는 것
     ]), encoding="utf-8")
 
     r = lc.apply_metrics(engine, path)
     assert r == {"updated": 2, "skipped": 0, "missing": 1}
     with engine.begin() as c:
-        rows = {x["source_product_id"]: x for x in c.execute(sa.text(
-            f"select source_product_id, availability, view_count, backend_product_id, name, unit_price "
-            f"from {SCHEMA}.products where source_product_id like 'TEST_SRC:%'")).mappings()}
-    assert (rows[PIDS[0]]["availability"], rows[PIDS[0]]["view_count"]) == ("available", 47753)
-    assert (rows[PIDS[1]]["availability"], rows[PIDS[1]]["view_count"]) == ("unavailable", 0)
-    assert rows[PIDS[0]]["backend_product_id"] == FAKE_BE + 888                      # 다른 경로로 채운 값은 그대로
-    assert rows[PIDS[0]]["name"] == "상품0" and rows[PIDS[0]]["unit_price"] == 1000
+        rows = {x["id"]: x for x in c.execute(sa.text(
+            f"select id, availability, view_count, name, unit_price from {SCHEMA}.products where id >= :lo"), {"lo": FAKE_BE}).mappings()}
+    a, b = rows[PROD_IDS[PIDS[0]]], rows[PROD_IDS[PIDS[1]]]
+    assert (a["availability"], a["view_count"]) == ("available", 47753)
+    assert (b["availability"], b["view_count"]) == ("unavailable", 0)
+    assert a["name"] == "상품0" and a["unit_price"] == 1000
 
 
 def test_apply_metrics_rejects_bad_availability(engine, clean, tmp_path) -> None:
     """3값 밖은 파일 단계에서 막는다 (DB CHECK 까지 가기 전에)."""
-    lc.load(engine, _pkg(), activate=False)
+    _load(engine)
     path = tmp_path / "bad.jsonl"
-    path.write_text(json.dumps({"sourceProductId": PIDS[0], "availability": "품절", "viewCount": 1}), encoding="utf-8")
+    path.write_text(json.dumps({"productId": PROD_IDS[PIDS[0]], "availability": "품절", "viewCount": 1}), encoding="utf-8")
     with pytest.raises(lc.PackageError, match="3값이 아니다"):
         lc.apply_metrics(engine, path)
+
+
+# ---------------------------------------------------------------- 합본 적재(서버, 10-15)
+
+
+def test_load_bundle_sets_keys_stock_and_views(engine, clean) -> None:
+    b = lc.build_bundle(_pkg(), PROD_IDS, CAT_IDS, {PIDS[0]: {"availability": "available", "viewCount": 77}})
+    got = lc.load_bundle(engine, b, activate=False)
+    assert got["products"] == 2 and got["categories"] == 2
+    with engine.begin() as c:
+        row = c.execute(sa.text(f"select category_id, availability, view_count, source_product_id from {SCHEMA}.products where id = :i"),
+                        {"i": PROD_IDS[PIDS[0]]}).mappings().one()
+        other = c.execute(sa.text(f"select availability, view_count from {SCHEMA}.products where id = :i"),
+                          {"i": PROD_IDS[PIDS[1]]}).mappings().one()
+    assert (row["category_id"], row["availability"], row["view_count"], row["source_product_id"]) == (CAT_IDS[CID], "available", 77, PIDS[0])
+    assert (other["availability"], other["view_count"]) == ("unknown", None)        # 합본에 값이 없으면 기본값
+
+
+def test_has_active_catalog_reflects_active_version(engine) -> None:
+    """--if-empty 판단 — 시험 DB 에 활성 카탈로그가 있으면 참이어야 한다(없는 DB 면 거짓)."""
+    with engine.connect() as c:
+        expected = bool(c.execute(sa.text(
+            f"select exists(select 1 from {SCHEMA}.catalog_versions v join {SCHEMA}.products p on p.package_id = v.package_id "
+            "where v.is_active)")).scalar())
+    assert lc.has_active_catalog(engine) is expected
+
+
+# ---------------------------------------------------------------- 상품 축 태그 (0011)
+
+
+def test_0011_product_tags_columns_checks_and_run_index(engine) -> None:
+    with engine.begin() as c:
+        col = c.execute(sa.text("""select is_nullable, column_default, data_type from information_schema.columns
+                                   where table_schema = 'ai_catalog' and table_name = 'products' and column_name = 'tags'""")).one()
+        assert col[0] == "NO" and col[1].startswith("'[]'::jsonb") and col[2] == "jsonb"
+        checks = {r[0] for r in c.execute(sa.text("select conname from pg_constraint where conname like 'ck_%tags%'"))}
+        assert {"ck_products_tags_array", "ck_catalog_versions_tags_all_or_none"} <= checks
+        idx = c.execute(sa.text("select indexdef from pg_indexes where indexname = 'ix_profile_runs_open'")).scalar_one()
+        assert "WHERE" in idx and "RESULT_READY" in idx and "RUNNING" in idx
+        types = {r[0]: r[1] for r in c.execute(sa.text("""select table_name, data_type from information_schema.columns
+                                                          where table_schema = 'ai_profile' and column_name = 'prompt_version'"""))}
+        assert types == {"profile_runs": "text", "recipient_profiles": "text"}
+
+
+def test_0011_checks_reject_bad_values(engine, clean) -> None:
+    got = _load(engine)
+    with pytest.raises(sa.exc.IntegrityError), engine.begin() as c:
+        c.execute(sa.text(f"update {SCHEMA}.products set tags = '{{}}'::jsonb where id = :id"), {"id": FAKE_BE + 101})
+    with pytest.raises(sa.exc.IntegrityError), engine.begin() as c:   # 셋 중 하나만 채울 수 없다
+        c.execute(sa.text(f"update {SCHEMA}.catalog_versions set tags_rule = 'x' where id = :id"), {"id": got["version_id"]})
+
+
+@pytest.fixture
+def active_test_catalog(engine, clean):
+    """시험 패키지를 활성으로 — 끝나면 원래 활성 판으로 되돌린다(상품 태그는 활성 판에만 넣는다)."""
+    with engine.begin() as c:
+        prev = c.execute(sa.text(f"select id from {SCHEMA}.catalog_versions where is_active")).scalar()
+    got = lc.load(engine, _pkg(), PROD_IDS, CAT_IDS, activate=True)
+    yield got
+    with engine.begin() as c:
+        c.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = false where is_active"))
+        if prev is not None:
+            c.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = true where id = :id"), {"id": prev})
+
+
+def test_load_tags_fills_skips_when_same_and_replaces_when_changed(engine, active_test_catalog) -> None:
+    from profiling import vocab
+    from profiling.catalog import DbCatalogReader
+
+    first = lc.load_tags(engine, if_changed=True)
+    assert not first["skipped"] and first["products"] == 2 and first["version_id"] == active_test_catalog["version_id"]
+    with engine.begin() as c:
+        tags = c.execute(sa.text(f"select tags from {SCHEMA}.products where id = :id"), {"id": FAKE_BE + 101}).scalar_one()
+        v = c.execute(sa.text(f"select tags_rule, tags_sha256, tags_loaded_at from {SCHEMA}.catalog_versions where id = :id"),
+                      {"id": first["version_id"]}).one()
+    assert {"axis": "브랜드", "tag": "브랜드", "via": "field"} in tags
+    assert (v[0], v[1]) == (vocab.RULE, vocab.tags_sha256()) and v[2] is not None
+    reader = DbCatalogReader(engine)
+    _, products = reader.active()
+    assert reader.tags_state == "ok" and products[0].tags is not None and ("브랜드", "브랜드") in products[0].tags
+
+    assert lc.load_tags(engine, if_changed=True)["skipped"]           # 판이 같으면 건너뜀(배포마다 불러도 됨)
+    with engine.begin() as c:                                         # 어휘 · 규칙이 바뀐 배포 흉내
+        c.execute(sa.text(f"update {SCHEMA}.catalog_versions set tags_sha256 = :h where id = :id"), {"h": "0" * 64, "id": first["version_id"]})
+    stale = DbCatalogReader(engine)
+    _, products = stale.active()
+    assert stale.tags_state == "stale" and all(p.tags is None for p in products)    # 판이 다르면 DB 태그를 쓰지 않는다
+    again = lc.load_tags(engine, if_changed=True)
+    assert not again["skipped"] and again["products"] == 2
+
+    newer = lc.load(engine, _pkg(), PROD_IDS, CAT_IDS, activate=True)                # 새 카탈로그 판은 태그 없이 시작
+    with engine.begin() as c:
+        assert c.execute(sa.text(f"select tags_rule from {SCHEMA}.catalog_versions where id = :id"), {"id": newer["version_id"]}).scalar() is None
+    fresh = DbCatalogReader(engine)
+    fresh.active()
+    assert fresh.tags_state == "none"

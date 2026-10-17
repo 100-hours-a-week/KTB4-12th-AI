@@ -25,7 +25,7 @@ SCHEMA = "ai_profile"
 
 
 def upgrade() -> None:
-    # 1) 스키마·확장 — vector는 v2·v3 임베딩 테이블용. 지금 미리 켜 둔다 (superuser 권한은 compose의 ai_user가 DB owner라 가능)
+    # 1) 스키마·확장 — vector는 v2·v3 임베딩 테이블용. 지금 미리 켜 둔다 (DB 소유자 계정으로 마이그레이션하므로 가능)
     op.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
 

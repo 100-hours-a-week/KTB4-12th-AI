@@ -1,5 +1,5 @@
 """tests/fixtures/catalog_sample.json — 레포 안 예시 카탈로그가 catalog.py로 읽히는지 (파일만 본다. 앱을 띄우는 확인은 tests/integration/test_e2e_app.py).
-Catalog 빌드(#9~13)는 이 파일을 7.9 export 응답으로 받아 같은 결과가 나와야 한다."""
+로컬 · 시험용 파일 카탈로그(CATALOG_SOURCE=file)의 예시다. 배포는 DB 카탈로그(ai_catalog)를 쓴다."""
 
 from pathlib import Path
 
@@ -21,3 +21,5 @@ def test_fixture_loads_with_expected_shape() -> None:
     assert sum(1 for p in products if p.availability == "unavailable") == 2  # 재고 없음 케이스
     assert [p.productId for p in products] == sorted(p.productId for p in products)   # 7.9: productId 오름차순
     assert sum(1 for p in products if p.viewCount > 0) > 100                    # 조회수(임의 값)가 실려 있음 — v1 정렬 기준
+
+

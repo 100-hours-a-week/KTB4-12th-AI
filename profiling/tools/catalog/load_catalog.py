@@ -1,18 +1,41 @@
-"""Backend 전달 패키지 → ai_catalog 적재 (마이그레이션 0003).
+"""Backend 전달 패키지 → ai_catalog 적재.
 
-  적재:      uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1
+  적재:      uv run python -m tools.catalog.load_catalog --package ~/Downloads/product-catalog-20260922-v1 \
+                 --id-map <번호표>/product-id-map.jsonl \
+                 --category-id-map <번호표>/category-id-map.jsonl \
+                 --metrics <번호표>/metrics.jsonl
+              번호표 · 패키지는 팀 내부 자료라 저장소에 없다(10-15) — 프로파일링 담당에게 받는다
   확인만:    … --dry-run
-  회신 반영:  … --id-map returned/product-id-map.jsonl --category-id-map returned/category-id-map.jsonl
-              … --metrics returned/metrics.jsonl        (재고·조회수)
-              회신 xlsx 를 이 jsonl 로 바꾸는 것은 tools/catalog/import_be_ids.py
+  재고·조회수만 다시: … --metrics <metrics.jsonl>          (패키지 없이)
+
+**서버 적재 — 합본 파일 하나(10-15).** 패키지 · 번호표는 이미지에 없다. 로컬에서 Backend 번호로 합친 파일 하나를 만들고,
+첫 배포 전에 DB 에 한 번 넣는다(로컬 파일 또는 비공개 S3 — s3:// 는 Task Role 로 읽음). 합본은 팀 내부 자료 — 저장소 · 이미지에 넣지 않는다.
+  합본 만들기(DB 안 씀):  … --package <패키지> --id-map … --category-id-map … --metrics … --write-bundle catalog-bundle.json.gz
+  합본 적재:              … --bundle s3://<버킷>/<키>  (또는 로컬 경로)  [--if-empty]
+  --if-empty            활성 카탈로그가 이미 있으면 아무것도 하지 않고 성공(0) — 배포 워크플로가 매번 불러도 된다
+
+**상품 임베딩 벡터 적재(10-16, 0009).** 검색기(product-search)가 만든 manifest.json · vectors.f32 를 products.embedding(pgvector)에 넣는다.
+  벡터만:                 … --embeddings <폴더 | s3://<버킷>/<접두어>>  [--if-empty]
+  카탈로그와 함께:         … --bundle s3://<버킷>/<키> --embeddings s3://<버킷>/<접두어> --if-empty
+  폴더는 manifest.json 이 든 폴더, 또는 product-search 폴더(data/ · data/CURRENT 규칙을 따른다). S3 는 접두어 아래 두 파일.
+  벡터 해시 · 차원 · 상품 번호 매칭 비율(90%)을 검사하고 틀리면 넣지 않는다. 활성 카탈로그 판에 벡터 정보(모델 · 해시)를 함께 남긴다.
+  --if-empty 면 활성 판에 벡터가 이미 있을 때 건너뛴다.
+
+**상품 축 태그 적재(10-16, 0011).** 활성 판의 상품마다 축 태그(브랜드 · IP · 카테고리 묶음, 대표 이름)를 계산해 products.tags 에 넣고
+판 행에 규칙 판 · 지문(tags_rule · tags_sha256)을 남긴다. 계산은 이미지 안의 규칙 · 어휘(profiling.vocab)로 — LLM 없음 · 몇 초.
+  태그만:                 … --tags [--if-changed]
+  첫 배포 전 한 번:        … --bundle <합본> --embeddings <벡터> --tags
+  배포 워크플로(매번):     … --tags --if-changed       (카탈로그 · 벡터는 미리 넣어 둠 — S3 주소를 남기면 DB 에 있어도 S3 부터 읽는다)
+  --if-changed          활성 판의 규칙 판 · 지문이 이 코드와 같으면 건너뛴다(배포마다 불러도 됨 — 어휘 · 규칙이 바뀐 배포에서만 다시 계산).
+  트랜잭션 하나 — 실패하면 이전 태그 그대로. 새 카탈로그 판은 태그 없이 시작하고 그동안 앱은 같은 규칙으로 그 자리에서 계산한다.
 
 패키지는 `product-catalog-20260922-v1` 모양을 기대한다 (data/categories.json · data/products.jsonl · data/summary.json).
 적재는 트랜잭션 하나다 — 도중에 실패하면 아무것도 남지 않고 활성 버전도 그대로다.
 
-**ID 두 가지를 섞지 않는다.**
-  수집처 ID  KAKAO_GIFT:10002797 · CAT-01-02 — 이 패키지가 가진 것. products.source_product_id 로 들어간다.
-  Backend ID BIGINT — 아직 없다. `--id-map`으로 회신 파일이 오면 그때 backend_product_id 를 채운다.
-  Backend ID 가 없으면 7.7로 상품 번호를 내보낼 수 없다 (Backend에 없는 번호가 되므로).
+**표의 키는 Backend 번호다(0008).** categories.id · products.id 는 Backend 의 categories.id · products.id 와
+같은 번호다. 패키지에는 수집처 ID(KAKAO_GIFT:… · CAT-01-02)만 있으므로, 적재할 때 id-map 두 개로 Backend 번호를 붙인다.
+Backend 번호가 없는 상품 · 카테고리가 하나라도 있으면 적재하지 않는다(키를 만들 수 없다). 수집처 상품 ID 는
+products.source_product_id(키 아님)에 원본 추적용으로만 남는다.
 
 종료 코드: 0 성공 · 1 패키지 형식 오류 · 2 DB 오류 · 3 확인만 하고 끝(dry-run)
 """
@@ -20,17 +43,30 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import sqlalchemy as sa
 
+from profiling import vocab
+from profiling.embedding import (
+    DIM_DB,
+    MIN_MATCH_RATIO,
+    active_data_dir,
+    normalize,
+    parse_vector_files,
+    row_index,
+    vector_literal,
+)
 from profiling.settings import get_settings
 
 SCHEMA = "ai_catalog"
-AVAILABILITY = ("available", "unavailable", "unknown")   # 마이그레이션 0003 의 CHECK 와 같은 값
+BUNDLE_FORMAT = "ai-catalog-bundle/v1"
+AVAILABILITY = ("available", "unavailable", "unknown")   # DB CHECK 와 같은 값
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +95,34 @@ def read_package(root: Path) -> dict[str, Any]:
         raise PackageError("data/categories.json 에 categories 배열이 없다")
     return {"summary": summary, "taxonomy_version": envelope.get("taxonomyVersion", ""),
             "categories": categories, "products": products}
+
+
+def read_id_map(path: Path, *, src: str, dst: str) -> dict[str, int]:
+    """회신 jsonl → {수집처 ID: Backend 번호}. null 인 줄은 건너뛴다(그 상품은 check 가 '번호 없음'으로 잡는다)."""
+    out: dict[str, int] = {}
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                item = json.loads(line)
+                if item.get(dst) is not None:
+                    out[item[src]] = int(item[dst])
+    return out
+
+
+def check_ids(pkg: dict[str, Any], product_ids: dict[str, int], category_ids: dict[str, int]) -> list[str]:
+    """Backend 번호가 패키지 전부에 붙는지 · 겹치지 않는지. 문제를 문장 목록으로."""
+    problems: list[str] = []
+    for kind, items, key, ids in (("카테고리", pkg["categories"], "sourceCategoryId", category_ids),
+                                  ("상품", pkg["products"], "sourceProductId", product_ids)):
+        missing = [i[key] for i in items if i[key] not in ids]
+        if missing:
+            problems.append(f"Backend 번호가 없는 {kind} {len(missing)}건: {', '.join(missing[:5])}")
+        used = [ids[i[key]] for i in items if i[key] in ids]
+        if len(set(used)) != len(used):
+            problems.append(f"{kind} Backend 번호가 겹친다 {len(used) - len(set(used))}건")
+        if any(b <= 0 for b in used):
+            problems.append(f"{kind} Backend 번호가 0 이하인 것이 있다")
+    return problems
 
 
 def check(pkg: dict[str, Any]) -> list[str]:
@@ -98,46 +162,54 @@ _VERSION = sa.text(f"""
 
 _CATEGORY = sa.text(f"""
     insert into {SCHEMA}.categories
-        (source_category_id, parent_source_category_id, name, level, product_count, taxonomy_version)
-    values (:sid, :parent, :name, :level, :count, :taxonomy_version)
-    on conflict (source_category_id) do update set
-        parent_source_category_id = excluded.parent_source_category_id,
+        (id, parent_id, name, level, product_count, taxonomy_version)
+    values (:id, :parent, :name, :level, :count, :taxonomy_version)
+    on conflict (id) do update set
+        parent_id = excluded.parent_id,
         name = excluded.name, level = excluded.level,
         product_count = excluded.product_count, taxonomy_version = excluded.taxonomy_version,
         updated_at = now()""")
 
 _PRODUCT = sa.text(f"""
     insert into {SCHEMA}.products
-        (source_product_id, name, brand, source_category_id, product_kind, product_type, description,
+        (id, source_product_id, name, brand, category_id, product_kind, product_type, description,
          attributes, unit_price, list_price, currency, stock_quantity,
          source_provider, source_product_url, source_image_url, image_asset_id, package_id)
-    values (:sid, :name, :brand, :category, :kind, :type, :description,
+    values (:id, :sid, :name, :brand, :category, :kind, :type, :description,
             cast(:attributes as jsonb), :unit_price, :list_price, :currency, :stock_quantity,
             :provider, :product_url, :image_url, :asset_id, :package_id)
-    on conflict (source_product_id) do update set
-        name = excluded.name, brand = excluded.brand, source_category_id = excluded.source_category_id,
+    on conflict (id) do update set
+        source_product_id = excluded.source_product_id,
+        name = excluded.name, brand = excluded.brand, category_id = excluded.category_id,
         product_kind = excluded.product_kind, product_type = excluded.product_type, description = excluded.description,
         attributes = excluded.attributes, unit_price = excluded.unit_price, list_price = excluded.list_price,
         currency = excluded.currency, stock_quantity = excluded.stock_quantity,
         source_provider = excluded.source_provider, source_product_url = excluded.source_product_url,
         source_image_url = excluded.source_image_url, image_asset_id = excluded.image_asset_id,
         package_id = excluded.package_id, updated_at = now()""")
-# backend_product_id · availability · view_count 은 여기서 건드리지 않는다 — 각각 --id-map 과 7.9 export 가 채운다.
-# (재적재가 Backend 회신과 재고 상태를 지우면 안 된다. 패키지에는 그 셋이 아예 없다.)
+# availability · view_count 은 여기서 건드리지 않는다 — --metrics(Backend 회신)가 채운다.
+# (재적재가 Backend 의 재고 상태 · 조회수를 지우면 안 된다. 패키지에는 그 둘이 아예 없다.)
 
 
-def load(engine: sa.Engine, pkg: dict[str, Any], *, activate: bool = True) -> dict[str, Any]:
-    """트랜잭션 하나로 카테고리·상품·버전을 넣는다. 활성 버전 교체까지 같은 트랜잭션."""
+def _rows_from_package(pkg: dict[str, Any], product_ids: dict[str, int], category_ids: dict[str, int]
+                       ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """패키지 + 번호표 → (버전 행, 카테고리 행, 상품 행). 키는 Backend 번호. 빠진 번호는 check_ids 가 먼저 막는다."""
+    problems = check_ids(pkg, product_ids, category_ids)
+    if problems:
+        raise PackageError("; ".join(problems))
     summary, cats, prods = pkg["summary"], pkg["categories"], pkg["products"]
     package_id = summary.get("packageId", "unknown")
     taxonomy_version = pkg["taxonomy_version"] or summary.get("taxonomyVersion", "")
-
-    cat_rows = [{"sid": c["sourceCategoryId"], "parent": c["parentSourceCategoryId"], "name": c["name"],
+    meta = {"package_id": package_id, "taxonomy_version": taxonomy_version,
+            "source_sha256": summary.get("sourceFileSha256")}
+    cat_rows = [{"id": category_ids[c["sourceCategoryId"]],
+                 "parent": category_ids[c["parentSourceCategoryId"]] if c["parentSourceCategoryId"] else None, "name": c["name"],
                  "level": c["level"], "count": c["productCount"], "taxonomy_version": taxonomy_version}
-                for c in sorted(cats, key=lambda c: c["level"])]          # 대분류 먼저 — FK 때문에
-    prod_rows = [{"sid": p["sourceProductId"], "name": p["productName"], "brand": p["brandName"],
-                  "category": p["sourceCategoryId"], "kind": p["productKind"], "type": p["productType"],
-                  "description": p["description"], "attributes": json.dumps(p["attributes"], ensure_ascii=False),
+                for c in cats]
+    prod_rows = [{"id": product_ids[p["sourceProductId"]], "sid": p["sourceProductId"],
+                  "name": p["productName"], "brand": p["brandName"],
+                  "category": category_ids[p["sourceCategoryId"]], "kind": p["productKind"], "type": p["productType"],
+                  "description": p["description"], "attributes": p["attributes"],
                   "unit_price": p["unitPrice"], "list_price": p["listPrice"], "currency": p["currency"],
                   "stock_quantity": p["stockQuantity"],
                   "provider": p["source"]["provider"], "product_url": p["source"]["productUrl"],
@@ -145,58 +217,317 @@ def load(engine: sa.Engine, pkg: dict[str, Any], *, activate: bool = True) -> di
                   "asset_id": (p["images"][0]["assetId"] if p.get("images") else None),
                   "package_id": package_id}
                  for p in prods]
+    return meta, cat_rows, prod_rows
 
+
+def _write(engine: sa.Engine, meta: dict[str, Any], cat_rows: list[dict[str, Any]], prod_rows: list[dict[str, Any]], *,
+           metrics: list[dict[str, Any]] | None = None, activate: bool = True) -> dict[str, Any]:
+    """트랜잭션 하나로 버전 · 카테고리 · 상품(+ 재고 · 조회수)을 넣고 활성 버전을 바꾼다."""
+    cat_rows = sorted(cat_rows, key=lambda c: (c["level"], c["id"]))          # 대분류 먼저 — FK 때문에
+    prod_params = [{**r, "attributes": json.dumps(r["attributes"], ensure_ascii=False)} for r in prod_rows]
     with engine.begin() as conn:
         version_id = conn.execute(_VERSION, {
-            "package_id": package_id, "taxonomy_version": taxonomy_version,
-            "product_count": len(prods), "category_count": len(cats),
-            "source_sha256": json.dumps(summary.get("sourceFileSha256"), ensure_ascii=False),
+            "package_id": meta["package_id"], "taxonomy_version": meta["taxonomy_version"],
+            "product_count": len(prod_rows), "category_count": len(cat_rows),
+            "source_sha256": json.dumps(meta.get("source_sha256"), ensure_ascii=False),
         }).scalar_one()
         conn.execute(_CATEGORY, cat_rows)
-        conn.execute(_PRODUCT, prod_rows)
+        conn.execute(_PRODUCT, prod_params)
+        if metrics:
+            conn.execute(sa.text(f"""update {SCHEMA}.products set availability = coalesce(:av, availability),
+                                         view_count = coalesce(:vc, view_count), updated_at = now() where id = :id"""), metrics)
         if activate:
             conn.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = false where is_active"))
             conn.execute(sa.text(f"update {SCHEMA}.catalog_versions set is_active = true where id = :id"), {"id": version_id})
-    return {"version_id": version_id, "categories": len(cat_rows), "products": len(prod_rows), "package_id": package_id}
+    return {"version_id": version_id, "categories": len(cat_rows), "products": len(prod_rows), "package_id": meta["package_id"]}
+
+
+def load(engine: sa.Engine, pkg: dict[str, Any], product_ids: dict[str, int], category_ids: dict[str, int], *,
+         activate: bool = True) -> dict[str, Any]:
+    """트랜잭션 하나로 카테고리·상품·버전을 넣는다. 활성 버전 교체까지 같은 트랜잭션.
+    product_ids · category_ids 는 수집처 ID → Backend 번호(read_id_map). 빠진 것이 있으면 check_ids 가 먼저 막는다."""
+    meta, cat_rows, prod_rows = _rows_from_package(pkg, product_ids, category_ids)
+    return _write(engine, meta, cat_rows, prod_rows, activate=activate)
 
 
 # ---------------------------------------------------------------------------
-# Backend ID 회신 반영
+# 합본 파일 — 서버(ECS) 적재용. Backend 번호로 이미 합쳐 둔 카탈로그 한 벌(10-15)
 # ---------------------------------------------------------------------------
 
 
-def apply_id_map(engine: sa.Engine, path: Path, *, kind: str) -> dict[str, int]:
-    """회신 파일(JSONL) → backend_*_id 채우기. null 은 건너뛴다. kind: product | category."""
-    table, src, dst = ({"product": ("products", "sourceProductId", "backendProductId"),
-                        "category": ("categories", "sourceCategoryId", "backendCategoryId")})[kind]
-    id_col = "source_product_id" if kind == "product" else "source_category_id"
-    be_col = "backend_product_id" if kind == "product" else "backend_category_id"
-
-    rows, skipped = [], 0
+def read_metrics_map(path: Path) -> dict[str, dict[str, Any]]:
+    """metrics.jsonl → {수집처 상품 ID: {availability, viewCount}} (합본 만들 때만)."""
+    out: dict[str, dict[str, Any]] = {}
     with path.open(encoding="utf-8") as f:
         for line in f:
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            if item.get(dst) is None:
-                skipped += 1
-                continue
-            rows.append({"sid": item[src], "bid": int(item[dst])})
-    if not rows:
-        return {"updated": 0, "skipped": skipped, "missing": 0}
+            if line.strip():
+                item = json.loads(line)
+                if item.get("availability") is not None and item["availability"] not in AVAILABILITY:
+                    raise PackageError(f"재고 상태가 3값이 아니다: {item['availability']} ({item.get('sourceProductId')})")
+                out[item["sourceProductId"]] = {"availability": item.get("availability"), "viewCount": item.get("viewCount")}
+    return out
 
-    stmt = sa.text(f"update {SCHEMA}.{table} set {be_col} = :bid, updated_at = now() where {id_col} = :sid")
-    updated = 0
+
+def build_bundle(pkg: dict[str, Any], product_ids: dict[str, int], category_ids: dict[str, int],
+                 metrics: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    """패키지 + 번호표(+ 재고 · 조회수) → 합본 dict. 순서는 번호 오름차순이라 같은 입력이면 같은 파일이다."""
+    meta, cat_rows, prod_rows = _rows_from_package(pkg, product_ids, category_ids)
+    metrics = metrics or {}
+    return {
+        "format": BUNDLE_FORMAT,
+        "packageId": meta["package_id"], "taxonomyVersion": meta["taxonomy_version"], "sourceFileSha256": meta["source_sha256"],
+        "categories": [{"id": c["id"], "parentId": c["parent"], "name": c["name"], "level": c["level"], "productCount": c["count"]}
+                       for c in sorted(cat_rows, key=lambda c: c["id"])],
+        "products": [{"id": r["id"], "categoryId": r["category"], "name": r["name"], "brand": r["brand"],
+                      "productKind": r["kind"], "productType": r["type"], "description": r["description"],
+                      "attributes": r["attributes"], "unitPrice": r["unit_price"], "listPrice": r["list_price"],
+                      "currency": r["currency"], "stockQuantity": r["stock_quantity"],
+                      "availability": metrics.get(r["sid"], {}).get("availability"),
+                      "viewCount": metrics.get(r["sid"], {}).get("viewCount"),
+                      "sourceProductId": r["sid"], "sourceProvider": r["provider"], "sourceProductUrl": r["product_url"],
+                      "sourceImageUrl": r["image_url"], "imageAssetId": r["asset_id"]}
+                     for r in sorted(prod_rows, key=lambda r: r["id"])],
+    }
+
+
+def write_bundle(bundle: dict[str, Any], path: Path) -> None:
+    """합본을 파일로. 이름이 .gz 로 끝나면 gzip(시각을 0 으로 고정 — 같은 입력이면 같은 바이트)."""
+    raw = json.dumps(bundle, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if path.name.endswith(".gz"):
+        raw = gzip.compress(raw, mtime=0)
+    path.write_bytes(raw)
+
+
+def _s3_get(uri: str) -> bytes:
+    """s3://버킷/키 → 바이트. 자격은 boto3 기본 경로(ECS 는 Task Role). boto3 는 이때만 불러온다."""
+    # 로컬 · 시험에서는 필요 없어 여기서 불러온다
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+    bucket, _, key = uri.removeprefix("s3://").partition("/")
+    if not bucket or not key:
+        raise PackageError(f"S3 주소 형식이 아니다: {uri} (s3://버킷/키)")
+    try:
+        return boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+    except (BotoCoreError, ClientError) as e:              # 권한 · 없는 키 · 네트워크 — 원인 종류만(자격 정보는 남기지 않음)
+        raise PackageError(f"S3 객체를 읽지 못했다({type(e).__name__}): {uri}") from e
+
+
+def read_bundle(src: str) -> dict[str, Any]:
+    """합본 읽기 — 로컬 경로 또는 s3://…, gzip 이면 풀어서."""
+    try:
+        raw = _s3_get(src) if src.startswith("s3://") else Path(src).read_bytes()
+    except FileNotFoundError as e:
+        raise PackageError(f"합본 파일이 없다: {src}") from e
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    try:
+        bundle = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise PackageError(f"합본 JSON 을 읽을 수 없다: {e}") from e
+    if not isinstance(bundle, dict) or bundle.get("format") != BUNDLE_FORMAT:
+        raise PackageError(f"합본 형식이 아니다(format={bundle.get('format') if isinstance(bundle, dict) else None}, 기대 {BUNDLE_FORMAT})")
+    return bundle
+
+
+def check_bundle(bundle: dict[str, Any]) -> list[str]:
+    """합본 적재 전 확인 — 번호 양수 · 중복 없음 · 계층 · 상품의 소분류 · 재고 3값."""
+    problems: list[str] = []
+    cats, prods = bundle.get("categories") or [], bundle.get("products") or []
+    if not cats or not prods:
+        return ["카테고리 또는 상품이 비었다"]
+    cids = [c["id"] for c in cats]
+    pids = [p["id"] for p in prods]
+    for kind, ids in (("카테고리", cids), ("상품", pids)):
+        if len(set(ids)) != len(ids):
+            problems.append(f"{kind} 번호가 겹친다 {len(ids) - len(set(ids))}건")
+        if any(not isinstance(i, int) or i <= 0 for i in ids):
+            problems.append(f"{kind} 번호가 양의 정수가 아닌 것이 있다")
+    top = {c["id"] for c in cats if c["level"] == 1}
+    leaf = {c["id"] for c in cats if c["level"] == 2}
+    bad = [c["id"] for c in cats if (c["level"] == 1) != (c.get("parentId") is None) or (c["level"] == 2 and c["parentId"] not in top)]
+    if bad:
+        problems.append(f"계층이 맞지 않는 카테고리 {len(bad)}건: {bad[:5]}")
+    outside = [p["id"] for p in prods if p["categoryId"] not in leaf]
+    if outside:
+        problems.append(f"소분류에 없는 카테고리를 가리키는 상품 {len(outside)}건: {outside[:5]}")
+    wrong = [p["id"] for p in prods if p.get("availability") is not None and p["availability"] not in AVAILABILITY]
+    if wrong:
+        problems.append(f"재고 상태가 3값이 아닌 상품 {len(wrong)}건: {wrong[:5]}")
+    return problems
+
+
+def load_bundle(engine: sa.Engine, bundle: dict[str, Any], *, activate: bool = True) -> dict[str, Any]:
+    """합본 → 세 표. 재고 · 조회수도 같은 트랜잭션에서 넣는다."""
+    problems = check_bundle(bundle)
+    if problems:
+        raise PackageError("; ".join(problems))
+    meta = {"package_id": bundle.get("packageId") or "unknown", "taxonomy_version": bundle.get("taxonomyVersion") or "",
+            "source_sha256": bundle.get("sourceFileSha256")}
+    cat_rows = [{"id": c["id"], "parent": c.get("parentId"), "name": c["name"], "level": c["level"],
+                 "count": c.get("productCount", 0), "taxonomy_version": meta["taxonomy_version"]} for c in bundle["categories"]]
+    prod_rows = [{"id": p["id"], "sid": p.get("sourceProductId"), "name": p["name"], "brand": p["brand"],
+                  "category": p["categoryId"], "kind": p["productKind"], "type": p["productType"],
+                  "description": p["description"], "attributes": p.get("attributes") or {},
+                  "unit_price": p["unitPrice"], "list_price": p.get("listPrice"), "currency": p.get("currency") or "KRW",
+                  "stock_quantity": p.get("stockQuantity"), "provider": p.get("sourceProvider") or "",
+                  "product_url": p.get("sourceProductUrl") or "", "image_url": p.get("sourceImageUrl") or "",
+                  "asset_id": p.get("imageAssetId"), "package_id": meta["package_id"]} for p in bundle["products"]]
+    metrics = [{"id": p["id"], "av": p.get("availability"), "vc": p.get("viewCount")} for p in bundle["products"]
+               if p.get("availability") is not None or p.get("viewCount") is not None]
+    return _write(engine, meta, cat_rows, prod_rows, metrics=metrics, activate=activate)
+
+
+def has_active_catalog(engine: sa.Engine) -> bool:
+    """활성 카탈로그(상품이 있는)가 이미 있나 — --if-empty 판단."""
+    with engine.connect() as conn:
+        return bool(conn.execute(sa.text(
+            f"""select exists(select 1 from {SCHEMA}.catalog_versions v join {SCHEMA}.products p on p.package_id = v.package_id
+                where v.is_active)""")).scalar())
+
+
+# ---------------------------------------------------------------------------
+# 상품 임베딩 벡터 — products.embedding(pgvector, 0009)
+# ---------------------------------------------------------------------------
+
+
+def read_embeddings(src: str) -> tuple[dict[str, Any], Any]:
+    """벡터 파일 읽기 — 로컬 폴더(manifest.json 이 든 폴더 또는 product-search 폴더) 또는 s3://버킷/접두어."""
+    try:
+        if src.startswith("s3://"):
+            prefix = src.rstrip("/")
+            return parse_vector_files(_s3_get(prefix + "/manifest.json"), _s3_get(prefix + "/vectors.f32"))
+        root = Path(src)
+        if (root / "manifest.json").is_file():
+            data = root
+        elif (root / "data").is_dir():
+            data = active_data_dir(root)
+        else:
+            raise PackageError(f"벡터 폴더가 아니다(manifest.json 도 data/ 도 없다): {src}")
+        return parse_vector_files((data / "manifest.json").read_bytes(), (data / "vectors.f32").read_bytes())
+    except FileNotFoundError as e:
+        raise PackageError(f"벡터 파일이 없다: {e.filename}") from e
+    except (RuntimeError, KeyError, ValueError) as e:
+        raise PackageError(f"벡터 파일을 읽을 수 없다: {e}") from e
+
+
+def has_active_embeddings(engine: sa.Engine) -> bool:
+    """활성 카탈로그 판에 벡터가 이미 들어가 있나 — --if-empty 판단."""
+    with engine.connect() as conn:
+        return bool(conn.execute(sa.text(
+            f"select exists(select 1 from {SCHEMA}.catalog_versions where is_active and embedding_model is not null)")).scalar())
+
+
+def load_embeddings(engine: sa.Engine, manifest: dict[str, Any], raw: Any) -> dict[str, Any]:
+    """벡터 → products.embedding. 트랜잭션 하나 — 옛 벡터를 지우고 새로 넣은 뒤 활성 카탈로그 판에 벡터 정보를 남긴다.
+    번호 연결은 앱과 같은 규칙(embedding.row_index): 새 형식은 BE 번호, 옛 형식은 수집처 ID → source_product_id."""
+    if manifest.get("dimensions") != DIM_DB:
+        raise PackageError(f"벡터 차원이 {manifest.get('dimensions')} — products.embedding 은 {DIM_DB}")
+    vectors = normalize(raw)
     with engine.begin() as conn:
-        for row in rows:                       # rowcount 를 세야 해서 한 줄씩
-            updated += conn.execute(stmt, row).rowcount
-    return {"updated": updated, "skipped": skipped, "missing": len(rows) - updated}
+        version_id = conn.execute(sa.text(f"select id from {SCHEMA}.catalog_versions where is_active")).scalar()
+        if version_id is None:
+            raise PackageError("활성 카탈로그가 없다 — 카탈로그(--bundle 등)를 먼저 적재한다")
+        rows = conn.execute(sa.text(f"select id, source_product_id from {SCHEMA}.products")).all()
+        index = row_index(manifest, {sid: pid for pid, sid in rows if sid is not None}, {pid for pid, _ in rows})
+        if len(index) < MIN_MATCH_RATIO * len(rows):
+            raise PackageError(f"상품 번호 매칭 부족 {len(index)}/{len(rows)} — 벡터의 번호 체계 · 세대가 카탈로그와 다르다")
+        conn.execute(sa.text(f"update {SCHEMA}.products set embedding = null where embedding is not null"))
+        conn.execute(sa.text(f"update {SCHEMA}.products set embedding = cast(:v as vector) where id = :id"),
+                     [{"id": pid, "v": vector_literal(vectors[i])} for pid, i in sorted(index.items())])
+        conn.execute(sa.text(f"""update {SCHEMA}.catalog_versions set embedding_model = :m, embedding_model_sha256 = :ms,
+                                     embedding_vectors_sha256 = :vs, embedding_loaded_at = now() where id = :id"""),
+                     {"m": manifest["model"], "ms": manifest["model_sha256"], "vs": manifest["vectors_sha256"], "id": version_id})
+    return {"matched": len(index), "total": len(rows), "version_id": version_id,
+            "format": "new" if "source_product_ids" in manifest else "old"}
+
+
+def _embeddings_step(engine: sa.Engine, src: str, *, if_empty: bool) -> int:
+    """--embeddings 단계 — 읽기 → (--if-empty 면 이미 있을 때 건너뜀) → 적재. 종료 코드를 돌려준다."""
+    if if_empty and has_active_embeddings(engine):
+        print("  · 활성 카탈로그 판에 상품 벡터가 이미 있다 — --if-empty 라 넣지 않는다")
+        return 0
+    manifest, raw = read_embeddings(src)
+    got = load_embeddings(engine, manifest, raw)
+    print(f"  ✓ 상품 벡터 — {got['matched']}/{got['total']} 상품 · {manifest['model'].split('/')[-1]} · "
+          f"형식 {got['format']} · 카탈로그 판 {got['version_id']}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 상품 축 태그 — products.tags (0011)
+# ---------------------------------------------------------------------------
+
+_TAG_ROWS = sa.text(f"""
+    select p.id, p.name, p.brand, p.product_kind, c.name as category_name, cp.name as parent_category_name
+    from {SCHEMA}.products p
+    join {SCHEMA}.categories c on c.id = p.category_id
+    left join {SCHEMA}.categories cp on cp.id = c.parent_id
+    where p.package_id = :pkg""")
+
+
+def load_tags(engine: sa.Engine, *, if_changed: bool = False) -> dict[str, Any]:
+    """활성 판의 상품에 축 태그를 계산해 넣는다 — 트랜잭션 하나(실패하면 이전 그대로).
+    if_changed 면 활성 판의 규칙 판 · 지문이 이 코드(vocab)와 같을 때 아무것도 하지 않는다."""
+    rule, sha = vocab.RULE, vocab.tags_sha256()
+    with engine.begin() as conn:
+        v = conn.execute(sa.text(f"""select id, package_id, tags_rule, tags_sha256 from {SCHEMA}.catalog_versions
+                                     where is_active for update""")).first()
+        if v is None:
+            raise PackageError("활성 카탈로그가 없다 — 먼저 카탈로그를 적재한다(--bundle 또는 --package)")
+        if if_changed and (v.tags_rule, v.tags_sha256) == (rule, sha):
+            return {"skipped": True, "version_id": v.id, "products": 0, "tags": 0, "by_axis": {}}
+        rows = conn.execute(_TAG_ROWS, {"pkg": v.package_id}).mappings().all()
+        vocab.set_catalog_brands(r["brand"] for r in rows)        # 협업 상대 확인용 — 앱(DbCatalogReader)과 같은 목록
+        params, by_axis, total = [], {}, 0
+        for r in rows:
+            tags = vocab.product_tags(SimpleNamespace(brand=r["brand"] or "", name=r["name"] or "", productKind=r["product_kind"] or None,
+                                                      categoryName=r["category_name"] or "", parentCategoryName=r["parent_category_name"]))
+            for t in tags:
+                by_axis[t["axis"]] = by_axis.get(t["axis"], 0) + 1
+            total += len(tags)
+            params.append({"id": r["id"], "t": json.dumps(tags, ensure_ascii=False)})
+        if params:
+            conn.execute(sa.text(f"update {SCHEMA}.products set tags = cast(:t as jsonb) where id = :id"), params)
+        conn.execute(sa.text(f"""update {SCHEMA}.catalog_versions set tags_rule = :r, tags_sha256 = :h, tags_loaded_at = now()
+                                 where id = :id"""), {"r": rule, "h": sha, "id": v.id})
+    return {"skipped": False, "version_id": v.id, "products": len(params), "tags": total, "by_axis": by_axis}
+
+
+def _tags_step(engine: sa.Engine, *, if_changed: bool) -> int:
+    got = load_tags(engine, if_changed=if_changed)
+    if got["skipped"]:
+        print(f"  · 상품 태그 판이 이미 같다({vocab.RULE}) — --if-changed 라 다시 계산하지 않는다")
+    else:
+        axes = " · ".join(f"{a} {n}" for a, n in sorted(got["by_axis"].items()))
+        print(f"  ✓ 상품 태그 — 상품 {got['products']} · 태그 {got['tags']}({axes}) · 규칙 {vocab.RULE} · 카탈로그 판 {got['version_id']}")
+    return 0
+
+
+def _main_tags_only(args: argparse.Namespace) -> int:
+    """--tags 만 — 이미 적재된 활성 카탈로그에 상품 태그를 넣는다."""
+    engine = sa.create_engine(get_settings().DATABASE_URL, future=True)
+    try:
+        return _tags_step(engine, if_changed=args.if_changed)
+    except PackageError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+    except sa.exc.SQLAlchemyError as e:
+        print(f"✗ DB 오류: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 재고 · 조회수 회신 반영
+# ---------------------------------------------------------------------------
 
 
 def apply_metrics(engine: sa.Engine, path: Path) -> dict[str, int]:
     """재고·조회수 회신(JSONL) → availability · view_count 채우기. 그 두 열만 건드린다.
 
-    한 줄: {"sourceProductId": "KAKAO_GIFT:1", "availability": "available", "viewCount": 47753}
+    한 줄: {"productId": 1, "availability": "available", "viewCount": 47753}   — productId 는 Backend 번호(products.id)
+          옛 회신 형식 {"sourceProductId": "KAKAO_GIFT:1", …} 도 받는다(products.source_product_id 로 찾는다).
     availability 는 3값만 받는다 — 이상한 값은 DB CHECK 가 막지만 여기서 먼저 거른다.
     """
     rows, skipped = [], 0
@@ -211,19 +542,21 @@ def apply_metrics(engine: sa.Engine, path: Path) -> dict[str, int]:
                 continue
             if av is not None and av not in AVAILABILITY:
                 raise PackageError(f"재고 상태가 3값이 아니다: {av} ({item.get('sourceProductId')})")
-            rows.append({"sid": item["sourceProductId"], "av": av, "vc": None if vc is None else int(vc)})
+            by_id = item.get("productId")
+            rows.append({"id": None if by_id is None else int(by_id), "sid": item.get("sourceProductId"),
+                         "av": av, "vc": None if vc is None else int(vc)})
     if not rows:
         return {"updated": 0, "skipped": skipped, "missing": 0}
 
-    stmt = sa.text(f"""update {SCHEMA}.products set
-                           availability = coalesce(:av, availability),
-                           view_count   = coalesce(:vc, view_count),
-                           updated_at   = now()
-                       where source_product_id = :sid""")
+    sets = """availability = coalesce(:av, availability),
+              view_count   = coalesce(:vc, view_count),
+              updated_at   = now()"""
+    by_id = sa.text(f"update {SCHEMA}.products set {sets} where id = :id")
+    by_source = sa.text(f"update {SCHEMA}.products set {sets} where source_product_id = :sid")
     updated = 0
     with engine.begin() as conn:
         for row in rows:
-            updated += conn.execute(stmt, row).rowcount
+            updated += conn.execute(by_id if row["id"] is not None else by_source, row).rowcount
     return {"updated": updated, "skipped": skipped, "missing": len(rows) - updated}
 
 
@@ -240,24 +573,21 @@ def report(engine: sa.Engine) -> None:
 
         print(f"  카테고리        대분류 {q(f'select count(*) from {SCHEMA}.categories where level = 1')}"
               f" · 소분류 {q(f'select count(*) from {SCHEMA}.categories where level = 2')}")
-        print(f"  상품            {q(f'select count(*) from {SCHEMA}.products')}건")
+        print(f"  상품            {q(f'select count(*) from {SCHEMA}.products')}건 · 벡터 {q(f'select count(embedding) from {SCHEMA}.products')}건"
+              f" · 태그 있는 상품 {q(f"select count(*) from {SCHEMA}.products where tags <> '[]'::jsonb")}건")
         print(f"  활성 버전       {q(f'select coalesce(max(id::text), chr(45)) from {SCHEMA}.catalog_versions where is_active')}")
-        be_p = q(f"select count(backend_product_id) from {SCHEMA}.products")
-        be_c = q(f"select count(backend_category_id) from {SCHEMA}.categories")
-        print(f"  Backend ID      상품 {be_p}/{q(f'select count(*) from {SCHEMA}.products')}"
-              f" · 카테고리 {be_c}/{q(f'select count(*) from {SCHEMA}.categories')}")
-        if be_p == 0:
-            print("                  ⚠ 아직 하나도 없다 — 7.7로 상품 번호를 내보낼 수 없다. Backend 회신 뒤 --id-map 으로 채운다")
+        print(f"  Backend 번호    상품 {q(f'select coalesce(min(id), 0) from {SCHEMA}.products')}~{q(f'select coalesce(max(id), 0) from {SCHEMA}.products')}"
+              f" · 카테고리 {q(f'select coalesce(min(id), 0) from {SCHEMA}.categories')}~{q(f'select coalesce(max(id), 0) from {SCHEMA}.categories')} (표의 키)")
         av = q(f"select count(*) from {SCHEMA}.products where availability <> 'unknown'")
         vc = q(f"select count(view_count) from {SCHEMA}.products")
         total = q(f"select count(*) from {SCHEMA}.products")
         print(f"  availability    {av}/{total} 확인됨" + ("" if av == total else " (나머지는 unknown — 재고 정보가 없는 상품)"))
         print(f"  view_count      {vc}/{total} 있음 — v1 풀 정렬 기준" + ("" if vc == total else ". Backend 회신으로 채운다"))
         mismatch = conn.execute(sa.text(f"""
-            select c.source_category_id, c.product_count, count(p.source_product_id)
-            from {SCHEMA}.categories c left join {SCHEMA}.products p on p.source_category_id = c.source_category_id
-            where c.level = 2 group by c.source_category_id, c.product_count
-            having c.product_count <> count(p.source_product_id)""")).all()
+            select c.id, c.product_count, count(p.id)
+            from {SCHEMA}.categories c left join {SCHEMA}.products p on p.category_id = c.id
+            where c.level = 2 group by c.id, c.product_count
+            having c.product_count <> count(p.id)""")).all()
         print(f"  선언 수 대조    {'전부 일치' if not mismatch else f'{len(mismatch)}개 소분류 불일치: {mismatch[:3]}'}")
 
 
@@ -267,24 +597,53 @@ def report(engine: sa.Engine) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Backend 전달 패키지를 ai_catalog 에 적재한다")
     ap.add_argument("--package", type=Path, help="패키지 폴더 (product-catalog-YYYYMMDD-vN)")
-    ap.add_argument("--id-map", type=Path, help="회신 product-id-map.jsonl — backend_product_id 채우기")
-    ap.add_argument("--category-id-map", type=Path, help="회신 category-id-map.jsonl — backend_category_id 채우기")
+    ap.add_argument("--id-map", type=Path, help="회신 product-id-map.jsonl — 수집처 상품 ID → Backend 상품 번호(--package 와 함께 필수)")
+    ap.add_argument("--category-id-map", type=Path, help="회신 category-id-map.jsonl — 수집처 카테고리 ID → Backend 카테고리 번호(--package 와 함께 필수)")
     ap.add_argument("--metrics", type=Path, help="회신 metrics.jsonl — availability · view_count 채우기")
     ap.add_argument("--dry-run", action="store_true", help="확인만 하고 쓰지 않는다")
     ap.add_argument("--no-activate", action="store_true", help="적재는 하되 활성 버전으로 바꾸지 않는다")
+    ap.add_argument("--write-bundle", type=Path, help="DB 에 쓰지 않고 합본 파일(.json 또는 .json.gz)만 만든다 — 서버 적재용(10-15)")
+    ap.add_argument("--bundle", help="합본 파일을 적재한다 — 로컬 경로 또는 s3://버킷/키 (서버 적재)")
+    ap.add_argument("--if-empty", action="store_true", help="활성 카탈로그(· 벡터)가 이미 있으면 그 단계는 건너뛰고 성공 — 배포 워크플로용")
+    ap.add_argument("--embeddings", help="상품 임베딩 벡터를 넣는다 — 폴더(manifest.json · vectors.f32) 또는 s3://버킷/접두어 (0009)")
+    ap.add_argument("--tags", action="store_true", help="활성 판의 상품 축 태그를 계산해 넣는다 — 이미지 안 규칙 · 어휘, LLM 없음 (0011)")
+    ap.add_argument("--if-changed", action="store_true", help="--tags 와 함께: 활성 판의 규칙 판 · 지문이 이 코드와 같으면 건너뜀 — 배포 워크플로용")
     args = ap.parse_args(argv)
+    if args.if_changed and not args.tags:
+        ap.error("--if-changed 는 --tags 와 함께 쓴다")
+    if args.tags and not (args.package or args.metrics or args.bundle or args.embeddings):
+        if args.dry_run:
+            print(f"상품 태그 규칙 {vocab.RULE} · 지문 {vocab.tags_sha256()[:12]}… — dry-run, 쓰지 않았다")
+            return 3
+        return _main_tags_only(args)
 
-    if not (args.package or args.id_map or args.category_id_map or args.metrics):
-        ap.error("--package 또는 --id-map / --category-id-map / --metrics 중 하나는 필요하다")
+    if args.bundle:
+        if args.package or args.id_map or args.category_id_map or args.metrics or args.write_bundle:
+            ap.error("--bundle 은 단독으로 쓴다(합본에 번호 · 재고 · 조회수가 다 들어 있다 — --embeddings 만 함께 쓸 수 있다)")
+        return _main_bundle(args)
+    if args.embeddings and not (args.package or args.metrics):
+        return _main_embeddings_only(args)
+    if args.write_bundle and not args.package:
+        ap.error("--write-bundle 에는 --package · --id-map · --category-id-map 이 필요하다")
+    if not (args.package or args.metrics):
+        ap.error("--package(+ --id-map · --category-id-map) 또는 --metrics 중 하나는 필요하다")
+    if args.package and not (args.id_map and args.category_id_map):
+        ap.error("--package 에는 --id-map 과 --category-id-map 이 함께 필요하다 — 표의 키가 Backend 번호다(0008)")
+    if (args.id_map or args.category_id_map) and not args.package:
+        ap.error("--id-map · --category-id-map 은 --package 와 함께만 쓴다(번호는 적재할 때 키로 붙는다)")
 
     pkg = None
+    product_ids: dict[str, int] = {}
+    category_ids: dict[str, int] = {}
     if args.package:
         try:
             pkg = read_package(args.package)
         except PackageError as e:
             print(f"✗ {e}", file=sys.stderr)
             return 1
-        problems = check(pkg)
+        product_ids = read_id_map(args.id_map, src="sourceProductId", dst="backendProductId")
+        category_ids = read_id_map(args.category_id_map, src="sourceCategoryId", dst="backendCategoryId")
+        problems = check(pkg) + check_ids(pkg, product_ids, category_ids)
         print(f"패키지 {pkg['summary'].get('packageId')} · 분류 {pkg['taxonomy_version']}")
         print(f"  카테고리 {len(pkg['categories'])} · 상품 {len(pkg['products'])}")
         for p in problems:
@@ -292,6 +651,16 @@ def main(argv: list[str] | None = None) -> int:
         if problems:
             return 1
         print("  ✓ 형식 확인 통과")
+        if args.write_bundle:
+            try:
+                bundle = build_bundle(pkg, product_ids, category_ids, read_metrics_map(args.metrics) if args.metrics else None)
+            except PackageError as e:
+                print(f"✗ {e}", file=sys.stderr)
+                return 1
+            write_bundle(bundle, args.write_bundle)
+            print(f"  ✓ 합본 {args.write_bundle} — 카테고리 {len(bundle['categories'])} · 상품 {len(bundle['products'])} · "
+                  f"{args.write_bundle.stat().st_size:,} bytes (팀 내부 자료 — 저장소 · 이미지에 넣지 않는다)")
+            return 0
         if args.dry_run:
             print("dry-run — 쓰지 않았다")
             return 3
@@ -307,16 +676,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if pkg is not None:
-            got = load(engine, pkg, activate=not args.no_activate)
+            got = load(engine, pkg, product_ids, category_ids, activate=not args.no_activate)
             print(f"  ✓ 적재 — 카테고리 {got['categories']} · 상품 {got['products']} · 버전 {got['version_id']}"
                   f"{'' if args.no_activate else ' (활성)'}")
-        for path, kind in ((args.id_map, "product"), (args.category_id_map, "category")):
-            if path:
-                r = apply_id_map(engine, path, kind=kind)
-                print(f"  ✓ {kind} ID 회신 — 채움 {r['updated']} · null 건너뜀 {r['skipped']} · 우리 표에 없는 ID {r['missing']}")
         if args.metrics:
             r = apply_metrics(engine, args.metrics)
             print(f"  ✓ 재고·조회수 회신 — 채움 {r['updated']} · 값 없어 건너뜀 {r['skipped']} · 우리 표에 없는 ID {r['missing']}")
+        if args.tags:
+            _tags_step(engine, if_changed=args.if_changed)
         print("\n현재 상태")
         report(engine)
     except PackageError as e:
@@ -328,6 +695,71 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         engine.dispose()
     return 0
+
+
+def _main_bundle(args: argparse.Namespace) -> int:
+    """--bundle 경로 — 합본 읽기 → (--if-empty 면 이미 있을 때 건너뜀) → 적재."""
+    try:
+        bundle = read_bundle(args.bundle)
+    except PackageError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+    problems = check_bundle(bundle)
+    print(f"합본 {bundle.get('packageId')} · 분류 {bundle.get('taxonomyVersion')} · 카테고리 {len(bundle['categories'])} · 상품 {len(bundle['products'])}")
+    for p in problems:
+        print(f"  ✗ {p}", file=sys.stderr)
+    if problems:
+        return 1
+    if args.dry_run:
+        print("dry-run — 쓰지 않았다")
+        return 3
+    engine = sa.create_engine(get_settings().DATABASE_URL, future=True)
+    try:
+        if args.if_empty and has_active_catalog(engine):
+            print("  · 활성 카탈로그가 이미 있다 — --if-empty 라 적재하지 않는다")
+        else:
+            got = load_bundle(engine, bundle, activate=not args.no_activate)
+            print(f"  ✓ 적재 — 카테고리 {got['categories']} · 상품 {got['products']} · 버전 {got['version_id']}"
+                  f"{'' if args.no_activate else ' (활성)'}")
+        if args.embeddings:
+            _embeddings_step(engine, args.embeddings, if_empty=args.if_empty)
+        if args.tags:
+            _tags_step(engine, if_changed=args.if_changed)
+        print("\n현재 상태")
+        report(engine)
+    except PackageError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+    except sa.exc.SQLAlchemyError as e:
+        print(f"✗ DB 오류: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    finally:
+        engine.dispose()
+    return 0
+
+
+def _main_embeddings_only(args: argparse.Namespace) -> int:
+    """--embeddings 만 — 이미 적재된 활성 카탈로그에 벡터를 넣는다."""
+    if args.dry_run:
+        try:
+            manifest, raw = read_embeddings(args.embeddings)
+        except PackageError as e:
+            print(f"✗ {e}", file=sys.stderr)
+            return 1
+        print(f"벡터 {manifest['model'].split('/')[-1]} · {raw.shape[0]}개 × {raw.shape[1]} — dry-run, 쓰지 않았다")
+        return 3
+    engine = sa.create_engine(get_settings().DATABASE_URL, future=True)
+    try:
+        code = _embeddings_step(engine, args.embeddings, if_empty=args.if_empty)
+        return _tags_step(engine, if_changed=args.if_changed) if args.tags and code == 0 else code
+    except PackageError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+    except sa.exc.SQLAlchemyError as e:
+        print(f"✗ DB 오류: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    finally:
+        engine.dispose()
 
 
 if __name__ == "__main__":

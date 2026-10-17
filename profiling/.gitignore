@@ -7,3 +7,24 @@ __pycache__/
 
 # 7.9 export 저장본 (fetch_export.py 결과) — 커밋하지 않음
 data/
+
+# 부하 시험 결과 JSON·로그 (tools/loadtest/run.py --out) — 커밋하지 않음
+tools/loadtest/results/
+
+# 시나리오 30개 콜백 검증 결과 (tools/scenario_callback30/run.py) — 커밋하지 않음
+tools/scenario_callback30/out/
+
+# 환경 파일은 예시(.env.example)까지 커밋하지 않는다 — 담당자가 저장소 밖에서 관리 (2026-10-07). 루트 .gitignore 와 같은 규칙
+.env.*
+docker-compose.override.yml
+*.pem
+*.key
+tools/embed_compare/out/
+# 문서는 비공개(10-13) — 설계 · 시험 결과 · 결정 기록은 팀 비공개 폴더에서 관리. 로컬 사본은 여기 두되 저장소에 올리지 않는다
+docs/
+
+# Backend 회신으로 만든 번호 대응표(상품 · 카테고리 번호) — 팀 내부 자료, 공개 저장소에 두지 않는다(10-15)
+tools/catalog/returned/
+
+# 이름 대조표 — 내부 작업 메모, 저장소에 두지 않는다(10-15). 로컬 사본은 둔다
+이름_대조표.md

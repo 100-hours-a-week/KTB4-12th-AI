@@ -1,15 +1,13 @@
 """Catalog adapter — 활성 카탈로그 1버전을 `ports.CatalogReader` 모양으로 제공한다. 구현 두 가지.
 
-  DbCatalogReader   `ai_catalog`(마이그레이션 0003)를 읽는다. **배포는 이쪽이다** — 컨테이너 안에 카탈로그 파일이 없기 때문.
+  DbCatalogReader   `ai_catalog`를 읽는다. **배포는 이쪽이다** — 컨테이너 안에 카탈로그 파일이 없기 때문.
                     활성 버전은 `catalog_versions.is_active` 한 행이고, 그 `id`(uuid)가 그대로 `SearchResult.catalog_version_id`가 된다.
   FileCatalogReader 카탈로그 JSON 한 개. 로컬 개발·시험용으로 남긴다(`PROFILING_CATALOG_SOURCE=file`).
 
 어느 쪽을 쓸지는 `main.lifespan`이 설정(`CATALOG_SOURCE`) 하나로 고른다. 업무 코드(pipeline)는 어느 쪽인지 모른다.
 
-**상품 번호 규칙** (DbCatalogReader). 7.6·7.7은 Backend가 발급한 정수 번호로 말한다. 그 번호는 아직 없다(`backend_product_id` 전건 NULL).
-그래서 없는 동안에는 수집처 ID의 숫자부(`KAKAO_GIFT:10002797` → `10002797`)를 **임시 번호**로 쓰고, `provisional_ids=True`로 표시해
-기동 로그와 `/health`에 남긴다. Backend 회신을 `--id-map`으로 채우면 같은 코드가 진짜 번호를 쓰기 시작하고 표시는 사라진다.
-임시 번호는 Backend에 없는 번호이므로 **7.7로 내보내면 화면에 상품이 뜨지 않는다** — 배포는 되지만 추천이 맞으려면 회신이 먼저다.
+**상품 번호 규칙** (DbCatalogReader). 7.6·7.7은 Backend가 발급한 정수 번호로 말한다. `ai_catalog` 의 키가 곧 그 번호다(0008) —
+categories.id · products.id 는 Backend 와 같은 번호이고 적재 도구가 번호 없는 행을 받지 않는다. 그래서 임시 번호는 없다.
 
 --- 아래는 FileCatalogReader ---
 
@@ -28,10 +26,13 @@ DB adapter로 바꿀 때 유지할 계약(ports.CatalogReader): active() → (ca
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import re
 import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ import sqlalchemy as sa
 from pydantic import ValidationError
 from sqlalchemy.engine import Engine
 
+from profiling import vocab
 from profiling.ports import NoActiveCatalog
 from profiling.schemas import ProductRecord
 from profiling.types import ErrorCode
@@ -142,6 +144,7 @@ class FileCatalogReader:
 
         self._products = products
         self._by_id = {p.productId: p for p in products}
+        vocab.set_catalog_brands(p.brand for p in products)   # 협업 상대 확인용(상품 태그는 그 자리에서 계산)
         self.loaded_at = datetime.now(UTC)
         self.version_label = str(doc.get("schema_version") or doc.get("category_version") or "") if isinstance(doc, dict) else ""
         log.info("FileCatalogReader 로드 %s: 상품 %d건 (형식 오류 %d · 중복 %d · 재고 available %d · unknown %d) label=%s",
@@ -149,7 +152,7 @@ class FileCatalogReader:
                  sum(p.availability == "available" for p in products), sum(p.availability == "unknown" for p in products),
                  self.version_label or "-")
         if n_invalid:
-            log.warning("%s %s: 상품 %d건이 7.9 필드 계약에 안 맞아 버림 — tools/catalog/fetch_export.py 로 어느 필드인지 확인",
+            log.warning("%s %s: 상품 %d건이 7.9 필드 계약에 안 맞아 버림",
                         ErrorCode.CONTRACT_7_9_SCHEMA, self.path.name, n_invalid)
 
     # ---- ports.CatalogReader ------------------------------------------------
@@ -168,12 +171,14 @@ class FileCatalogReader:
 
 
 # ===========================================================================
-# DB 구현 — ai_catalog (마이그레이션 0003). 배포 기본값.
+# DB 구현 — ai_catalog. 배포 기본값.
 # ===========================================================================
 
 SCHEMA = "ai_catalog"
 
 _ACTIVE_VERSION = sa.text(f"select id, package_id from {SCHEMA}.catalog_versions where is_active")
+## 상품 태그(0011)의 판 — 이 코드(vocab)의 판과 같을 때만 DB 의 상품 태그를 쓴다. 다르거나 없으면 vocab 이 같은 함수로 그 자리에서 계산
+_TAGS_VERSION = sa.text(f"select tags_rule, tags_sha256 from {SCHEMA}.catalog_versions where id = :id")
 
 ## 활성 버전과 그 패키지의 상품을 **한 문장으로** 읽는다. 두 문장으로 나누면 그 사이에 카탈로그가 교체될 때
 ## "버전은 옛것, 상품은 새것"인 한 벌이 나온다 — PostgreSQL 기본 격리(READ COMMITTED)는 문장마다 스냅샷이
@@ -181,54 +186,55 @@ _ACTIVE_VERSION = sa.text(f"select id, package_id from {SCHEMA}.catalog_versions
 ## products 에는 버전 FK가 없고 package_id 만 있어 그 열로 잇는다(시험용 행이 섞여 있어도 활성 패키지만 본다).
 _ACTIVE_PRODUCTS = sa.text(f"""
     select v.id as version_id, v.package_id,
-           p.source_product_id, p.backend_product_id, p.name, p.brand, p.description,
-           p.source_category_id, c.backend_category_id, c.name as category_name,
-           cp.backend_category_id as parent_backend_category_id, cp.name as parent_category_name,
-           p.unit_price, p.availability, p.view_count, p.updated_at
+           p.id, p.name, p.brand, p.description, p.product_kind,
+           p.category_id, c.name as category_name, c.parent_id, cp.name as parent_category_name,
+           p.unit_price, p.availability, p.view_count, p.updated_at, p.tags
     from {SCHEMA}.catalog_versions v
     join {SCHEMA}.products p on p.package_id = v.package_id
-    join {SCHEMA}.categories c on c.source_category_id = p.source_category_id
-    left join {SCHEMA}.categories cp on cp.source_category_id = c.parent_source_category_id
+    join {SCHEMA}.categories c on c.id = p.category_id
+    left join {SCHEMA}.categories cp on cp.id = c.parent_id
     where v.is_active""")
 ## 부모(대분류)를 같이 읽는 이유: 비선호가 대분류 id·이름으로 오고(09-27 BE 결정) 풀에서 그 하위 소분류 전체를 제외해야 한다.
-## 부모의 Backend 번호가 아직 없으면 None 으로 둔다(임시 번호를 만들지 않는다 — 대분류는 회신 없이 쓸 일이 없다).
 
-_SOURCE_PRODUCT_ID = re.compile(r"^[A-Z_]+:(\d+)$")        # KAKAO_GIFT:10002797
-_SOURCE_CATEGORY_ID = re.compile(r"^CAT-(\d+)-(\d+)$")     # CAT-01-02
+def _freeze_long_lived() -> None:
+    """카탈로그처럼 프로세스 내내 사는 객체를 GC 영구 세대로 옮긴다(gc.freeze) — 세대 2 수집이 그것들을 다시 훑지 않게.
 
-
-def _provisional_product_id(source_product_id: str) -> int:
-    """Backend 번호가 없는 동안 쓰는 임시 상품 번호 — 수집처 ID의 숫자부. FileCatalogReader의 원형 변환과 같은 규칙."""
-    m = _SOURCE_PRODUCT_ID.match(source_product_id)
-    if not m:
-        raise NoActiveCatalog(f"상품 ID에서 번호를 뽑을 수 없습니다: {source_product_id}")
-    return int(m.group(1))
-
-
-def _provisional_category_id(source_category_id: str) -> int:
-    """임시 카테고리 번호 — 대분류*100 + 소분류. FileCatalogReader의 원형 변환과 같은 규칙."""
-    m = _SOURCE_CATEGORY_ID.match(source_category_id)
-    if not m:
-        raise NoActiveCatalog(f"카테고리 ID에서 번호를 뽑을 수 없습니다: {source_category_id}")
-    return int(m.group(1)) * 100 + int(m.group(2))
+    왜: 요청마다 `rank_products`가 `ScoredProduct` 를 카탈로그 전체 수만큼 만들어 세대 2 수집이 주기적으로 일어나는데, 그때마다 상주 카탈로그
+    `ProductRecord` 전체까지 훑어 요청 5~6% 가 25~100ms 를 더 썼다. 앱만 7.6 200건 실측: 서버 처리 p95 33.9 → 14.5ms
+    (GC 를 끈 대조 12.2ms). 이슈 docs/issues/2026-10-12_0815_gc-tail-latency.
+    순서: unfreeze → collect → freeze. 카탈로그가 바뀌면 옛 객체가 영구 세대에 남아 새지 않도록 먼저 풀고, 전체 수집으로 옛 순환
+    쓰레기를 치운 뒤 다시 얼린다(교체는 드물어 전체 수집 비용은 그때 한 번). 그 순간 진행 중이던 요청의 임시 객체도 함께 얼지만
+    참조가 끝나면 참조 카운트로 그대로 해제된다 — 해제되지 않는 건 이미 쓰레기였던 순환뿐이고 다음 교체 때 치워진다.
+    gc 는 프로세스 전역이다. 프로세스(uvicorn 워커)마다 따로 돈다.
+    """
+    gc.unfreeze()
+    gc.collect()
+    gc.freeze()
+    log.info("gc.freeze — 영구 세대 객체 %d개(카탈로그 포함)", gc.get_freeze_count())
 
 
 class DbCatalogReader:
     """ports.CatalogReader 구현 (PostgreSQL `ai_catalog`).
 
-    `active()`는 호출마다 **활성 버전 id만** 한 번 묻고(작은 질의 한 개), 그 값이 지난번과 같으면 들고 있던 목록을 그대로 준다.
-    달라졌을 때만 상품 전체를 다시 읽는다 — 카탈로그를 새로 적재해도 앱을 재시작할 필요가 없고, 요청마다 4천 건을 읽지도 않는다.
-    백그라운드 스레드와 요청 스레드가 같이 부르므로 다시 읽는 구간은 락으로 묶는다.
+    `active()`는 마지막 폴링 뒤 `poll_ttl_s`(설정 CATALOG_POLL_TTL_S, 기본 1초)가 지났을 때만 **활성 버전 id**를 한 번 묻고
+    (작은 질의 한 개), 그 안에서는 DB 를 건드리지 않고 들고 있던 한 벌을 그대로 준다. id 가 지난번과 다를 때만 상품 전체를
+    다시 읽는다 — 새로 적재해도 재시작이 필요 없고, 요청마다 4천 건은커녕 폴링조차 하지 않는다(7.6 한 건이 접수·슬롯에서
+    두 번 폴링해 DB 왕복 8번을 쓰던 것을 없앤다). 새 적재·활성 해제(503)가 보이기까지 최대 TTL 만큼 늦는다.
+    폴링 실패는 캐시하지 않는다(되살리면 곧바로 회복). 다시 읽는 구간은 락으로 묶는다.
     """
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, poll_ttl_s: float = 1.0, clock: Callable[[], float] = time.monotonic) -> None:
         self._engine = engine
+        self._poll_ttl_s = poll_ttl_s
+        self._clock = clock                                   # 시험이 시계를 주입한다 (intake._send_and_record 의 sleep 과 같은 방식)
         self._lock = threading.Lock()
         self._version: UUID | None = None
         self._products: list[ProductRecord] = []
         self._by_id: dict[int, ProductRecord] = {}
-        self.provisional_ids = False
+        self._snapshot: tuple[UUID, list[ProductRecord]] | None = None   # active() 가 돌려주는 한 벌 — _load 끝에 통째로 바꾼다
+        self._polled_at: float | None = None                              # 마지막 **성공한** 폴링 시각(monotonic). None = 아직 안 물었다
         self.loaded_at: datetime | None = None
+        self.tags_state = "none"                                          # 상품 태그(0011) — ok · stale · none (/health)
 
     # ---- ports.CatalogReader ------------------------------------------------
 
@@ -238,14 +244,19 @@ class DbCatalogReader:
         값싼 폴링(_active_version)은 "바뀌었나"만 본다. 돌려주는 버전은 폴링 값이 아니라 **적재에 쓴 질의가
         돌려준 값**이다 — 폴링과 적재 사이에 카탈로그가 교체돼도 버전과 상품이 어긋나지 않는다.
         """
-        polled, _ = self._active_version()
+        snapshot = self._snapshot
+        if snapshot is not None and self._polled_at is not None and self._clock() - self._polled_at < self._poll_ttl_s:
+            return snapshot                               # TTL 안 — DB 왕복 없음
+        polled, _ = self._active_version()                # NoActiveCatalog 는 그대로 올라간다 — _polled_at 갱신 없음(실패는 캐시하지 않는다)
         if polled != self._version:
             with self._lock:
                 if polled != self._version:           # 락을 기다리는 동안 다른 스레드가 이미 읽었을 수 있다
                     self._load()
-        if self._version is None:                     # _load 가 성공하면 반드시 채워진다(방어)
+        self._polled_at = self._clock()                   # 성공한 폴링만 기록 (락 없이 — 최악이 폴링 한 번 더)
+        snapshot = self._snapshot
+        if snapshot is None:                              # _load 가 성공하면 반드시 채워진다(방어)
             raise NoActiveCatalog("활성 카탈로그를 읽지 못했습니다")
-        return self._version, self._products
+        return snapshot
 
     def by_id(self, product_id: int) -> ProductRecord | None:
         self.active()                                  # 버전이 바뀌었으면 먼저 따라잡는다
@@ -254,9 +265,10 @@ class DbCatalogReader:
     # ---- 내부 ---------------------------------------------------------------
 
     def _active_version(self) -> tuple[UUID, str]:
-        """(활성 버전 id, 그 패키지 이름). 작은 질의 하나 — active() 가 호출마다 부른다."""
+        """(활성 버전 id, 그 패키지 이름). 작은 질의 하나 — active() 가 TTL 이 지났을 때 부른다."""
         try:
             with self._engine.connect() as conn:
+                conn.execution_options(isolation_level="AUTOCOMMIT")   # 읽기 한 문장 — BEGIN/ROLLBACK 왕복 없이
                 row = conn.execute(_ACTIVE_VERSION).first()
         except sa.exc.SQLAlchemyError as e:
             raise NoActiveCatalog(f"카탈로그를 읽을 수 없습니다: {type(e).__name__}: {e}") from e
@@ -264,48 +276,50 @@ class DbCatalogReader:
             raise NoActiveCatalog(f"{SCHEMA}.catalog_versions 에 활성 버전이 없습니다 — tools/catalog/load_catalog.py 로 적재하세요")
         return row[0], row[1]                          # 부분 유니크 인덱스가 활성 1개를 보장한다
 
+    def _tags_state(self, version: UUID) -> str:
+        """활성 판의 상품 태그가 쓸 만한가 — ok(판이 코드와 같음) · stale(다름) · none(태그 없음)."""
+        with self._engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT")
+            row = conn.execute(_TAGS_VERSION, {"id": version}).first()
+        if row is None or row[0] is None:
+            return "none"
+        return "ok" if (row[0], row[1]) == (vocab.RULE, vocab.tags_sha256()) else "stale"
+
     def _load(self) -> None:
         """활성 버전 + 그 상품을 한 문장으로 읽어 캐시를 바꾼다. 버전은 **그 결과에서** 꺼낸다."""
         with self._engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT")
             rows = conn.execute(_ACTIVE_PRODUCTS).mappings().all()
         if not rows:
             raise NoActiveCatalog("활성 버전의 패키지에 상품이 없습니다 — tools/catalog/load_catalog.py 로 적재하세요")
         version, package_id = rows[0]["version_id"], rows[0]["package_id"]
+        tags_state = self._tags_state(version)
 
-        products: list[ProductRecord] = []
-        provisional_p = provisional_c = 0
-        for r in rows:
-            pid = r["backend_product_id"]
-            if pid is None:
-                pid = _provisional_product_id(r["source_product_id"])
-                provisional_p += 1
-            cid = r["backend_category_id"]
-            if cid is None:
-                cid = _provisional_category_id(r["source_category_id"])
-                provisional_c += 1
-            products.append(ProductRecord(
-                productId=pid, name=r["name"], brand=r["brand"], description=r["description"] or None,
-                categoryId=cid, categoryName=r["category_name"],
-                parentCategoryId=r["parent_backend_category_id"], parentCategoryName=r["parent_category_name"],
-                price=r["unit_price"],
+        products = [ProductRecord(
+                productId=r["id"], name=r["name"], brand=r["brand"], description=r["description"] or None,
+                categoryId=r["category_id"], categoryName=r["category_name"],
+                parentCategoryId=r["parent_id"], parentCategoryName=r["parent_category_name"],
+                productKind=r["product_kind"] or None, price=r["unit_price"],
                 availability=r["availability"], updatedAt=r["updated_at"], viewCount=r["view_count"] or 0,
-            ))
+                tags=frozenset((t["axis"], t["tag"]) for t in r["tags"]) if tags_state == "ok" else None,
+            ) for r in rows]
 
         products.sort(key=lambda p: p.productId)        # 7.9 export와 같은 순서
-        by_id = {p.productId: p for p in products}
-        if len(by_id) != len(products):                 # 진짜 번호와 임시 번호가 섞여 충돌한 경우 — 그대로 쓰면 다른 상품을 추천한다
-            raise NoActiveCatalog(f"상품 번호가 겹칩니다({len(products) - len(by_id)}건) — Backend ID 회신을 끝까지 적용하세요")
+        by_id = {p.productId: p for p in products}      # products.id 가 PK 라 겹칠 수 없다
+        vocab.set_catalog_brands(p.brand for p in products)   # 협업 상대 확인용 — 적재 도구가 태그를 계산할 때와 같은 목록
 
         self._products, self._by_id, self._version = products, by_id, version
-        self.provisional_ids = bool(provisional_p or provisional_c)
+        self._snapshot = (version, products)                  # 튜플 하나를 통째로 바꿔 "버전은 옛것, 상품은 새것"인 순간이 없다
+        self.tags_state = tags_state
         self.loaded_at = datetime.now(UTC)
-        log.info("DbCatalogReader 로드 version=%s package=%s 상품 %d건 (재고 available %d · unknown %d)",
+        log.info("DbCatalogReader 로드 version=%s package=%s 상품 %d건 (재고 available %d · unknown %d) 상품 태그=%s",
                  version, package_id, len(products),
-                 sum(p.availability == "available" for p in products), sum(p.availability == "unknown" for p in products))
-        if self.provisional_ids:
-            log.warning("%s 임시 상품 번호 사용 중 — 상품 %d/%d · 카테고리 %d건이 Backend 번호가 아니다. "
-                        "7.7로 내보내면 Backend에 없는 번호가 된다. load_catalog.py --id-map 으로 회신을 채우세요",
-                        ErrorCode.CONTRACT_7_9_SCHEMA, provisional_p, len(products), provisional_c)
+                 sum(p.availability == "available" for p in products), sum(p.availability == "unknown" for p in products), tags_state)
+        if tags_state != "ok":
+            log.warning("상품 태그 %s — 비선호 대조는 같은 규칙으로 그 자리에서 계산한다(결과는 같고 조금 느림). "
+                        "적재: load_catalog --tags --if-changed", "없음" if tags_state == "none" else "판이 코드와 다름")
+        del rows                                        # DB 행 4천 개를 아래 freeze 에 끌고 들어가지 않게
+        _freeze_long_lived()
 
     # ---- 편의 ---------------------------------------------------------------
 

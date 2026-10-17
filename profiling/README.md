@@ -1,226 +1,280 @@
-# profiling — 수신자 프로파일링 (AI 백엔드 · Profile / Catalog 파트)
+# profiling — 받는 사람 프로파일링 서버
 
-Backend가 수신자의 비선호 카테고리·취향 문장·최근 리뷰를 **7.6**으로 보내면, 즉시 `202`로 접수하고 백그라운드에서 추천 상품 30개를 골라 **7.7 콜백**으로 돌려주는 서비스. 태그는 AI가 보관하고 Backend에는 상품 번호만 보낸다(DR-035). 상품 목록은 Backend의 **7.9 export**로 받는다.
+받는 사람의 **비선호 카테고리 · 취향 문장 · 최근 리뷰**를 읽어 선물 **추천 상품 30개**를 골라 Backend 에 돌려주는 AI 서버입니다.
 
-| 상태 (2026-09-23) | |
+- Backend 가 요청을 보내면 바로 `202` 로 받고, 분석은 뒤에서 합니다.
+- 끝나면 Backend 콜백 주소로 상품 번호 30개를 보냅니다.
+- 취향 태그 · 리뷰 정리본은 AI DB 에만 저장하고, Backend 에는 상품 번호만 보냅니다.
+
+```mermaid
+flowchart LR
+    BE[Backend] -->|요청| IN[접수]
+    IN --> Q[대기열]
+    Q --> P[분석]
+    P --> DB[(AI DB)]
+    P -->|추천 30개| BE
+```
+
+| | |
 |---|---|
-| 동작 범위 | **v1** — 비선호 카테고리만 반영해 7.6 → 202 → 7.7까지 끝까지 동작. 취향·리뷰를 읽는 모델·검증기 단계는 v3 |
-| 저장소 | **PostgreSQL 하나뿐** — `ai_profile.profile_runs`(실행 기록) · `ai_profile.recipient_profiles`(수신자 프로필). 메모리 구현은 09-23에 제거했고 DB 없이 띄우는 모드는 없다. 카탈로그는 아직 파일. 전환 설명: [docs/DB_전환_설명.md](docs/DB_전환_설명.md) |
-| 테스트 | 단위 134개(외부 의존 없음) + 통합 45개(진짜 PostgreSQL, 꺼져 있으면 skip) — `uv run pytest -q` → 177 passed, 2 skipped |
-| 담당 | Profile · Catalog · DB adapter · Embedding adapter. Chat·Search·Runtime·Model adapter는 팀원. 합칠 때 라우터·adapter만 옮긴다 |
+| 상태 | **v2 개발 · 통합 중** (이슈 #11 · #12 · #13 · #14) |
+| 언어 · 런타임 | Python 3.13 · FastAPI · SQLAlchemy · Alembic · uv |
+| 저장소 | PostgreSQL 16 + pgvector (마이그레이션 `0011` — 상품 임베딩 벡터 `0009` · 비선호 태그 `0010` · 상품 축 태그 `0011`) |
+| 외부 LLM | OpenRouter (태그 추출 — 꺼도 추천은 동작) |
+| 담당 | AI 프로파일링 (Profile · Catalog · DB · Embedding 어댑터) |
+
+## 목차
+
+1. [빠른 시작](#1-빠른-시작)
+2. [설정](#2-설정)
+3. [API](#3-api)
+4. [동작 방식](#4-동작-방식)
+5. [프로젝트 구조](#5-프로젝트-구조)
+6. [시험](#6-시험)
+7. [배포](#7-배포)
+8. [보안](#8-보안)
 
 ---
 
-## 1. 구조
+## 1. 빠른 시작
 
-**Ports & Adapters(헥사고날).** 업무 코드는 바깥(HTTP·파일·DB)을 모르고, 바깥이 업무의 "포트(모양)"에 맞춰 들어온다. 의존 방향은 항상 안쪽.
+### 준비물
 
-![profiling 구조](docs/assets/structure.png)
+- Python 3.13 · [uv](https://docs.astral.sh/uv/)
+- Docker (로컬 PostgreSQL)
+- 프로파일링 담당에게 받을 것: **로컬 설정 템플릿**(`.env`) · **카탈로그 합본 파일**(팀 내부 자료 — 저장소 · 위키에 올리지 않음)
 
-> 그림 원본: `docs/assets/build_structure.py` → `structure.svg` (PNG는 Chrome 헤드리스). 모듈이 늘거나 포트가 바뀌면 스크립트를 고치고 다시 만든다.
-
-`src/profiling/` 모듈 12개의 역할은 위 그림에 있다. 나머지 폴더는 이렇다.
-
-| 폴더 · 파일 | 내용 |
-|---|---|
-| `tools/fake_backend/` | 가짜 Backend: 7.7 수신(실패 주입) · 7.9 제공 · 시험 콘솔 · **Backend 생애주기 흉내**(`lifecycle.py` — 디바운스→7.6→202→실패·타임아웃 시 같은 번호 재시도 2회(`Retry-After`·백오프)→FAILED) |
-| `tools/be_integration/` | **진짜 BE(develop)와 붙이는 시험 드라이버** `drive.py` — 로그인 → 비선호 저장 → 7.6 관찰 → 대분류 제외 검증 → (옵션) AI 다운 시 BE 재시도 관찰. 절차는 `docs/BE_연동_시험_결과_2026-09-27.md` §7 |
-| `tools/catalog/fetch_export.py` | 7.9 가져오기 · 계약 점검(`CONTRACT_7_9_SCHEMA`) · 상품 ID 대조(파일 · `ai_search.products`) · 저장 |
-| `tools/catalog/load_catalog.py` | Backend 전달 패키지 → `ai_catalog` 적재 · 회신 반영(`--id-map` · `--metrics`) |
-| `tools/catalog/import_be_ids.py` | Backend 회신 xlsx 2종 → id-map · metrics jsonl (이름으로 매칭, 1:1 보장). 결과는 `tools/catalog/returned/날짜/` |
-| `tools/catalog/make_sample.py` | 예시 카탈로그 재생성 |
-| `tests/fixtures/catalog_sample.json` | 예시 카탈로그 111건 · 56카테고리 (7.9 형식) |
-| `tests/unit/` | 가짜 구현 · `httpx.MockTransport` — DB·네트워크 없이 돈다 |
-| `tests/integration/` | 진짜 PostgreSQL — 마이그레이션 결과 · upsert · 상태 규칙 · 앱 e2e. DB 꺼져 있으면 skip |
-| `alembic/versions/` | `0001` recipient_profiles(수신자 프로필) · `0002` profile_runs(실행 기록) · `0003` ai_catalog(상품·카테고리·적재 버전) · `0004` profile_runs 열 주석 정정(동작 변경 없음) |
-| `docker-compose.yml` | `ai-db`(pgvector/pg16 · `ai_chat` · 5432) · `ai-migrate`(alembic 한 번) · `ai-app`(:8000) |
-| `Dockerfile` · `.dockerignore` | 앱 이미지 — python 3.12-slim + uv(`uv.lock` 그대로) · 비루트(uid 10001) · 시험·문서는 넣지 않는다 |
-| [docs/코드_안내서.md](docs/코드_안내서.md) | 파일·함수별 역할 (처음 보는 사람용) · 시퀀스 |
-| [docs/FE_연동_시험_시나리오.md](docs/FE_연동_시험_시나리오.md) | FE 연동 시험 8종(성공·콜드스타트·PENDING·503·재전송·FAILED·409) — 페이크 Backend로 로컬에서 30초에 한 바퀴 |
-| [docs/BE_연동_시험_결과_2026-09-27.md](docs/BE_연동_시험_결과_2026-09-27.md) | **BE `develop` 실물 연동 시험** — 7.6·202·대분류 제외 정상, 7.7은 PR3 전이라 401, AI 다운 시 새 번호 반복·PENDING 고착 실측. §7 재현 절차 |
-| [docs/FE_연동_시험_결과_2026-09-25.md](docs/FE_연동_시험_결과_2026-09-25.md) | 위 시나리오 실행 기록과 분석 — 8/8 통과, 고칠 것 3개 |
-| [docs/시퀀스_전체.md](docs/시퀀스_전체.md) | **구현된 프로파일링 전체 시퀀스** — 기동 · 성공 전체 · 접수 거절 · 분석 실패(침묵) · 콜백 4갈래 · 슬롯 (그림 6장) |
-| [docs/DB_ERD.md](docs/DB_ERD.md) | **AI가 소유한 표 구조(ERD)** — `ai_profile` 2표 · `ai_catalog` 3표 · 키·인덱스·제약 · FK인 것과 아닌 것 · 바깥 ID 대응 (그림 2장) |
-| [docs/DB_전환_설명.md](docs/DB_전환_설명.md) | 메모리 → PostgreSQL 전환: 무엇이 왜 어떻게 바뀌었나 (그림) |
-| [docs/BE_전달_2026-09-27.md](docs/BE_전달_2026-09-27.md) | **BE 담당자 전달본** — 이 한 장으로 연동 구현 가능 (필드·상태·재전송·트랜잭션·확인 요청) |
-| [docs/BE_연동_필드표.md](docs/BE_연동_필드표.md) | BE 전달본 색인 — v1(7.6 세 필드 · 7.7 · `profileStatus` 생애주기 · 시퀀스 5장) · v2(7.9 export) · v3(취향·리뷰) |
-| [docs/파이프라인_지도/](docs/파이프라인_지도/README.md) | 날짜별 갱신 기록 — 그림 스냅샷 · 단계별 함수 · 바뀐 것 · **다음 해야 할 일(인수인계)**. 규칙은 그 폴더 README |
-| [docs/문서_목록.md](docs/문서_목록.md) | **문서 검토 트리 + 최신성** — README 에서 링크로 닿는 순서(스크립트가 만듦)와 문서마다 코드와 맞는지 |
-| [docs/issues/](docs/issues/README.md) | 발견한 문제 기록 — 발견 시각별 폴더(문서 + 그림). 이슈·트러블슈팅으로 그대로 옮긴다 |
-| [docs/환경_설정.md](docs/환경_설정.md) | uv · Python 3.12 · 의존성 규칙 |
-| `docs/assets/` | `structure.png`(위 구조) · `pipeline-map.png` · `db-transition.png` · `v1-flow.png` · `class-diagram.png` · `be-seq/v1\|v2\|v3/`(BE 연동 시퀀스 9장) · `seq/`(전체 시퀀스 6장) · `erd/`(DB 표 구조 2장). 각각 `build_*.py`가 만든다 |
-| [이름_대조표.md](이름_대조표.md) | 같은 뜻 · 다른 이름 정리 (camelCase ↔ snake_case) |
-
-
-### 이름 규칙
-- **HTTP 경계만 camelCase** (`schemas.py`, fake_backend) — 문서 1과 1:1.
-- **Python 내부는 snake_case** (`types.py`·`pipeline.py`·`stores.py` 등 나머지 전부, 함수·변수 포함).
-- 두 세계의 변환은 **두 함수뿐**: `pipeline.to_internal()`(7.6 → 내부) · `backend.to_callback()`(내부 → 7.7). 업무 코드에서 camelCase가 보이면 규칙 위반.
-- 7.6 DTO 변수는 `body`, 내부 요청은 `rq`, 결과는 `outcome`. 세부는 [이름_대조표.md](이름_대조표.md).
-
-### 요청 한 건의 흐름 (v1)
-
-![파이프라인 지도](docs/assets/pipeline-map.png)
-
-(단계마다 부르는 함수와 포트·어댑터·바깥의 연결. 시퀀스 형태는 [v1-flow.png](docs/assets/v1-flow.png))
-
-1. `POST 7.6` → Pydantic 검증(위반 400 `INVALID_REQUEST`) → 서비스 토큰(401) → 활성 카탈로그 없으면 503 → **202 `PENDING`** (HTTP 끝)
-2. 백그라운드 `run_and_callback`: `to_internal` → `profile()` — `store.save(RUNNING, input_hash)` → `catalog.active()` 한 번(같은 버전 유지) → 비선호 이름만 담은 `ValidationResult` → `build_pool`(재고 없음(`unavailable`)만 제외 · 비선호 **대분류**의 하위 소분류 전체 제외 · 조회수 내림차순 · 30개) → `ProfileOutcome(RESULT_READY)` → `store.save`(콜백 본문을 DB에 먼저 커밋) → `recipient_store.upsert(from_outcome)`
-3. `RESULT_READY`면 `backend.send_profile_callback` → `POST 7.7` → 응답을 `RunStatus`로: `200→DELIVERED`, `409→SUPERSEDED`, `4xx→FAILED`, `5xx·네트워크→RESULT_READY`(같은 슬롯에서 0.5초·2초 뒤 최대 3회 재시도) → `store.save(마지막 상태, callback_attempts + 시도 수)`. `FAILED` 결과는 콜백 없음(AI는 침묵, Backend가 판정). DB에 무엇이 언제 남는지: [docs/DB_전환_설명.md](docs/DB_전환_설명.md)
-
-### 지금 정해진 규칙과 미결
-| 규칙 | 값 | 출처 |
-|---|---|---|
-| 리뷰 상한 10 · rating 1~5 · 글 null 가능 · 콜백 ID ≤30 · 태그 미전송 | 스키마에서 강제 | 문서 1 v3.2.7 |
-| 풀 정렬 (v1) | **조회수(`viewCount`) 내림차순**, 동점은 productId 오름차순. 임의성 없음 | 결정 a (09-22 Backend 합의: 초기엔 임의 조회수를 넣어 보냄). 필드명은 Backend 확정 전 임시 |
-| 모델 호출 조건 | 취향 문장 또는 리뷰가 있을 때 (`needs_model`) | 결정 c — v1은 경고 후 v1 경로 |
-| 비선호 상한 5 | `settings.MAX_DISLIKED`만 있고 **스키마에 미적용** | 결정 b — 문서 1에도 상한 없음, 팀 확인 필요 |
-| 7.7 계약 | 태그 없음(v3.2.7 작업본) | 위키 v3.2.6은 태그 필수 — 미결 |
-| 필드 계약 불일치 | HTTP 코드는 계약대로(400 INVALID_REQUEST 등). 원인은 **내부 코드** `ErrorCode`로: `CONTRACT_7_6_UNKNOWN_FIELD`(7.6 모르는 필드 → 무시+경고) · `CONTRACT_7_7_REJECTED`(7.7 4xx → `profile_runs.error`) · `CONTRACT_7_9_SCHEMA`(7.9 필수 누락·타입 → CLI가 저장 거부). 7.6·7.9 DTO는 모르는 필드를 거부하지 않음, 조회수는 `viewCount`/`views` 둘 다 수용 | 09-22 결정 |
-
----
-
-## 2. 환경
-
-| 항목 | 값 | 비고 |
-|---|---|---|
-| Python | **3.12** (`.python-version`) | `StrEnum`·타입 문법 · torch/sentence-transformers 안정 |
-| 패키지 | **uv** — `pyproject.toml` + `uv.lock`(커밋) · `.venv`(커밋 안 함) | 폴더별 가상환경 만들지 않음 |
-| 의존성 | fastapi · uvicorn[standard] · pydantic · pydantic-settings · httpx · sqlalchemy · alembic · psycopg[binary] | dev: pytest · ruff |
-| 설정 | 환경변수 `PROFILING_*` 또는 `profiling/.env` (`.env.example` 복사) | 코드는 `settings.X`로만 접근 — 이름 바꿀 때 `settings.py` 한 곳 |
-| DB | Docker `pgvector/pg16` (`docker-compose.yml`) · `PROFILING_DATABASE_URL` · Alembic `0001`~`0003` | 저장소는 PostgreSQL 하나뿐 — 연결 실패면 앱이 뜨지 않는다 (DB 없이 띄우는 모드는 없음) |
-| 카탈로그 | 기본 `tests/fixtures/catalog_sample.json`(111건) · 전체 4,231건은 `.env`에서 경로 지정 | 팀원 카탈로그 DB 전까지 파일 |
+### 실행
 
 ```bash
 cd profiling
-uv sync                                     # .venv + 의존성 (uv.lock 기준)
-cp .env.example .env                        # 필요 시 값 수정
-docker compose up -d                        # 로컬 PostgreSQL (Docker Desktop 켜져 있어야 함)
-uv run alembic upgrade head                 # 테이블 생성 (0001~0004)
-uv run pytest -q                            # 177 passed, 2 skipped (DB 꺼져 있으면 통합 45개 skip)
-uv run ruff check src tests tools alembic   # lint
+cp <로컬 설정 템플릿> .env        # 계정 · 비밀번호 · 토큰 · DB 주소를 채운다
+uv sync                          # 가상환경 + 의존성
+docker compose up -d ai-db       # PostgreSQL 16 + pgvector
+uv run alembic upgrade head      # 표 · 앱 전용 계정 만들기
+uv run python -m tools.catalog.load_catalog --bundle <카탈로그 합본>.json.gz --if-empty
+uv run python -m tools.catalog.load_catalog --embeddings <product-search 폴더> --if-empty   # 선택: 임베딩을 켤 때만
+uv run python -m tools.catalog.load_catalog --tags --if-changed   # 상품 축 태그(비선호 대조) — 규칙이 같으면 건너뜀
+uv run uvicorn profiling.main:app --port 8000
 ```
 
-**팀원 골격과의 차이 (합칠 때 바꿀 것)** — 팀원 레포 골격은 루트 `app/` 레이아웃 · pip/requirements · Python 3.11 · env 이름 `DATABASE_URL`·`INTERNAL_SERVICE_TOKEN`·`MAIN_BACKEND_URL`. 지금은 각자 로컬로 개발하고, 합칠 때 `profiling/src/profiling/*` → `app/profiling/*` 이동 + `settings.py` env 이름 통일 + 루트 단일 `pyproject`로 전환한다(환경 PR 초안은 브랜치 `chore/uv-environment`). 근거·규칙은 [docs/환경_설정.md](docs/환경_설정.md).
-
----
-
-## 3. 실행과 수동 시험
-
-DB + 두 프로세스. **실행 위치는 `profiling/`** (예시 카탈로그 상대경로 기준).
+확인:
 
 ```bash
-docker compose up -d && uv run alembic upgrade head     # DB (한 번 켜 두면 됨)
-# 터미널 1 — 가짜 Backend + 시험 콘솔 (:8081)
-uv run uvicorn tools.fake_backend.app:app --port 8081
-# 터미널 2 — AI 앱 (:8000)  — 시작 로그에 "DB 연결 … migration=0002"
-uv run uvicorn profiling.main:app --port 8000 --reload
+curl localhost:8000/readyz       # {"ready": true, ...} 이면 요청을 받을 준비 완료
+curl localhost:8000/health       # catalog.active · store.connected 가 true, catalog.productTags 가 ok
 ```
 
-앱은 DB 없이 뜨지 않는다 — `docker compose up -d && uv run alembic upgrade head`를 먼저 한다.
+> 외부 LLM 키가 없으면 태그 없이 돕니다(`/health` 의 `llm.state` 가 `off`). 추천 30개는 그대로 나옵니다.
 
 ### 컨테이너로 한 번에 (배포와 같은 모양)
 
 ```bash
-docker compose up -d --build        # ai-db(healthy) → ai-migrate(한 번 돌고 종료) → ai-app(:8000)
-docker compose logs -f ai-app
-curl localhost:8000/health
+docker compose up -d --build     # ai-db → ai-migrate(마이그레이션 한 번) → ai-app(:8000). 이미지에 검색기의 질의 인코더도 넣는다
+docker compose run --rm -v <합본 폴더>:/b:ro ai-migrate \
+  python -m tools.catalog.load_catalog --bundle /b/<카탈로그 합본>.json.gz --if-empty --tags --if-changed
 ```
 
-| 서비스 | 하는 일 |
-|---|---|
-| `ai-db` | PostgreSQL 16 + pgvector |
-| `ai-migrate` | **앱과 같은 이미지**로 `alembic upgrade head` 한 번 돌고 끝난다. 앱이 여러 개여도 마이그레이션은 한 번이어야 하므로 앱 시작과 섞지 않는다 |
-| `ai-app` | FastAPI(:8000). `CATALOG_SOURCE=db` — 컨테이너 안에는 카탈로그 파일이 없다 |
-
-카탈로그 적재도 같은 이미지로 한다(일회성 작업):
-
-```bash
-docker compose run --rm ai-migrate python -m tools.catalog.load_catalog --package /경로/product-catalog-...
-```
-
-배포 환경에서는 `PROFILING_BACKEND_BASE_URL`·`PROFILING_SERVICE_TOKEN`을 주입한다(로컬 기본값은 호스트의 fake_backend).
-
-브라우저 `http://localhost:8081/` → 콘솔.
-
-| 탭 | 하는 일 |
-|---|---|
-| 7.6 보내기 | 입력 버전(v1/v2/v3) · 비선호 토글(≤5) · 리뷰·취향(v3) · 무작위 생성 · **JSON 직접 편집**(틀린 본문으로 400 보기) → AI 응답·소요 시간 |
-| 7.7 받은 것 | AI가 보낸 콜백 목록(2초 갱신). 태그가 없고 ID ≤30인지 확인 |
-| **DB** | AI DB 두 테이블(`profile_runs`·`recipient_profiles`)을 fake가 직접 읽어 보여줌(2초 갱신) · **검증 목록** — 마지막으로 보낸 7.6이 DB에 제대로 남았는지 10항목 ✓/✗(행 존재 · 상태=모드 기대값 · 콜백 시도 수 · input_hash · 저장 본문=7.7 수신 목록 · 프로필 버전·비선호 일치) · 수신자별 행 삭제 |
-| 7.9 · 상태 | export 내용 · **실패 주입 모드**(`ok/409/400/500/timeout`) · AI `/health` (`store.connected`·`migration` 포함) |
-
-토큰: fake `AI_SERVICE_TOKEN`(기본 `dev-token`)과 AI `PROFILING_SERVICE_TOKEN`이 같아야 한다. AI 쪽이 비어 있으면 검사를 건너뛴다(로컬 전용).
-
-curl로 직접:
-```bash
-curl -s -X POST localhost:8000/api/internal/v1/ai/profile/extract-and-pool \
-  -H 'Authorization: Bearer dev-token' -H 'Content-Type: application/json' \
-  -d '{"recipientUserId":9073,"sourceVersion":3,"dislikedCategories":[{"categoryId":8,"categoryName":"유아·키즈"}],"giftPreference":null,"reviews":[]}'
-curl -s localhost:8081/received | python3 -m json.tool | head -30
-```
-
-실제 Backend 상품으로 바꾸기 (7.9 가져오기 + ID 대조):
-```bash
-uv run python -m tools.catalog.fetch_export --base-url http://localhost:8081 --token dev-token --out data/catalog_export.json --compare-db
-```
-계약 점검(필드 이름·타입·모르는 필드) → 지금 카탈로그·`ai_search.products`와 ID 대조 → 저장. 종료 코드 0 일치 · 1 계약 위반(저장 안 함) · 2 차이 있음 · 3 연결 실패. 저장 뒤 `.env`의 `PROFILING_CATALOG_FILE`을 그 경로로.
-
-DB에 남은 것 확인:
-```bash
-docker compose exec ai-db psql -U ai_user -d ai_chat -c "select recipient_user_id, source_version, status, attempt, callback_attempts from ai_profile.profile_runs order by updated_at desc limit 5" -c "select recipient_user_id, source_version, disliked_categories from ai_profile.recipient_profiles"
-```
+> compose 의 앱은 `.env` 에서 토큰 · Backend 주소만 받아 **태그 추출 · 임베딩이 꺼진 채** 뜹니다. 켜려면 `docker-compose.yml` 의 `ai-app` environment 에 `PROFILING_TAGGER` · `PROFILING_OPENROUTER_API_KEY` · `PROFILING_EMBEDDING_DIR=/app/product-search` 를 더하고 벡터를 적재합니다(`--embeddings`).
 
 ---
 
-## 4. 테스트
+## 2. 설정
 
-원칙: **업무 코드는 가짜 구현으로, 구현은 가짜 바깥으로, 계약은 스키마로.** 단위(`tests/unit`, 134개)는 외부 의존 없이 돈다 — 앱을 띄우는(=DB에 붙는) 시험은 전부 통합으로 옮겼다. 통합(`tests/integration`, 45개)은 진짜 PostgreSQL이고 DB가 꺼져 있으면 skip.
+`.env` 는 저장소에 없습니다(예시 파일도 두지 않습니다). **계정 · 비밀번호 · 토큰 · DB 주소는 기본값이 없어**, 비어 있으면 compose · 마이그레이션 · 앱이 멈춥니다.
 
-| 파일 | 대상 | 방법 | 개수 |
-|---|---|---|---|
-| `test_schemas.py` | 7.6·7.7·7.9 DTO 경계 | Pydantic `ValidationError` — 11개 리뷰·rating 0/6·모르는 필드·조회수 별칭·재고 3값 변환·태그 포함 콜백 거부 | 12 |
-| `test_pipeline.py` | `to_internal`·`needs_model`·`input_hash`·`build_pool`·`profile()` | `FakeCatalog`·`FakeStore`·`FakeRecipientStore`(ports 모양). 비선호 제외·재고 `unavailable`만 제외(`unknown` 유지)·조회수 정렬·상한·**대분류 비선호는 하위 소분류 전체 제외**(이름 보조·대분류 정보 없으면 소분류만)·FAILED 경로·저장 실패·RUNNING→RESULT_READY 순서·프로필 upsert·빈 풀은 빈 배열 | 22 |
-| `test_catalog.py` | `FileCatalogReader` | tmp JSON 두 형식 · 중복/오류 제외 · 재고 3값(상태 없으면 `unknown`) · `isinstance(…, Protocol)` 모양 검사 | 3 |
-| `test_backend.py` | `to_callback`·`HttpBackendPort` | `httpx.MockTransport` — 상태 코드 6종 → `CallbackResult(status, code)`, 헤더·경로·본문, 네트워크 오류 | 12 |
-| `test_fetch_export.py` | `tools/catalog/fetch_export` | 계약 점검(모르는 필드·별칭·필수 누락) · ID 대조 · 저장 정규화 · 종료 코드 | 7 |
-| `test_catalog_fixture.py` | 예시 카탈로그(파일만) | 111건·56카테고리·null 1·재고 없음 2 | 1 |
-| `test_load_catalog.py` | `tools/catalog/load_catalog` 읽기·검사 | 패키지 파일만(DB 없음) — 누락 파일·부모 없는 소분류·중복 ID·선언 수 불일치 | 5 |
-| `test_intake_dedupe.py` | 접수 단계 중복 판정 | `decide()` 표(12) + dispatch 분기(7) — 잠금 못 얻으면 아무것도 안 함 · RUNNING이면 분석 없음 · 결과 있으면 재전송만 · 본문 다르면 재분석 | 19 |
-| `test_callback_retry.py` | 7.7 즉시 재시도 | 스크립트 응답 + `sleep` 기록 — 5xx·5xx·200 → DELIVERED(대기 0.5·2초) · 5xx×3 → RESULT_READY · 409/4xx 즉시 종료 · 최대 1회 · 재전송 경로 | 6 |
-| `test_import_be_ids.py` | Backend 회신 매칭 | 키로 확정 · 진짜 중복은 결정적 1:1 · 남는 번호는 재사용 안 함 · 이름 없으면 보고 | 10 |
-| `test_stores_lock_key.py` | `run_lock` 주변(DB 없이) | 잠금 키가 수신자 ID 를 자르지 않음 · 커넥션·질의 어느 쪽이 실패해도 진행 | 4 |
-| `test_fake_backend_lifecycle.py` | 페이크 Backend 상태 기계 | 디바운스·상한·202 조건부 PENDING·409 판정·같은 번호 재시도 2회 후 FAILED·접수 실패(500/503 `Retry-After`/연결 실패) 백오프·400/401 재시도 없음·새 수정이 옛 재시도를 이김 — 시간만 바꿔가며 | 25 |
-| `test_recipient_profile.py` | `from_outcome`·`should_replace`·`cap_tags` | 행 변환·버전 규칙·상한 (v3 함수 2개는 skip) | 6 |
-| `test_supervisor.py` | Supervisor | 슬롯 1이면 동시에 하나만 실행 | 1 |
-| `integration/test_db_catalog.py` | 마이그레이션 0003 + 적재 SQL | 표·CHECK·활성 버전 1개 · 재적재 멱등 · Backend ID/재고 보존 · `--id-map` 회신 반영 | 7 |
-| `integration/test_db_catalog_reader.py` | `DbCatalogReader` | 활성 버전 읽기·필드 매핑 · 같은 버전이면 재질의 없음 · Backend 번호 우선/임시 번호 · 번호 충돌 거부 · 활성 없음 · **버전과 상품이 한 스냅샷에서 나오는지** · 대분류(parent) 채움 | 8 |
-| `integration/test_db_recipient_profiles.py` | 마이그레이션 결과 | 열 순서·PK 시퀀스 없음·유니크·CHECK·upsert 버전 규칙 | 5 |
-| `integration/test_db_stores.py` | `DbProfileRunStore`·`DbRecipientProfileStore`·**앱 전체** | RUNNING→RESULT_READY→DELIVERED·재실행 attempt·최신 버전·버전 가드·삭제·error{code,reason} · `pipeline.profile()` → 두 테이블 · 7.6 → DB에 DELIVERED · 0004 열 주석 | 14 |
-| `integration/test_e2e_app.py` | **끝에서 끝** | `TestClient(app)` — lifespan(진짜 DB) → 7.6 202 → Supervisor 슬롯 → 가짜 BackendPort가 7.7 받음 → `profile_runs` DELIVERED·`recipient_profiles` upsert. 400은 백그라운드로 안 감. 모르는 필드 경고. `/health`. **배포 모양(`CATALOG_SOURCE=db`)으로 기동** · **7.7 500 → 0.5초 뒤 재시도 → 200 (진짜 포트)** | 7 |
-| `integration/test_fetch_export_db.py` | `--compare-db` | 팀원 DDL로 `ai_search.products` 만들어 TEXT id·누락·이름 차이 보고 | 2 |
-| `test_backend.py::test_callback_path_matches_fake_backend` | 계약 문자열 | AI 송신 경로 == fake 수신 경로 | (포함) |
+- 앱 설정의 정본: `src/profiling/settings.py` — 환경변수 이름은 `PROFILING_` + 필드 이름
+- compose 만 읽는 값(로컬 DB 계정 등): `docker-compose.yml` 머리 주석
 
-가짜를 만드는 규칙: `ports.py`의 메서드 이름·시그니처만 맞추면 된다(`@runtime_checkable`이라 `isinstance`로 확인 가능).
+### 자주 쓰는 설정
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `PROFILING_DATABASE_URL` | 없음 (필수) | DB 주소. 앱은 앱 전용 계정, 마이그레이션 · 카탈로그 적재는 소유자 계정 |
+| `PROFILING_SERVICE_TOKEN` | 빈 값 | Backend 와 같은 서비스 토큰. 비면 토큰 검사를 건너뜀 — **로컬 전용** |
+| `PROFILING_BACKEND_BASE_URL` | `http://localhost:8081` | 콜백을 보낼 Backend 주소 |
+| `PROFILING_CATALOG_SOURCE` | `file` | `db` = 배포 경로. `file` = 시험용 예시 카탈로그(가짜 상품 111개) |
+| `PROFILING_TAGGER` | `none` | 태그 추출기 `none` · `openrouter` · `ollama` |
+| `PROFILING_TAGGER_MODEL` | 추출기별 | 비우면 `openrouter` → `google/gemini-3.5-flash-lite` · `ollama` → `gemma4:12b`. 다른 모델은 이름을 직접 |
+| `PROFILING_TAGGER_TIMEOUT_S` | `120` | LLM 한 번 상한(초). **서버는 30** |
+| `PROFILING_OPENROUTER_API_KEY` | 없음 | OpenRouter 키. `.env` 에만 둔다 |
+| `PROFILING_TAG_SPEC` | `tag3disliked` | 태그 규격 — `tag3disliked`(카테고리 · IP · 브랜드 + 글 속 비선호, v2 운영) / `tag3`(비선호 없이) / `tag4`(+ 특징) |
+| `PROFILING_EMBEDDING_DIR` | 없음 | 질의 인코더(Node · 모델)가 있는 검색(product-search) 폴더. 주면 태그로 비슷한 상품을 찾는 단계가 켜진다 |
+| `PROFILING_EMBEDDING_SOURCE` | `db` | 상품 벡터를 읽는 곳 — `db`: `products.embedding`(pgvector, 먼저 `--embeddings` 로 적재) · `file`: 검색기 폴더의 벡터 파일 |
+| `PROFILING_DISLIKE_MODE` | `exclude` | 비선호 카테고리 `exclude`(빼기) / `penalty`(감점) |
+| `PROFILING_SLOTS` | `1` (compose · 서버 `8`) | 동시 분석 수 |
+| `PROFILING_QUEUE_MAX` | `200` | 대기열 상한. 넘으면 `503` |
+| `PROFILING_SHUTDOWN_DRAIN_S` | `5` (서버 `35`) | 종료할 때 진행 중 분석을 기다리는 최대 초 |
+| `PROFILING_STRICT_STARTUP` | `false` (서버 `true`) | 서버용 기동 검사 — [보안](#8-보안) |
+| `PROFILING_DB_REFUSE_SUPERUSER` | `false` (compose · 서버 `true`) | 슈퍼유저로 접속하면 기동 거부 |
+
+마이그레이션만 읽는 값: `PROFILING_APP_DB_ROLE`(앱 전용 계정 이름) · `PROFILING_APP_DB_PASSWORD`(그 비밀번호). 셸 환경변수가 없으면 같은 `.env` 에서 읽는다.
+
+DB 연결 수 · 시간 상한 · 재시도 같은 나머지 설정은 `settings.py` 의 설명을 봅니다.
 
 ---
 
-## 5. 다음 순서와 건드리는 곳
+## 3. API
 
-인수인계용 전체 목록은 [docs/파이프라인_지도/2026-09-27.md §5](docs/파이프라인_지도/2026-09-27.md)에 있다 (무엇 · 왜 · 어디 · 끝났다고 보는 기준 · 크기). 여기는 요약이다.
+| 메서드 · 경로 | 누가 부르나 | 설명 |
+|---|---|---|
+| `POST /api/internal/v1/ai/profile/extract-and-pool` | Backend | 분석 요청. 바로 `202 PENDING`. 서비스 토큰 필요 |
+| `GET /health` | Backend (요청 전 매번) | 상태 전부. Backend 는 `catalog.active` · `store.connected` 만 본다 — **이름 · 뜻을 바꾸지 않는다** |
+| `GET /healthz` | ECS Liveness | 프로세스가 살아 있으면 늘 `200` |
+| `GET /readyz` | ECS Readiness | 카탈로그 · DB · 마이그레이션 판이 준비되면 `200`, 아니면 `503`. 외부 LLM 은 보지 않는다 |
 
-| # | 일 | 바뀌는 곳 | 안 바뀌는 곳 |
-|---|---|---|---|
-| 1 | **Backend 미팅 결과 반영** — 7.7 태그 유무 · 7.9 조회수 필드명 · 제외 vs 감점 · 비선호 상한 5 | `schemas.py` · `pipeline.build_pool` · `tools/fake_backend` | 포트·저장소 |
-| 2 | ~~Backend ID 회신 받기~~ **완료(09-25)** — xlsx 2종으로 받아 상품 4,231/4,231 · 카테고리 67/67 · 재고 · 조회수까지 반영했다. 7.7로 나가는 번호가 이제 Backend 번호다 | — | 코드 전부 |
-| 3 | ~~상품 카탈로그 DB~~ **완료(09-23)** — `0003` + `load_catalog.py`로 4,231건·67분류 적재, `DbCatalogReader`로 읽기까지. `PROFILING_CATALOG_SOURCE=db`가 배포 경로다. Backend 번호가 없는 동안은 임시 번호로 돌고 `/health`가 `provisional_ids`로 표시한다(2번이 끝나면 사라짐) | — | `pipeline.py`·`ports.py` |
-| 4 | ~~접수 단계 중복 판정~~ **완료(09-25)** — Backend가 같은 `sourceVersion`으로 최대 2회 재전송하기로 해서 필수가 됐다. `decide()`가 analyze/resend/skip으로 가른다 | — | 어댑터·ports |
-| 5 | ~~7.7 재시도(5xx 최대 3회) · 재시작 복구(RUNNING→FAILED 정리)~~ **완료(09-26·27)** — `intake._send_and_record`가 0.5초·2초 뒤 최대 3회(`CALLBACK_MAX_ATTEMPTS`·`CALLBACK_BACKOFF_S`), `recover_stale_runs`가 시작 시 정리 | — | 포트 시그니처 |
-| 6 | 배포 — `Dockerfile` · compose에 `ai-app` · 시작 시 `alembic upgrade head` | `docker-compose.yml` · `Dockerfile` | |
-| 7 | **v3** 모델·검증기 (실험 `2_validate.py` 이식, `ProfileModel` 구현) + **팀원 Search 호출** | `pipeline.profile` 2)단계 · `model.py` · `ports.py`에 `SearchPort`·`ProfileModel` 추가 | 접수·저장·콜백 |
-| 7′ | **v3 마이그레이션** — `recipient_profiles`에 `profile_run_id`(FK→`profile_runs`, `ON DELETE SET NULL`) · `axes` · `recommended_product_ids` · `catalog_version_id` · `prompt_version` · `validator_version` 추가 (담당파트 설계서 §1.7 나머지). v1에는 불필요 — `(recipient_user_id, source_version)`으로 두 테이블 조인 가능 | `alembic/versions/000N_*.py` (`add_column`) · `types.RecipientProfile` 필드 · 통합 테스트 | 기존 마이그레이션 |
-| 8 | 팀원 앱과 합치기 | `main.py` · `settings.py` env 이름 · import 경로 | 업무 코드 |
+**분석 요청의 응답 코드**
 
-**팀원 Search는 v3부터 부른다.** v1은 질의어가 없어 검색기가 카테고리 라운드로빈으로 돌려주고, 팀원 카탈로그에는 조회수 필드가 없어 09-22에 합의한 정렬 규칙을 지킬 수 없다. 프로파일링의 카탈로그 공급처는 Backend(7.9 또는 전달 파일)이고, 두 쪽이 맞춰야 하는 것은 테이블이 아니라 **상품 ID 체계**다.
+| 코드 | 언제 |
+|---|---|
+| `202` | 받음 (분석은 뒤에서) |
+| `400` | 본문 형식 위반 (리뷰 11개 이상 등) |
+| `401` | 서비스 토큰 틀림 |
+| `503` | 카탈로그 없음(`Retry-After: 300`) · 대기열 가득(`Retry-After: 30`) |
 
-합의가 남은 것(팀원·BE와): 7.7 태그 유무 · 7.9 조회수 필드명 · 비선호 제외 vs 감점 · 비선호 상한 5의 7.6 반영 · 디바운스 주기.
+**콜백** — 분석이 끝나면 Backend 에 상품 번호(최대 30개)와 요청 번호(`sourceVersion`)를 보냅니다. 태그는 보내지 않습니다.
+
+| Backend 응답 | AI 쪽 기록 |
+|---|---|
+| `200` | 전달 완료 |
+| `409` | 더 새 요청이 있어 이 결과는 버려짐 |
+| `4xx` | 실패 (다시 보내지 않음 — Backend 가 나중에 다시 요청) |
+| `5xx` · 네트워크 오류 | 최대 3번까지 시도 |
+
+---
+
+## 4. 동작 방식
+
+요청 한 건은 이렇게 처리됩니다.
+
+1. **접수** — 본문 · 토큰 검사 → 대기열에 넣고 `202`.
+2. **중복 판정** — 같은 받는 사람 · 같은 요청 번호면, 이미 결과가 있을 때 다시 분석하지 않고 결과만 다시 보냅니다. 분석 중이면 아무것도 하지 않습니다.
+3. **분석**
+   1. 리뷰 별점으로 소분류별 선호 점수를 쌓습니다.
+   2. 취향 문장 · 좋게 준 리뷰(4~5점)가 있으면 **태그를 뽑습니다** — 좋아하는 것(선호 태그)과 글에서 분명히 싫다고 한 것(비선호 태그).
+      - 가드레일: 개인정보 · 욕설은 가리고, 의미 없는 글 · 프롬프트 공격 의심 글은 버립니다. 글 하나는 최대 1,000자(넘으면 앞부분만).
+      - LLM 을 한 번 부르고, 검증기가 근거 없는 태그 · 판촉 단어 · 문장형 태그를 버립니다.
+      - LLM 이 실패해도 요청은 실패하지 않습니다(태그 없이 계속).
+   3. **추천 30개를 고릅니다.**
+      - 비선호 카테고리 상품과 이미 리뷰한 상품은 뺍니다.
+      - 비선호 태그에 걸리는 상품도 뺍니다. 사람 태그와 상품 축 태그(브랜드 · 캐릭터 · 카테고리 묶음의 대표 이름, `products.tags`)를 맞대 봅니다.
+      - 한 소분류는 최대 10개, 같은 모델은 하나만 넣습니다.
+      - 태그가 있고 임베딩이 켜져 있으면 태그와 비슷한 상품을 골고루 섞습니다. 상품 벡터는 DB(`products.embedding`)에 있고, 태그와의 유사도는 pgvector 가 계산합니다.
+      - 입력 세 칸이 모두 비어 있으면 0개를 보냅니다(Backend 가 인기순으로 대체).
+   4. 결과와 받는 사람 프로필을 저장합니다. **원문은 저장하지 않고 가드레일 정리본만** 둡니다.
+4. **콜백** — Backend 로 30개를 보냅니다.
+
+로그에는 리뷰 글 · 취향 문장 · LLM 출력 원문을 남기지 않습니다. 번호 · 개수 · 상태 · 비용만 남깁니다.
+
+---
+
+## 5. 프로젝트 구조
+
+```
+profiling/
+├── src/profiling/
+│   ├── main.py          앱 조립 · 기동 검사 · /health · /healthz · /readyz
+│   ├── intake.py        요청 접수 · 토큰 · 중복 판정 · 콜백 보내기
+│   ├── supervisor.py    동시 분석 슬롯 + 대기열
+│   ├── pipeline.py      한 건 분석 (점수 → 태그 → 30개 → 저장)
+│   ├── selection.py     추천 30개 고르기
+│   ├── vocab.py         비선호 대조 어휘 · 상품 축 태그 계산 (규칙 판 `vocab.RULE`)
+│   ├── vocab_data/      어휘 파일 — 브랜드 · 캐릭터 · 카테고리 묶음
+│   ├── tagging.py       태그 규격 · 프롬프트 · 검증기
+│   ├── prompts/         태그 규격별 시스템 프롬프트
+│   ├── guard.py         입력 가드레일
+│   ├── llm.py           외부 LLM 어댑터 (OpenRouter · Ollama)
+│   ├── embedding.py     상품 벡터 · 질의 인코더 어댑터
+│   ├── catalog.py       카탈로그 읽기 (DB · 파일)
+│   ├── stores.py        PostgreSQL 저장소
+│   ├── backend.py       Backend 콜백 어댑터
+│   ├── changes.py       프로필이 무엇이 바뀌었는지 요약 로그
+│   ├── status.py        외부 LLM 상태 (/health 의 llm 칸)
+│   ├── schemas.py       HTTP 본문 (camelCase)
+│   ├── types.py         내부 타입 (snake_case)
+│   ├── ports.py         바깥 의존의 인터페이스
+│   └── settings.py      설정 (PROFILING_*)
+├── alembic/versions/    DB 마이그레이션 (0001 ~ 0011)
+├── tools/catalog/       운영 CLI — 카탈로그 적재 (이미지에 들어가는 유일한 도구)
+├── tests/
+│   ├── unit/            DB · 네트워크 · LLM 없이
+│   ├── integration/     진짜 PostgreSQL (DB 주소가 없으면 건너뜀)
+│   └── fixtures/        시험용 가짜 카탈로그
+├── Dockerfile
+└── docker-compose.yml
+```
+
+**설계 규칙**
+
+- **Ports & Adapters** — 업무 코드(`pipeline` · `selection` · `tagging`)는 HTTP · DB · LLM 을 모릅니다. 바깥은 `ports.py` 모양에 맞춰 들어옵니다. 그래서 단위 시험은 가짜 구현만으로 돕니다.
+- **이름** — HTTP 경계(`schemas.py`)만 camelCase, 나머지는 snake_case. 변환은 `pipeline.to_internal()` · `backend.to_callback()` 두 곳뿐입니다.
+- **태그 규격** — `PROFILING_TAG_SPEC` 하나로 축 · 프롬프트 · JSON 스키마가 같이 바뀝니다. 프롬프트 파일의 축이 규격과 다르면 서버가 뜨지 않습니다.
+- **DB 표 구조** — 팀 위키의 DB ERD 문서를 봅니다.
+
+---
+
+## 6. 시험
+
+```bash
+uv run pytest -q                              # 전체 (DB 주소가 없으면 통합 시험은 건너뜀)
+uv run pytest -q tests/unit                   # 단위만
+uv run ruff check src tests tools alembic     # 린트
+```
+
+시험은 `.env` 에서 **DB 주소 · 앱 계정 이름만** 읽고 나머지 설정은 코드 기본값으로 돈다(개발자 `.env` 의 토큰 · 추출기 값이 시험을 바꾸지 않게 — `tests/conftest.py`).
+
+| 묶음 | 무엇을 보나 | 필요한 것 |
+|---|---|---|
+| `tests/unit` (354개) | 업무 규칙 · 어댑터(가짜 HTTP) · 설정 · 기동 검사 | 없음 |
+| `tests/integration` (87개) | 마이그레이션 · 저장소 · 앱 끝에서 끝 | PostgreSQL (`PROFILING_DATABASE_URL`) |
+
+실험 도구(시험 장치 · 부하 시험 · 모델 비교 · 가짜 Backend)는 이 브랜치에 없습니다. 필요하면 프로파일링 담당에게 요청합니다.
+
+---
+
+## 7. 배포
+
+순서: **마이그레이션 → 카탈로그 적재 → 앱.** 카탈로그가 없으면 `/readyz` 가 `503` 이라 앱 배포가 끝나지 않습니다.
+
+```bash
+alembic upgrade head                                                     # 마이그레이션 Task (소유자 계정)
+python -m tools.catalog.load_catalog --tags --if-changed                 # 상품 축 태그 — 규칙이 같으면 건너뜀(같은 이미지 · 소유자 계정)
+uvicorn profiling.main:app --host 0.0.0.0 --port 8000                    # 앱 (이미지 기본 명령)
+```
+
+**첫 배포 전에 한 번** — 카탈로그 · 상품 벡터를 DB 에 미리 넣는다(팀 내부 자료, 로컬 파일 또는 `s3://` 경로).
+
+```bash
+python -m tools.catalog.load_catalog --bundle <카탈로그 합본> --embeddings <벡터 폴더> --tags
+```
+
+상품이 바뀌면 같은 명령을 다시 돌린다 — 새 카탈로그 판을 넣고 한 트랜잭션에서 활성 판을 바꾼다(앱은 1초 안에 새 판을 읽음).
+
+| 항목 | 값 |
+|---|---|
+| 포트 | 8000 |
+| 헬스 체크 | Liveness `/healthz` · Readiness `/readyz` |
+| 권장 자원 | 임베딩 끔: `cpu` 256 · `memoryReservation` 256 MiB · `memory` 512 MiB / **임베딩 켬: `cpu` 1024 · `memoryReservation` 512 MiB · `memory` 1024 MiB** — 부하 시험(흉내 LLM): `cpu` 512 는 1분에 100건이 몰리면 대기열이 차 503, 1024 는 503 0 · 메모리 최대 약 400MiB |
+| 종료 유예 | `PROFILING_SHUTDOWN_DRAIN_S=35` · 컨테이너 `stopTimeout` 60 |
+| 동시 분석 | `PROFILING_SLOTS=8` (DB 연결은 Task 당 14) |
+| 카탈로그 · 벡터 | 팀 내부 자료 — 저장소 · 이미지에 넣지 않고 첫 배포 전에 DB 에 적재 |
+
+- 새 마이그레이션을 더하면 `main.EXPECTED_MIGRATION` 도 같은 커밋에서 올립니다. 다음 번호는 `0012`.
+- 상품 축 태그 규칙(`vocab.py` · `vocab_data/`)을 바꿔 결과가 달라지면 `vocab.RULE` 을 올립니다(지문 시험이 알려 줌). 배포 적재의 `--tags --if-changed` 가 다음 배포 때 태그를 다시 계산합니다.
+- 배포 중에는 옛 코드도 새 표에서 돌아야 하므로 **열 추가 → 코드 → 삭제는 다음 판** 순서로 씁니다.
+- 이미지 빌드: `docker build --build-context product-search=../product-search -t profiling-ai-app .` — 검색기 폴더의 질의 인코더(Node · 모델, 모델 해시 검증)를 함께 넣습니다. 켜는 것은 실행 설정 `PROFILING_EMBEDDING_DIR=/app/product-search`.
+- 이미지에는 `src/` · `alembic/` · `tools/catalog/` 와 질의 인코더만 들어갑니다. 시험 · 문서 · `.env` 는 들어가지 않습니다. 비루트 사용자로 돕니다.
+
+---
+
+## 8. 보안
+
+- **비밀 값** — 키 · 토큰 · 계정 · 비밀번호는 저장소에 두지 않습니다. 로컬은 `profiling/.env`, 서버는 Secrets Manager.
+- **기동 검사(`PROFILING_STRICT_STARTUP=true`, 서버 필수)** — 아래 중 하나라도 해당하면 서버가 뜨지 않습니다. 로그에는 어느 설정인지만 나오고 값은 나오지 않습니다.
+  - DB 마이그레이션 판이 코드보다 낮음
+  - 서비스 토큰 · DB 계정 이름 · DB 비밀번호가 비었거나 공개된 로컬 값
+  - Backend 주소가 로컬 기본값
+  - 카탈로그를 DB 에서 읽지 않음
+- **DB 권한** — 앱은 앱 전용 계정으로 접속합니다(프로필 표 읽기 · 쓰기, 카탈로그 표 읽기만). 슈퍼유저 접속은 막습니다.
+- **개인정보** — 리뷰 · 취향 원문은 저장하지 않고 로그에도 남기지 않습니다. LLM 에는 가드레일을 거친 글만 보냅니다. LLM 추적 도구는 운영에서 쓰지 않습니다.
+- **OpenRouter 키** — 요청 헤더로만 보내고 로그 · 예외 메시지에 남기지 않습니다.

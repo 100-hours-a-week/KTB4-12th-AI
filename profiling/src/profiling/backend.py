@@ -26,7 +26,7 @@ from profiling.types import CallbackResult, ErrorCode, ProfileOutcome, RunStatus
 
 log = logging.getLogger(__name__)
 
-# 문서 1 §7.7 경로. tools/fake_backend/app.py의 CALLBACK_PATH와 같아야 한다 (테스트에서 대조).
+# 문서 1 §7.7 경로.
 CALLBACK_PATH = "/api/internal/v1/recipients/{recipientUserId}/profile"
 
 
@@ -108,17 +108,17 @@ class HttpBackendPort:
         try:
             body = to_callback(outcome)
         except ValueError as e:
-            log.error("7.7 콜백 본문 생성 실패 recipient=%s source_version=%s: %s", rid, sv, e)
-            return CallbackResult(status=RunStatus.FAILED, code=ErrorCode.PIPELINE_ERROR, message=f"콜백 본문 생성 실패: {e}")
+            log.error("7.7 콜백 본문 생성 실패 recipient=%s source_version=%s: %s", rid, sv, type(e).__name__)
+            return CallbackResult(status=RunStatus.FAILED, code=ErrorCode.PIPELINE_ERROR, message=f"콜백 본문 생성 실패: {type(e).__name__}")
 
         path = CALLBACK_PATH.format(recipientUserId=rid)
         t0 = time.perf_counter()
         try:
             res = self._client.post(path, content=body.model_dump_json())
         except httpx.RequestError as e:  # 타임아웃·연결 실패·DNS — 네트워크 층
-            log.warning("7.7 콜백 recipient=%s source_version=%s → %s 네트워크 오류 %s: %s (재시도 대상)",
-                        rid, sv, ErrorCode.CALLBACK_UNREACHABLE, type(e).__name__, e)
-            return CallbackResult(status=RunStatus.RESULT_READY, code=ErrorCode.CALLBACK_UNREACHABLE, message=f"{type(e).__name__}: {e}")
+            log.warning("7.7 콜백 recipient=%s source_version=%s → %s 네트워크 오류 %s (재시도 대상)",
+                        rid, sv, ErrorCode.CALLBACK_UNREACHABLE, type(e).__name__)
+            return CallbackResult(status=RunStatus.RESULT_READY, code=ErrorCode.CALLBACK_UNREACHABLE, message=type(e).__name__)
 
         status = _status_from_response(res.status_code)
         elapsed = time.perf_counter() - t0
