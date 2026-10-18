@@ -87,8 +87,10 @@ jobs:
         run: docker build -f integration/containers/Dockerfile --target migrate -t ai-migrate:ci .
       - name: 빈 DB · 계정 5개 · vector 확장 준비(비밀번호는 실행마다 무작위)
         run: |
-          gen() { local v; v=$(openssl rand -hex 24); echo "::add-mask::$v"; echo "$v"; }
-          SU=$(gen); MIG=$(gen); P=$(gen); C=$(gen); S=$(gen); Y=$(gen)
+          # 가림 명령(::add-mask::)은 러너가 읽는 표준 출력으로 바로 보낸다 — $( ) 안에서 내면 값에 섞여 가려지지 않는다
+          for n in SU MIG P C S Y; do
+            v=$(openssl rand -hex 24); echo "::add-mask::$v"; printf -v "$n" '%s' "$v"
+          done
           echo "MIG_PW=$MIG" >> "$GITHUB_ENV"
           docker network create ci-net
           docker run -d --name pg --network ci-net --network-alias postgres -e POSTGRES_PASSWORD="$SU" "$PG_IMAGE"
