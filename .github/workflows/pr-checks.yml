@@ -1,0 +1,196 @@
+# AI PR 검사 — 노션 「AI ECS · CI/CD 요구사항」 §5 (초안 · 10-18)
+# 팀원의 integration.yml(free-contracts = Unit Test · 계약 시험)은 그대로 두고, 나머지 §5 항목을 더한다.
+# PR 제목 검사는 pr-title.yml 에 따로 둔다(제목 · 본문만 고쳐도 무거운 검사가 다시 돌지 않게).
+# 배포 워크플로(노션 §6-1 "PR CI 와 같은 검증")가 workflow_call 로 다시 부를 수 있다.
+# 릴리스 PR(Release Please)은 기본 토큰으로 만들어져 pull_request 가 안 돌므로 release-please.yml 이 workflow_dispatch 로 실행한다.
+# 비밀 값을 쓰지 않는다 — DB 비밀번호는 실행마다 무작위로 만들고 가린다.
+name: AI PR checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-pr-checks-${{ github.workflow }}-${{ github.ref }}
+  # PR 은 새 커밋이 오면 이전 검사를 취소. 배포 · 릴리스에서 부를 때는 취소하지 않고 차례로 돈다
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    # 문서만 바뀐 PR 이면 아래 무거운 검사를 건너뛴다(건너뜀 = 필수 검사 통과).
+    # 이 job 도 필수 검사 — 실패 · 취소되면 머지가 막히므로 '판단 실패 → 전부 건너뜀' 으로 새는 일이 없다.
+    # 판단이 애매하면(비교 실패 · 빈 변경 · PR 이 아닌 실행) code=true 로 전부 돈다.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          code=true
+          # PR 검사는 머지 커밋에서 돈다: HEAD^1 = 대상 브랜치 끝 → 이 PR 이 실제로 들이는 변경 전체(마지막 커밋만이 아님)
+          if [ "$EVENT" = pull_request ] && files=$(git diff --name-only HEAD^1 HEAD) && [ -n "$files" ]; then
+            # 문서 = .md. 단 코드가 읽는 .md 는 코드로 본다:
+            #   profiling/src/ (LLM 프롬프트) · chat/*.md (이미지에 들어가 챗봇이 안내문으로 내보냄) · profiling/README.md (빌드에 필요)
+            non_doc=$(printf '%s\n' "$files" | grep -Ev '\.md$' || true)
+            code_md=$(printf '%s\n' "$files" | grep -E '^profiling/src/|^chat/[^/]+\.md$|^profiling/README\.md$' || true)
+            if [ -z "$non_doc$code_md" ]; then code=false; fi
+            { echo "### 바뀐 파일"; printf '%s\n' "$files" | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = false ]; then
+            echo "문서만 바뀜 → lint · migration · image · smoke 건너뜀" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  lint:
+    # 노션 §5 Lint — 처음에는 문법 오류 · 정의 안 된 이름만(E9 · F63 · F7 · F82). 팀이 합의하면 규칙을 넓힌다
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.12.17"
+          enable-cache: false
+      - name: ruff(최소 규칙)
+        run: uvx ruff@0.16.8 check --select E9,F63,F7,F82 --output-format github chat profiling/src product-search integration console
+
+  migration:
+    # 노션 §5 DB Migration 정합성 — 빈 PostgreSQL 18 + pgvector 에 마이그레이션을 두 번 돌린다(처음 적용 · 두 번째는 변경 없음)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PG_IMAGE: pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+      DB: emmet4930_ci
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: 마이그레이션 이미지 빌드
+        run: docker build -f integration/containers/Dockerfile --target migrate -t ai-migrate:ci .
+      - name: 빈 DB · 계정 5개 · vector 확장 준비(비밀번호는 실행마다 무작위)
+        run: |
+          # 가림 명령(::add-mask::)은 러너가 읽는 표준 출력으로 바로 보낸다 — $( ) 안에서 내면 값에 섞여 가려지지 않는다
+          for n in SU MIG P C S Y; do
+            v=$(openssl rand -hex 24); echo "::add-mask::$v"; printf -v "$n" '%s' "$v"
+          done
+          echo "MIG_PW=$MIG" >> "$GITHUB_ENV"
+          docker network create ci-net
+          docker run -d --name pg --network ci-net --network-alias postgres -e POSTGRES_PASSWORD="$SU" "$PG_IMAGE"
+          for i in $(seq 1 30); do docker exec pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
+          docker exec -i pg psql -U postgres -v ON_ERROR_STOP=1 <<SQL
+          CREATE ROLE ai_migrator LOGIN PASSWORD '$MIG';
+          CREATE ROLE ai_profiler_service LOGIN PASSWORD '$P' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+          CREATE ROLE ai_chat_service LOGIN PASSWORD '$C' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+          CREATE ROLE ai_search_service LOGIN PASSWORD '$S' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+          CREATE ROLE ai_catalog_sync LOGIN PASSWORD '$Y' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+          CREATE DATABASE $DB OWNER ai_migrator;
+          SQL
+          docker exec pg psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+      - name: 마이그레이션 1회차 — 적용(changed true)
+        run: |
+          out=$(docker run --rm --network ci-net -e MIGRATION_DATABASE_URL="postgresql://ai_migrator:${MIG_PW}@postgres:5432/$DB" ai-migrate:ci --database "$DB" --emmet | tail -1)
+          echo "$out"
+          echo "$out" | grep -q '"version": "single-server/1"' && echo "$out" | grep -q '"changed": true'
+      - name: 마이그레이션 2회차 — 다시 돌려도 변경 없음(changed false)
+        run: |
+          out=$(docker run --rm --network ci-net -e MIGRATION_DATABASE_URL="postgresql://ai_migrator:${MIG_PW}@postgres:5432/$DB" ai-migrate:ci --database "$DB" --emmet | tail -1)
+          echo "$out"
+          echo "$out" | grep -q '"changed": false'
+      - name: 결과 확인 — Alembic 0011 · DB 표지 · 스키마 5개
+        run: |
+          docker exec pg psql -U postgres -d "$DB" -At -v ON_ERROR_STOP=1 -c "
+            SELECT 'alembic=' || version_num FROM public.alembic_version;
+            SELECT 'identity=' || database_name || ' ' || version FROM ai_runtime.database_identity;
+            SELECT 'schemas=' || count(*) FROM pg_namespace WHERE nspname IN ('ai_profile','ai_catalog','ai_chat','ai_search','ai_runtime');" | tee result.txt
+          grep -q '^alembic=0011$' result.txt && grep -q "^identity=$DB single-server/1$" result.txt && grep -q '^schemas=5$' result.txt
+
+  image:
+    # 노션 §5 Image Build + 이미지 속 비밀 검사 — 서버용 target 4개를 linux/amd64 로
+    # matrix job 은 job 단위로 건너뛰면 이름이 image-search 등으로 펼쳐지지 않아 필수 검사가 '대기'로 남는다.
+    # 그래서 job 은 늘 돌리고, 문서만 바뀐 PR 에서는 단계만 건너뛴다(몇 초).
+    name: image-${{ matrix.target }}
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [search, profiler, chat, migrate]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.code == 'true'
+        with:
+          persist-credentials: false
+      - name: 빌드(linux/amd64)
+        if: needs.changes.outputs.code == 'true'
+        run: docker build --platform linux/amd64 -f integration/containers/Dockerfile --target "${{ matrix.target }}" -t "ai-${{ matrix.target }}:ci" .
+      - name: 이미지 안에 비밀 파일 · 키가 없는지
+        if: needs.changes.outputs.code == 'true'
+        run: |
+          cid=$(docker create "ai-${{ matrix.target }}:ci"); docker export "$cid" -o fs.tar; docker rm "$cid" >/dev/null
+          mkdir fs && tar -xf fs.tar -C fs workspace opt 2>/dev/null || true
+          # 앱 코드 자리만 본다(.venv · node_modules 는 외부 라이브러리라 제외)
+          checked=$(find fs -type f -not -path '*/.venv/*' -not -path '*/node_modules/*' | wc -l)
+          # 이미지 구조가 바뀌어 앱 코드를 못 꺼내면 '비밀 없음'으로 조용히 통과하지 않게 막는다
+          if [ ! -d fs/workspace ] || [ "$checked" -eq 0 ]; then
+            echo "::error::이미지에서 앱 코드(/workspace)를 꺼내지 못해 비밀 검사를 할 수 없습니다 — 검사 위치를 고쳐야 합니다"; exit 1
+          fi
+          names=$(find fs -type f -not -path '*/.venv/*' -not -path '*/node_modules/*' \
+                    \( -name '.env' -o -name '.env.*' -o -name '*.pem' -o -name '*.key' -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -name 'credentials*' \))
+          keys=$(grep -rIlE --exclude-dir=.venv --exclude-dir=node_modules \
+                    'sk-or-v1-[0-9a-f]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN ([A-Z]+ )?PRIVATE KEY-----|ghp_[0-9A-Za-z]{30,}' fs || true)
+          if [ -n "$names$keys" ]; then
+            echo "::error::이미지에 비밀로 보이는 파일 · 값이 있습니다"; echo "$names"; echo "$keys"; exit 1
+          fi
+          echo "비밀 파일 · 키 없음 — 파일 ${checked}개 확인"
+
+  smoke:
+    # 노션 §5 Container 기동 · Health/Readiness — 팀원의 합성 묶음(가짜 BE · 가짜 모델 · LLM 비용 0원)을 그대로 돌린다.
+    # 프로파일러 · 챗봇은 서버용 이미지 위에 가짜 모델 층을 얹은 *-smoke target 으로 뜬다(검색기는 서버용 그대로).
+    # 서버용 실행 방식(비밀값을 파일로 읽기 · LLM 비용 한도 검사 연결)은 서버 설정이 정해진 뒤 시험한다 — 여기서는 확인하지 않는다.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: 임베딩 모델 내려받기(팀원 도구 — 크기 · SHA 확인)
+        run: python3 product-search/tools/download_model.py
+      - name: 합성 묶음 기동 · 자동 점검
+        env:
+          P: ci-smoke-${{ github.run_id }}
+        run: |
+          export EMMET_MODEL_DIR="$GITHUB_WORKSPACE/product-search/embedding/models"
+          F=integration/containers/compose.smoke.yaml
+          docker compose -p "$P" -f "$F" config --quiet
+          docker compose -p "$P" -f "$F" --profile check build
+          docker compose -p "$P" -f "$F" up --wait --wait-timeout 300
+          docker compose -p "$P" -f "$F" --profile check run --rm --no-deps smoke-check
+      - name: 정리
+        if: always()
+        env:
+          P: ci-smoke-${{ github.run_id }}
+        run: |
+          export EMMET_MODEL_DIR="$GITHUB_WORKSPACE/product-search/embedding/models"
+          docker compose -p "$P" -f integration/containers/compose.smoke.yaml logs --no-color --tail 80 || true
+          docker compose -p "$P" -f integration/containers/compose.smoke.yaml down -v || true
