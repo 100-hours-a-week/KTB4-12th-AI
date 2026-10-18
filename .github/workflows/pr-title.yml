@@ -1,0 +1,43 @@
+# AI PR 제목 검사 — 노션 「AI ECS · CI/CD 요구사항」 §3 · §5 (초안 · 10-18)
+# Squash 머지 때 PR 제목이 최종 커밋이 되므로 Conventional Commits 형식을 검사한다.
+# pr-checks.yml 과 나눈 이유: 제목 · 본문을 고칠 때(edited) 이 검사만 다시 돌고 무거운 검사는 그대로 둔다.
+# 릴리스 PR(Release Please)은 release-please.yml 이 workflow_dispatch 로 실행 — 그때는 브랜치의 열린 PR 제목을 찾아 검사한다.
+name: AI PR title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-pr-title-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Conventional Commits 형식 검사
+        env:
+          EVENT: ${{ github.event_name }}
+          TITLE: ${{ github.event.pull_request.title }}   # 제목을 run 안에 직접 넣지 않는다(명령 주입 방지)
+          BRANCH: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            TITLE=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json title --jq '.[0].title // ""')
+            if [ -z "$TITLE" ]; then echo "::error::브랜치 $BRANCH 에 열린 PR 이 없습니다"; exit 1; fi
+          fi
+          echo "PR 제목: $TITLE"
+          re='^(feat|fix|perf|refactor|test|docs|build|ci|chore|style|revert)(\([A-Za-z0-9#._/-]+\))?!?: .+'
+          if [[ ! "$TITLE" =~ $re ]]; then
+            echo "::error::PR 제목은 '<type>(<선택 scope>): <설명>' 꼴이어야 합니다. type = feat fix perf refactor test docs build ci chore style revert"
+            exit 1
+          fi
