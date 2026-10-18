@@ -21,6 +21,7 @@ class ExportProduct(Contract):
     categoryName: StrictStr
     price: Annotated[int, Field(strict=True,ge=0)]
     available: StrictBool
+    viewCount: int | None = Field(default=None, ge=0, strict=True)
     updatedAt: datetime
 
     @field_validator('updatedAt', mode='before')
@@ -120,12 +121,12 @@ def project(export_json, categories_json, old_catalog, product_map, category_map
         p = {'id':item.productId,'source_product_id':source,'name':item.name,'normalized_name':item.name,
             'brand':item.brand,'category_id':item.categoryId,'source_category_id':leaf['source_category_id'],
             'parent_category_id':leaf['parent_id'],'category':leaf['category'],'category_group':leaf['category_group'],
-            'kind':'','product_type':old.get('product_type'),'price':item.price,'description':item.description or '',
-            'attributes':{},'tags':[],'availability':'available' if item.available else 'unavailable',
+            'kind':old.get('kind',''),'product_type':old.get('product_type'),'price':item.price,'description':item.description or '',
+            'attributes':old.get('attributes',{}),'tags':old.get('tags',[]),'availability':'available' if item.available else 'unavailable',
             'product_url':old.get('product_url',''),'image':old.get('image',''),'image_large':old.get('image_large',''),
             'image_fallback':old.get('image_fallback',''),'document':text,
             'document_hash':hashlib.sha256(text.encode()).hexdigest(),'description_origin':'backend-export',
-            'source_updated_at':item.updatedAt.isoformat()}
+            'source_updated_at':item.updatedAt.isoformat(), 'view_count':item.viewCount if item.viewCount is not None else old.get('view_count',0)}
         products.append(p)
     return {'format':'product-search-catalog/3','document_contract':'backend-export/1',
         'export_generated_at':export.generatedAt.isoformat(),'source':'backend-export',

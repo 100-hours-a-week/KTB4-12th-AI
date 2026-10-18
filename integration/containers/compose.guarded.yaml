@@ -1,0 +1,275 @@
+# Dedicated candidate only. Apply explicit migrations and stage an initial PG generation before app startup.
+name: emmet4930-guarded
+x-app:
+  network_mode: service:mesh
+  read_only: true
+  init: true
+  cap_drop: &id001
+  - ALL
+  security_opt: &id002
+  - no-new-privileges:true
+  tmpfs: &id003
+  - /tmp:uid=10001,gid=10001,mode=0700
+  - /run/runtime:uid=10001,gid=10001,mode=0700
+  restart: 'no'
+services:
+  mesh:
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: mesh
+    networks:
+    - backend
+    - egress
+    extra_hosts:
+    - host.docker.internal:host-gateway
+    ports:
+    - 127.0.0.1:${INTEGRATION_CHAT_PORT:-18860}:7860
+    - 127.0.0.1:${INTEGRATION_PROFILER_PORT:-18861}:8001
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+    - postgres-data:/var/lib/postgresql/data
+    networks:
+    - backend
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U ai_search_service -d ${AI_DATABASE_NAME:?one prepared application
+        database}
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  search:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop: *id001
+    security_opt: *id002
+    tmpfs: *id003
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: search
+    command:
+    - search
+    depends_on:
+      mesh:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
+      SEARCH_CATALOG_DATABASE_URL_FILE: /run/secrets/database_url
+      SEARCH_MEDIA_ROOT: /media
+      PORT: '8000'
+      AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
+    secrets:
+    - ai_service_token
+    - source: search_database_url
+      target: database_url
+    volumes:
+    - search-cache:/runtime
+    - type: bind
+      source: ${EMMET_MODEL_DIR:?existing verified models directory}
+      target: /assets/models
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${EMMET_MEDIA_DIR:?existing catalog media directory}
+      target: /media
+      read_only: true
+      bind:
+        create_host_path: false
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -m
+      - integration.containers.health
+      - search
+      interval: 5s
+      timeout: 5s
+      start_period: 90s
+      retries: 10
+  profiler:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop: *id001
+    security_opt: *id002
+    tmpfs: *id003
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: profiler
+    command:
+    - profiler
+    depends_on:
+      mesh:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
+      PROFILING_DATABASE_URL_FILE: /run/secrets/database_url
+      PROFILING_APP_DB_ROLE: ai_profiler_service
+      STORE_TOKEN_FILE: /run/secrets/store_token
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_key
+      PROFILING_BACKEND_BASE_URL: ${PROFILING_BACKEND_BASE_URL:?authorized Backend
+        callback origin}
+      BUDGET_GUARDED_ORIGIN: ${BUDGET_GUARDED_ORIGIN:?existing approved guarded gateway
+        origin}
+      BUDGET_EXPECTED_MAX_ATTEMPTS: ${BUDGET_EXPECTED_MAX_ATTEMPTS:?existing fence
+        attempts}
+      BUDGET_EXPECTED_MAX_RESERVED_USD: ${BUDGET_EXPECTED_MAX_RESERVED_USD:?existing
+        fence reservations}
+      PORT: '8001'
+      AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
+    secrets:
+    - ai_service_token
+    - store_token
+    - openrouter_key
+    - source: profiler_database_url
+      target: database_url
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -m
+      - integration.containers.health
+      - profiler
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+  chat:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop: *id001
+    security_opt: *id002
+    tmpfs: *id003
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: chat
+    command:
+    - chat
+    depends_on:
+      mesh:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
+      DATABASE_URL_FILE: /run/secrets/database_url
+      STORE_TOKEN_FILE: /run/secrets/store_token
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_key
+      SESSION_SECRET_FILE: /run/secrets/session_secret
+      QA_ADMIN_PASSWORD_FILE: /run/secrets/qa_admin_password
+      DEMO_ACCESS_TOKEN_FILE: /run/secrets/demo_access_token
+      SEARCH_URL: http://127.0.0.1:8000
+      SEARCH_TOKEN: ''
+      INTERNAL_URL: http://127.0.0.1:7860
+      COOKIE_SECURE: 'false'
+      CHAT_MEDIA_ROOT: /media
+      BUDGET_GUARDED_ORIGIN: ${BUDGET_GUARDED_ORIGIN:?existing approved guarded gateway
+        origin}
+      BUDGET_EXPECTED_MAX_ATTEMPTS: ${BUDGET_EXPECTED_MAX_ATTEMPTS:?existing fence
+        attempts}
+      BUDGET_EXPECTED_MAX_RESERVED_USD: ${BUDGET_EXPECTED_MAX_RESERVED_USD:?existing
+        fence reservations}
+      PORT: '7860'
+      AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
+    secrets:
+    - ai_service_token
+    - store_token
+    - openrouter_key
+    - session_secret
+    - qa_admin_password
+    - demo_access_token
+    - source: chat_database_url
+      target: database_url
+    volumes:
+    - type: bind
+      source: ${EMMET_MEDIA_DIR:?existing catalog media directory}
+      target: /media
+      read_only: true
+      bind:
+        create_host_path: false
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -m
+      - integration.containers.health
+      - chat
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  migrate:
+    profiles:
+    - migration
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: migrate
+    command:
+    - --database
+    - ${AI_DATABASE_NAME:?one prepared application database}
+    - --emmet
+    networks:
+    - backend
+    read_only: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    environment:
+      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
+    secrets:
+    - migration_database_url
+    restart: 'no'
+secrets:
+  ai_service_token:
+    file: ${AI_SERVICE_TOKEN_FILE:?existing external secret file}
+  store_token:
+    file: ${STORE_TOKEN_FILE:?existing external secret file}
+  openrouter_key:
+    file: ${OPENROUTER_KEY_FILE:?existing external secret file}
+  session_secret:
+    file: ${SESSION_SECRET_FILE:?existing external secret file}
+  qa_admin_password:
+    file: ${QA_ADMIN_PASSWORD_FILE:?existing external secret file}
+  demo_access_token:
+    file: ${DEMO_ACCESS_TOKEN_FILE:?existing external secret file}
+  profiler_database_url:
+    file: ${PROFILER_DATABASE_URL_FILE:?existing external database URL file}
+  chat_database_url:
+    file: ${CHAT_DATABASE_URL_FILE:?existing external database URL file}
+  search_database_url:
+    file: ${SEARCH_DATABASE_URL_FILE:?existing external database URL file}
+  migration_database_url:
+    file: ${MIGRATION_DATABASE_URL_FILE:?existing candidate migration-role DSN file}
+volumes:
+  postgres-data:
+    external: true
+    name: ${EMMET_POSTGRES_VOLUME:?prepared separate Linux PostgreSQL18 QA volume}
+  search-cache: {}
+networks:
+  backend:
+    internal: true
+  egress: {}

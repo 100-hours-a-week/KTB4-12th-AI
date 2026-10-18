@@ -5,7 +5,7 @@ import json
 
 def initial_manifest(root):
     lock = json.loads((root/'embedding/model.lock.json').read_text())
-    return {'model': lock['model'], 'dimensions': 768, 'precision': 'q4f16',
+    return {'model': lock['model'], 'model_revision': lock['revision'], 'dimensions': 768, 'precision': 'q4f16',
             'max_tokens': 1024, 'query_prefix': 'Query: ', 'document_prefix': 'Document: ',
             'model_sha256': next(f['sha256'] for f in lock['files']
                                  if f['path'] == 'model_q4f16.onnx_data')}
@@ -17,7 +17,8 @@ def encoder_contract(root, manifest):
     models = root/'embedding/models'
     if hashlib.sha256((models/'model_q4f16.onnx_data').read_bytes()).hexdigest() != manifest['model_sha256']:
         raise ValueError('Encoder weight mismatch')
-    files = [root/'embedding/runtime.mjs',root/'embedding/documents.mjs',*sorted(p for p in models.iterdir() if p.is_file())]
+    files = [root/'embedding/model.lock.json', root/'embedding/service.mjs', root/'embedding/runtime.mjs',
+             root/'embedding/documents.mjs', *sorted(p for p in models.iterdir() if p.is_file())]
     digest = hashlib.sha256()
     for path in files:
         digest.update(path.name.encode())

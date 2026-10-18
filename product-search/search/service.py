@@ -12,6 +12,7 @@ import numpy as np
 from .models import SearchRequest, ProductRequest, SnapshotMismatch, InvalidSearchFilter
 from .version import snapshot_id
 from .identity import product_id
+from .visibility import denied_products, visible
 from .tokenization import normalize, tokens, batch_tokens, TOKENIZER_ID, TOKENIZER_INFO
 
 # Bump when ranking weights, candidate limits, tie-breaking or browse order change;
@@ -144,6 +145,10 @@ class SearchService:
     def _eligible(self, request):
         f = request.filters
         mask = np.ones(len(self.products), dtype=bool)
+        denied = denied_products.get()
+        if denied:
+            mask &= ~np.isin([p['id'] for p in self.products], list(denied))
+        if f.include_product_ids: mask &= np.isin([p["id"] for p in self.products], f.include_product_ids)
         if f.min_price is not None: mask &= self.prices >= f.min_price
         if f.max_price is not None: mask &= self.prices <= f.max_price
         if f.category_ids: mask &= np.isin(self.categories, list(self._expand_categories(f.category_ids)))
@@ -240,7 +245,7 @@ class SearchService:
         self._check_snapshot(snapshot)
         self._validate(request)
         start = time.perf_counter()
-        key = request.model_dump_json()
+        key = request.model_dump_json() + ':' + ','.join(map(str, sorted(denied_products.get())))
         if key in self.cache:
             self.cache.move_to_end(key)
             result = copy.deepcopy(self.cache[key])
@@ -267,7 +272,7 @@ class SearchService:
         self._check_snapshot(snapshot)
         products, missing = [], []
         for id in ids:
-            if id not in self.by_id:
+            if id not in self.by_id or id in denied_products.get():
                 missing.append(id)
                 continue
             i = self.by_id[id]; p = self.products[i]
@@ -279,18 +284,19 @@ class SearchService:
         return {'snapshotId':self.snapshot_id,'products':products,'missingIds':missing}
 
     def get_metadata(self):
-        counts=Counter(self.categories)
+        products = visible(self.products)
+        counts=Counter(p['category_id'] for p in products)
         categories=[{'id':c['category_id'],'name':c['category'],'group':c['category_group'],
                      'parentId':c['parent_id'],'sourceCategoryId':c['source_category_id'],'count':counts[c['category_id']]}
                     for c in self.catalog['taxonomy']['categories'] if c['parent_id'] is not None]
         groups=[{'id':c['category_id'],'name':c['category'],'sourceCategoryId':c['source_category_id'],
                  'count':sum(counts[id] for id in self.category_leaves[c['category_id']])}
                 for c in self.catalog['taxonomy']['categories'] if c['parent_id'] is None]
-        brands=Counter(p['brand'] for p in self.products)
-        return {'snapshotId':self.snapshot_id,'algorithm':ALGORITHM,'productCount':len(self.products),
+        brands=Counter(p['brand'] for p in products)
+        return {'snapshotId':self.snapshot_id,'algorithm':ALGORITHM,'productCount':len(products),
             'lexicalTokenizer':dict(TOKENIZER_INFO),
             'categories':categories,'groups':groups,'brands':[{'name':b,'count':n} for b,n in sorted(brands.items())],
-            'productTypes':[{'id':t,'count':n} for t,n in Counter(self.types.tolist()).items()],
+            'productTypes':[{'id':t,'count':n} for t,n in Counter(p['product_type'] for p in products).items()],
             'model':self.manifest['model'],'dimensions':768,'maxTokens':self.manifest['max_tokens'],
             'availabilityNote':self.catalog['availability_note'],'source':self.catalog['source'],
             'exportGeneratedAt':self.catalog.get('export_generated_at')}

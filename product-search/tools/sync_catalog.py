@@ -17,7 +17,8 @@ import httpx
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if __name__ == "__main__":
+    sys.path.insert(0, str(ROOT))
 from search.export_catalog import project, encode
 from search.encoder_contract import encoder_contract, initial_manifest
 from search.identity import load_id_mapping

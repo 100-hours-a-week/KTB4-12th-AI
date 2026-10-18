@@ -11,7 +11,7 @@ from .encoder_contract import encoder_contract
 
 
 @asynccontextmanager
-async def open_search(root: Path):
+async def open_search(root: Path, *, watch=True):
     """Create once at application startup; inject this shared instance into callers."""
     root=Path(root)
     directory=active_data_dir(root/'data')
@@ -32,7 +32,8 @@ async def open_search(root: Path):
         loading=asyncio.create_task(asyncio.to_thread(SearchService,directory,embedding,encoder_fingerprint=fingerprint))
         initial=await asyncio.shield(loading)
         service=ReloadingSearch(root,initial,embedding,encoder_fingerprint=fingerprint)
-        service.task=asyncio.create_task(service.watch())
+        if watch:
+            service.task=asyncio.create_task(service.watch())
         yield service
     finally:
         async def cleanup():

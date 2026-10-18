@@ -1,0 +1,54 @@
+# Same Search image, one-shot PG writer. Serving Search validates before activation.
+services:
+  catalog-sync:
+    profiles:
+    - sync
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: search
+    entrypoint:
+    - python
+    - -m
+    - integration.search_sync
+    command:
+    - --export-url
+    - ${BACKEND_EXPORT_URL:?explicit authorized BE export URL}
+    - --categories-url
+    - ${BACKEND_CATEGORIES_URL:?explicit authorized BE categories URL}
+    - --apply
+    network_mode: service:mesh
+    depends_on:
+      mesh:
+        condition: service_started
+    read_only: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    environment:
+      SEARCH_RUNTIME_ROOT: /runtime
+      BACKEND_SERVICE_TOKEN_FILE: /run/secrets/backend_export_token
+      AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
+      CATALOG_SYNC_DATABASE_URL_FILE: /run/secrets/catalog_sync_database_url
+    secrets:
+    - backend_export_token
+    - catalog_sync_database_url
+    volumes:
+    - sync-cache:/runtime
+    - type: bind
+      source: ${EMMET_MODEL_DIR:?existing verified models directory}
+      target: /assets/models
+      read_only: true
+      bind:
+        create_host_path: false
+    restart: 'no'
+secrets:
+  backend_export_token:
+    file: ${BACKEND_EXPORT_TOKEN_FILE:?existing authorized token file}
+  catalog_sync_database_url:
+    file: ${CATALOG_SYNC_DATABASE_URL_FILE:?existing catalog-writer DSN file}
+volumes:
+  sync-cache: {}

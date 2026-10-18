@@ -35,12 +35,21 @@ logger = logging.getLogger("product-search")
 
 
 def db():
+    if os.getenv('SEARCH_QA_DATABASE_URL'):
+        from catalog_db import QAConnection
+        return QAConnection(os.environ['SEARCH_QA_DATABASE_URL'])
     con = sqlite3.connect(DB, timeout=5)
     con.execute('PRAGMA foreign_keys=ON')
     return con
 
 
 def init_db():
+    if os.getenv('SEARCH_QA_DATABASE_URL'):
+        # The catalog operator creates/grants ai_search; the app owns only QA rows.
+        with db() as con:
+            con.execute('SELECT 1 FROM searches LIMIT 1')
+            con.execute('SELECT 1 FROM feedback LIMIT 1')
+        return
     with db() as con:
         con.execute('PRAGMA journal_mode=WAL')
         columns = {row[1]: row[2] for row in con.execute('PRAGMA table_info(feedback)')}
@@ -78,7 +87,15 @@ async def lifespan(app):
     app.state.asset_version = build_assets()
     app.state.active_searches = 0
     app.state.active_profile_searches = 0
-    async with open_search(ROOT) as service:
+    search_root = Path(os.getenv('SEARCH_RUNTIME_ROOT', str(ROOT)))
+    catalog_url = os.getenv('SEARCH_CATALOG_DATABASE_URL')
+    if catalog_url:
+        from catalog_runtime import open_database_search
+        search_context = open_database_search(search_root, catalog_url)
+    else:
+        # File-only mode is the standalone Search fixture, not the integrated deployment.
+        search_context = open_search(search_root)
+    async with search_context as service:
         app.state.search = service
         app.state.ready = True
         try:
@@ -88,6 +105,12 @@ async def lifespan(app):
 
 
 app = FastAPI(title="상품 검색 API", version="0.1.0", lifespan=lifespan)
+from search.common_api import manages_catalog_readiness, router as common_router
+app.include_router(common_router)
+app.state.shared_catalog_readiness = lambda: database_ready(app)
+
+if os.getenv('SEARCH_MEDIA_ROOT'):
+    app.mount('/media', StaticFiles(directory=os.environ['SEARCH_MEDIA_ROOT']), name='product-media')
 app.add_middleware(GZipMiddleware, minimum_size=700, compresslevel=4)
 
 
@@ -108,7 +131,35 @@ def error_response(status, code, message, *, issues=None, headers=None):
 
 @app.middleware('http')
 async def headers(request: Request, call_next):
-    response = await call_next(request)
+    from search.visibility import denied_products
+    visibility_token = None
+    if request.url.path.startswith('/v1/'):
+        from search.common_api import authorize
+        try:
+            authorize(request)
+        except HTTPException as error:
+            return error_response(error.status_code, 'UNAUTHORIZED', str(error.detail))
+    cleanup = request.method == 'DELETE' and request.url.path.startswith('/v1/catalog/bindings/')
+    if os.getenv('SEARCH_CATALOG_DATABASE_URL') and request.url.path.startswith(('/v1/', '/api/')) and not cleanup:
+        try:
+            runtime = request.app.state.search.database_runtime
+            if not await runtime.check():
+                raise RuntimeError('CATALOG_TRANSITION')
+            denied = await asyncio.to_thread(runtime.store.denied)
+            visibility_token = denied_products.set(denied)
+        except Exception:
+            return error_response(503, 'SEARCH_NOT_READY', '상품 삭제 상태를 확인할 수 없습니다.')
+    if (os.getenv('SEARCH_CATALOG_DATABASE_URL') and request.url.path.startswith(('/v1/', '/api/'))
+            and not manages_catalog_readiness(request.url.path)):
+        if not await database_ready(request.app):
+            if visibility_token is not None:
+                denied_products.reset(visibility_token)
+            return error_response(503, 'SEARCH_NOT_READY', '단일 카탈로그의 상품·벡터 버전을 확인하고 있습니다.')
+    try:
+        response = await call_next(request)
+    finally:
+        if visibility_token is not None:
+            denied_products.reset(visibility_token)
     response.headers['X-Content-Type-Options']='nosniff'
     response.headers['Referrer-Policy']='no-referrer'
     if request.url.path.startswith(('/api/', '/v1/')) or request.url.path in ('/healthz', '/readyz'):
@@ -143,12 +194,24 @@ async def guide(request: Request):
 @app.get('/healthz', response_model=ReadyResponse, responses=error_responses(503))
 @app.get('/readyz', response_model=ReadyResponse, responses=error_responses(503))
 async def health(request: Request):
-    if not getattr(request.app.state, 'ready', False):
+    if not await database_ready(request.app):
         raise APIException(503, 'SEARCH_NOT_READY', '검색 서버가 준비되지 않았습니다.')
     service=request.app.state.search
     return {'status':'ready','products':len(service.products),'snapshotId':service.snapshot_id,
             'catalogLoadError':getattr(service,'load_error',None),
             'exportGeneratedAt':service.catalog.get('export_generated_at')}
+
+
+async def database_ready(application):
+    if not getattr(application.state, 'ready', False):
+        return False
+    url = os.getenv('SEARCH_CATALOG_DATABASE_URL')
+    if not url:
+        return True
+    try:
+        return await application.state.search.database_runtime.check()
+    except Exception:
+        return False
 
 
 @app.get('/api/metadata', response_model=MetadataResponse)

@@ -8,9 +8,17 @@
 HTTP 경계의 DTO(7.6 요청·7.7 콜백)는 schemas.py, 바깥에 요구하는 모양(Protocol)은 ports.py.
 """
 
-from profiling.pipeline import profile
-from profiling.settings import Settings, get_settings
-from profiling.types import ErrorCode, ProfileOutcome, ProfileRequest, RunStatus
+def __getattr__(name):
+    # Keep the public API while allowing Search to import the pure vocabulary
+    # without loading personal-profile policy, prompts, settings or DB packages.
+    from importlib import import_module
+    module = {"profile": "pipeline", "Settings": "settings", "get_settings": "settings",
+              "ErrorCode": "types", "ProfileOutcome": "types", "ProfileRequest": "types", "RunStatus": "types"}.get(name)
+    if module is None:
+        raise AttributeError(name)
+    value = getattr(import_module("profiling." + module), name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "ErrorCode",

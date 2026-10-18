@@ -72,10 +72,10 @@ class Settings(BaseSettings):
         description="트랜잭션을 연 채 쉬는 세션을 끊는 상한(ms). 앱은 트랜잭션을 짧게만 연다 — 안전망")
 
     # ---- 카탈로그
-    CATALOG_SOURCE: Literal["file", "db"] = Field(
+    CATALOG_SOURCE: Literal["file", "db", "search_http"] = Field(
         default="file",
-        description="활성 카탈로그를 어디서 읽나. db = ai_catalog — **배포는 이쪽**(컨테이너에 파일이 없다). "
-                    "file = CATALOG_FILE 의 JSON — 로컬 개발·시험 기본값",
+        description="활성 카탈로그를 어디서 읽나. search_http = 공용 Search API(통합 후보), "
+                    "db = 기존 ai_catalog, file = 로컬 개발·시험 JSON",
     )
     CATALOG_FILE: Path = Field(
         default=Path("tests/fixtures/catalog_sample.json"),
@@ -136,6 +136,9 @@ class Settings(BaseSettings):
                     "ollama: gemma4:12b. 다른 모델은 이름을 직접(ollama 예 qwen3.5:9b, openrouter 는 모델 목록의 id)",
     )
     TAGGER_TIMEOUT_S: float = Field(default=120.0, gt=0, description="LLM 호출 한 번의 시간 상한(초)")
+    SEARCH_BASE_URL: str = ""
+    SEARCH_TOKEN: SecretStr | None = None
+
     EMBEDDING_DIR: str | None = Field(
         default=None,
         description="질의 인코더가 있는 product-search 폴더(embedding/ — Node · 모델). 없으면 임베딩 끔",
