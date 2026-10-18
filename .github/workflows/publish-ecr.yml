@@ -1,0 +1,95 @@
+name: AI ECR Publish
+run-name: AI ECR / ${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-ecr-main
+  cancel-in-progress: false
+
+jobs:
+  # 기존 lint·DB migration·이미지·합성 smoke 검증을 그대로 재사용한다.
+  checks:
+    uses: ./.github/workflows/pr-checks.yml
+
+  publish:
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [chat, profiler, search, migrate]
+    env:
+      AWS_REGION: ap-northeast-2
+      ECR_REPOSITORY: ${{ vars.RELEASE_ECR_REPOSITORY || 'seonjalal/ai' }}
+      RELEASE_ECR_ROLE_ARN: ${{ vars.RELEASE_ECR_ROLE_ARN }}
+      IMAGE_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Require release configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_ECR_ROLE_ARN" || { echo 'RELEASE_ECR_ROLE_ARN 설정이 필요합니다.' >&2; exit 1; }
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Configure AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ env.RELEASE_ECR_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ai-publish-${{ github.run_id }}
+
+      - name: Resolve immutable repository and log in
+        shell: bash
+        run: |
+          set -euo pipefail
+          MUTABILITY=$(aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" \
+            --query 'repositories[0].imageTagMutability' --output text)
+          test "$MUTABILITY" = IMMUTABLE || { echo 'ECR은 IMMUTABLE이어야 합니다.' >&2; exit 1; }
+          URI=$(aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" \
+            --query 'repositories[0].repositoryUri' --output text)
+          REGISTRY="${URI%%/*}"
+          echo "IMAGE_URI=$URI" >> "$GITHUB_ENV"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+
+      - name: Build and publish exact source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${IMAGE_TARGET}-${GITHUB_SHA}"
+          # 이미 성공한 태그는 재사용한다. 권한/통신 오류를 '태그 없음'으로 숨기지 않는다.
+          EXISTING=$(aws ecr list-images --repository-name "$ECR_REPOSITORY" \
+            --filter tagStatus=TAGGED --query "imageIds[?imageTag=='${TAG}'].imageTag" --output text)
+          if [[ -n "$EXISTING" ]]; then
+            # 커밋 label까지 확인해 다른 소스의 이미지를 재사용하지 않는다.
+            docker pull "${IMAGE_URI}:${TAG}"
+            REVISION=$(docker image inspect "${IMAGE_URI}:${TAG}" \
+              --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+            test "$REVISION" = "$GITHUB_SHA" || { echo '기존 이미지의 소스 SHA가 다릅니다.' >&2; exit 1; }
+          else
+            docker build --platform linux/amd64 \
+              --file integration/containers/Dockerfile --target "$IMAGE_TARGET" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --tag "${IMAGE_URI}:${TAG}" .
+            docker push "${IMAGE_URI}:${TAG}"
+          fi
+          DIGEST=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$TAG" --query 'imageDetails[0].imageDigest' --output text)
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "### ${IMAGE_TARGET}" "- Source: ${GITHUB_SHA}" \
+            "- Tag: ${TAG}" "- Image: ${IMAGE_URI}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
