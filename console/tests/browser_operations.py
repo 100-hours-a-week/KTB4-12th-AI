@@ -366,6 +366,8 @@ async def main(args):
                 await page.click('[data-page="' + tab + '"]')
         checks.append("repeat navigation keeps one coherent view")
         await page.click('[data-page="chat"]')
+        await page.locator('.chat-options:not(.quick-check) > summary').click()
+        await page.locator('.chat-debug > summary').click()
         await page.fill("#message", "합성 요청 · 세 후보")
         await page.click("#send-chat")
         await expect(page.locator("#chat-status")).to_contain_text("429")
@@ -414,7 +416,7 @@ async def main(args):
             "new request clears old preview; cancellation stays terminal after old state reply"
         )
         await page.check("#reveal")
-        await page.locator(".raw-inspect summary").click()
+        await page.locator("#chat .raw-inspect summary").click()
         await page.click('[data-page="network"]')
         await page.check("#http-errors")
         for detail in await page.locator(".httprow details").all():

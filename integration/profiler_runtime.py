@@ -145,8 +145,9 @@ async def credential_status(request: main.Request):
     if not await asyncio.to_thread(matches, "profiler", request.headers.get("authorization", "")):
         raise HTTPException(401, "UNAUTHORIZED")
     source = request.app.state.provider_key
-    key, token = await asyncio.gather(asyncio.to_thread(source.status),
+    key, token = await asyncio.gather(asyncio.to_thread(source.runtime_status),
                                      asyncio.to_thread(ServiceToken.from_environment("profiler").status))
+    token["usage"] = {"state": "not-collected", "lastSuccessfulCallAt": None, "scope": "responding-process"}
     return {"service": "profiler", "environment": source.environment, "provider": key, "backend": token}
 
 

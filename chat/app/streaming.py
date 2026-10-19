@@ -20,6 +20,7 @@ async def stream_answer(runtime, cid, tid, receipt, request):
     async def read_provider():
         finish = None
         previous = None
+        response_ok = True
         try:
             async with runtime.http.stream('POST', '/chat/completions', json=request) as response:
                 response.raise_for_status()
@@ -31,6 +32,7 @@ async def stream_answer(runtime, cid, tid, receipt, request):
                     if data.get('error'): raise ValueError('Model stream error')
                     if data.get('usage'): receipt['usage'].append(data['usage'])
                     for choice in data.get('choices', []):
+                        response_ok = response_ok and not choice.get('error')
                         finish = choice.get('finish_reason') or finish
                         delta = choice.get('delta', {}).get('content') or ''
                         if not delta: continue
@@ -43,6 +45,8 @@ async def stream_answer(runtime, cid, tid, receipt, request):
                         metrics['providerDeltas'] += 1
                         metrics['characters'] += len(delta)
                         await queue.put(('delta', delta))
+            if response_ok and metrics['providerDeltas'] and finish in {'stop', 'end_turn'} and hasattr(runtime, 'provider_succeeded'):
+                await runtime.provider_succeeded(response)
             await queue.put(('end', finish))
         except Exception as exc:
             await queue.put(('error', exc))

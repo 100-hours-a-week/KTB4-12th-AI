@@ -48,6 +48,9 @@ async def main(args):
         await page.click('#login-submit')
         await expect(page.locator("#mode")).not_to_have_text("—")
         await page.locator('[data-page="chat"]').click()
+        await expect(page.locator('.chat-debug')).not_to_have_attribute('open', '')
+        await page.locator('.chat-options:not(.quick-check) > summary').click()
+        await page.locator('.chat-debug > summary').click()
         await page.select_option("#scenario", "/mock reconnect")
         await page.locator("#send-chat").dblclick()
         await page.locator(".eventrow").first.wait_for()
@@ -72,6 +75,7 @@ async def main(args):
             "double-click one request; disconnect/reconnect deduplicated and stored completion"
         )
         await page.locator(".eventrow").filter(has_text="answer.delta").first.locator(".eventheading").click()
+        await page.locator('#chat .raw-inspect > summary').click()
         await expect(page.locator("#event-meta")).to_contain_text("answer.delta")
         await expect(page.locator("#event-json")).to_contain_text("[원문 숨김]")
         selected = await page.locator("#event-meta").inner_text()

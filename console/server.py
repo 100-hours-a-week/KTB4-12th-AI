@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -37,6 +38,44 @@ ROOT = Path(__file__).parent
 STAMP = lambda: datetime.now(timezone.utc).isoformat()
 HTTP_TRACE = ContextVar("console_http_trace", default=None)
 SAFE_HEADERS = {"content-type", "retry-after", "cache-control"}
+QUICK_CHECK_MESSAGE = "합성 점검 질문입니다. 3만 원 이하의 머그컵 선물 후보를 찾아 간단히 추천해 주세요."
+
+
+def observed_timestamp(value):
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return stamp.isoformat() if stamp.tzinfo is not None else None
+    except ValueError:
+        return None
+
+
+def processing_summary(report, request_id):
+    """Only recorded metadata crosses this boundary, never report prose or traces."""
+    def obj(value):
+        return value if isinstance(value, dict) else {}
+    def count(value):
+        return value if type(value) is int and 0 <= value <= 2**53 - 1 else None
+    def ident(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}", value) else None
+    recorded = obj(report.get("processing"))
+    profile, retrieval, model = (obj(recorded.get(key)) for key in ("profile", "retrieval", "model"))
+    elapsed = obj(report.get("metrics")).get("elapsedMs")
+    return {
+        "profile": {"status": profile.get("status") if profile.get("status") in
+                    ("AVAILABLE", "NONE", "UNAVAILABLE", "NOT_PROVIDED", "TEAM_SESSION", "COMPLETED", "PENDING", "PROCESSING", "FAILED") else None,
+                    "sourceVersion": count(profile.get("sourceVersion")),
+                    "receivedAt": observed_timestamp(profile.get("receivedAt")),
+                    "analysisSourceVersion": count(profile.get("analysisSourceVersion"))},
+        "retrieval": {"candidateCount": count(retrieval.get("candidateCount")),
+                      "exclusionReasons": [], "catalogSnapshotId": ident(retrieval.get("catalogSnapshotId"))},
+        "model": {"name": ident(model.get("name")),
+                  "status": model.get("status") if model.get("status") in ("running", "completed", "cancelled", "failed") else None},
+        "final": {"status": report.get("status") if report.get("status") in ("PROCESSING", "COMPLETED", "CANCELLED", "FAILED") else None,
+                  "requestId": request_id,
+                  "elapsedMs": elapsed if type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 0 else None},
+    }
 
 
 def http_masked(value, key="", depth=0):
@@ -244,6 +283,47 @@ def target_url(value):
     return value.rstrip("/")
 
 
+
+def be_api_address(value, path):
+    """Display an explicitly deployed base URL only; never resolve or probe it."""
+    if value is None or value == "":
+        return {"state": "missing", "url": None}
+    try:
+        if (not isinstance(value, str) or len(value) > 1024
+                or any(ord(c) <= 32 or ord(c) >= 127 for c in value)
+                or any(c in value for c in "?#%\\")):
+            raise ValueError()
+        url = urlsplit(value)
+        if (url.scheme not in {"http", "https"} or not url.hostname
+                or url.username is not None or url.password is not None
+                or url.query or url.fragment or url.port == 0
+                or not re.fullmatch(r"/[A-Za-z0-9._~/-]*|", url.path)
+                or any(part in {".", ".."} for part in url.path.split("/"))):
+            raise ValueError()
+        try:
+            ipaddress.ip_address(url.hostname)
+        except ValueError:
+            if any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", part)
+                   for part in url.hostname.split(".")):
+                raise ValueError()
+        return {"state": "configured", "url": value.rstrip("/") + path}
+    except (ValueError, TypeError):
+        # Never echo rejected URLs: even their host or path may contain a secret.
+        return {"state": "invalid", "url": None}
+
+
+def integration_readiness(snapshot):
+    """Reuse observations already collected by the dashboard, not a BE probe."""
+    synthetic = snapshot.get("dataMode") == "SYNTHETIC"
+    search = snapshot.get("services", {}).get("search", {})
+    count = search.get("data", {}).get("products")
+    products = ("ready" if count > 0 else "empty") if type(count) is int and count >= 0 and search.get("status") == "ready" else "unknown"
+    return {"database": "synthetic" if synthetic else "unready" if snapshot.get("dbError")
+            else "ready" if snapshot.get("dbSource") == "read-only PostgreSQL" else "unknown",
+            "products": "synthetic" if synthetic else products,
+            "productCount": count if not synthetic and type(count) is int and count >= 0 else None,
+            "beConnection": "unverified"}
+
 def masked(value, key=""):
     if any(
         word in key.lower()
@@ -288,6 +368,15 @@ class ChatInput(Input):
     recipientUserId: int = Field(default=42, ge=1)
     recipientContext: dict | None = None
     preparedContext: dict | None = None
+
+
+class QuickCheckInput(Input):
+    request_id: uuid.UUID
+    conversation_id: uuid.UUID
+    turn_id: uuid.UUID
+    senderUserId: int = Field(ge=1, strict=True)
+    recipientUserId: int = Field(ge=1, strict=True)
+    confirmCost: bool = Field(strict=True)
 
 
 class Backend:
@@ -412,7 +501,7 @@ class Backend:
             )
         return ready
 
-    async def request(self, service, method, path, body=None):
+    async def request(self, service, method, path, body=None, *, quick_check=False):
         started = time.perf_counter()
         trace = HTTP_TRACE.get()
         try:
@@ -420,7 +509,8 @@ class Backend:
                 method,
                 self.targets[service] + path,
                 json=body,
-                headers=await asyncio.to_thread(self.auth, service),
+                headers={**await asyncio.to_thread(self.auth, service),
+                         **({"X-Console-Quick-Check": "true"} if quick_check else {})},
                 **({"timeout": 5} if method == "GET" and path in {"/readyz", "/health", "/internal/credentials"} else {}),
             )
         except httpx.HTTPError as exc:
@@ -446,8 +536,43 @@ class Backend:
         self.jobs.add(task)
         task.add_done_callback(self.jobs.discard)
 
-    async def chat(self, body, session_key=None):
+    async def quick_check(self, body, session_key=None):
+        if body.confirmCost is not True:
+            raise HTTPException(400, "QUICK_CHECK_COST_CONFIRMATION_REQUIRED")
+        plan = body.model_dump(mode="json", exclude={"confirmCost"}) | {"message": QUICK_CHECK_MESSAGE}
+        # This explicit empty synthetic context prevents both real-profile lookup
+        # and resending text from the fixture. The fixture is still required below.
+        chat = ChatInput(**plan, recipientContext={"recipientUserId": body.recipientUserId,
+            "status": "NONE", "sourceVersion": 0, "giftPreference": None, "dislikedCategories": []})
+        return {**await self.chat(chat, session_key, quick_check=True), "plan": plan}
+
+    async def check_quick_check_ready(self, recipient):
+        if "backend" not in self.targets:
+            raise HTTPException(409, "QUICK_CHECK_SYNTHETIC_RECIPIENT_REQUIRED")
+        try:
+            status, fixture = await self.request("backend", "GET", f"/fixture/recipients/{recipient}/chat-context")
+        except httpx.HTTPError:
+            raise HTTPException(409, "QUICK_CHECK_SYNTHETIC_RECIPIENT_REQUIRED") from None
+        context = fixture.get("recipientContext") if isinstance(fixture, dict) else None
+        if (status != 200 or not isinstance(fixture, dict) or fixture.get("synthetic") is not True or not isinstance(context, dict)
+                or type(context.get("recipientUserId")) is not int or context["recipientUserId"] != recipient):
+            raise HTTPException(409, "QUICK_CHECK_SYNTHETIC_RECIPIENT_REQUIRED")
+        if "search" not in self.targets:
+            raise HTTPException(409, "QUICK_CHECK_SEARCH_NOT_READY")
+        try:
+            status, search = await self.request("search", "GET", "/readyz")
+        except httpx.HTTPError:
+            raise HTTPException(409, "QUICK_CHECK_SEARCH_NOT_READY") from None
+        if (status != 200 or not isinstance(search, dict) or search.get("status") != "ready"
+                or type(search.get("products")) is not int or search["products"] <= 0
+                or not isinstance(search.get("snapshotId"), str) or not search["snapshotId"].strip()
+                or (self.config.get("searchSnapshotId") and search["snapshotId"] != self.config["searchSnapshotId"])):
+            raise HTTPException(409, "QUICK_CHECK_SEARCH_NOT_READY")
+
+    async def chat(self, body, session_key=None, *, quick_check=False):
         data = body.model_dump(mode="json")
+        if quick_check:
+            data["quickCheck"] = True
         rid = data["request_id"]
         fingerprint = hashlib.sha256(
             json.dumps(data, sort_keys=True).encode()
@@ -462,6 +587,14 @@ class Backend:
                 raise HTTPException(
                     409, "Same request ID requires identical UUIDs and body"
                 )
+            if quick_check and not self.config.get("liveModel"):
+                raise HTTPException(409, "QUICK_CHECK_LIVE_RUNTIME_REQUIRED")
+            if quick_check and not old:
+                owned = (self.admission_store.owns_chat_conversation(session_key, self.target_scope, data["conversation_id"])
+                         if self.admission_store is not None else any(a["body"]["conversation_id"] == data["conversation_id"]
+                         for a in self.admissions.values()))
+                if owned:
+                    raise HTTPException(409, "QUICK_CHECK_NEW_CONVERSATION_REQUIRED")
             if not self.demo:
                 if old and old.get("readable"):
                     # An accepted turn is a read even after new-work readiness or
@@ -494,6 +627,8 @@ class Backend:
                     ready = await self.check_live_budget()
                     if old:
                         data = old["body"]
+                    elif quick_check:
+                        await self.check_quick_check_ready(data["recipientUserId"])
                     elif "backend" in self.targets and data["recipientContext"] is None:
                         context_status, context = await self.request(
                             "backend",
@@ -529,7 +664,7 @@ class Backend:
                 self.save_admission(rid, row, session_key)
                 known_conversation = (self.admission_store.owns_chat_conversation(
                     session_key, self.target_scope, data["conversation_id"])
-                    if self.admission_store is not None else True)
+                    if self.admission_store is not None else bool(old and old.get("conversationOwned")) if quick_check else True)
                 base = self.chat_base() + data["conversation_id"]
                 trace = HTTP_TRACE.get()
                 trace_start = len(trace) if trace is not None else 0
@@ -573,12 +708,14 @@ class Backend:
                         base + "/turns/" + data["turn_id"],
                         {
                             "message": data["message"],
+                            **({"quickCheck": True} if quick_check else {}),
                             **{
                                 k: data[k]
                                 for k in ("recipientContext", "preparedContext")
                                 if data[k] is not None
                             },
                         },
+                        **({"quick_check": True} if quick_check else {}),
                     )
                 except (httpx.ReadError, httpx.ReadTimeout, httpx.WriteError,
                         httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.DecodingError):
@@ -598,6 +735,12 @@ class Backend:
                         self.save_admission(rid, row, session_key)
                     else:
                         self.rejected_admission(rid, row, old, session_key)
+                    if quick_check and status == 400 and isinstance(result, dict) and isinstance(result.get("error"), dict) and result["error"].get("code") == "INVALID_REQUEST":
+                        raise HTTPException(409, "QUICK_CHECK_REQUEST_UNSUPPORTED")
+                    if quick_check and isinstance(result, dict) and result.get("message") in {
+                        "QUICK_CHECK_GRANT_REQUIRED", "QUICK_CHECK_NEW_CONVERSATION_REQUIRED", "QUICK_CHECK_SYNTHETIC_CONTEXT_REQUIRED",
+                    }:
+                        raise HTTPException(status, result["message"])
                     return {"httpStatus": status, "body": result}
             elif old:
                 stored = self.turns[data["turn_id"]]
@@ -692,6 +835,25 @@ class Backend:
         if status != 200:
             raise HTTPException(status, "Upstream Chat state query failed")
         return result
+
+    async def diagnostics(self, tid, session_key=None):
+        row = self.admission(tid, session_key)
+        cid = row["body"]["conversation_id"]
+        if self.demo:
+            report = {"status": self.turns[tid]["status"]}
+        else:
+            # The existing report includes public conversation prose. Do not add
+            # that response to Console's HTTP history or expose its other fields.
+            token = HTTP_TRACE.set(None)
+            try:
+                status, report = await self.request("chat", "GET", self.chat_base() + cid + "/turns/" + tid + "/report")
+            finally:
+                HTTP_TRACE.reset(token)
+            if status != 200:
+                raise HTTPException(status if 400 <= status <= 599 else 502, "Upstream Chat report query failed")
+            if not isinstance(report, dict) or report.get("conversationId") != cid or report.get("turnId") != tid:
+                raise HTTPException(502, "Upstream Chat report identity is invalid")
+        return processing_summary(report, row["body"]["request_id"])
 
     async def cancel(self, tid, session_key=None):
         row = self.admission(tid, session_key)
@@ -1444,6 +1606,21 @@ def create_app(config=None):
         },
     }
     build_id = hashlib.sha256(json.dumps(build, sort_keys=True).encode()).hexdigest()
+    try:
+        runtime_environment = environment()
+    except KeyUnavailable:
+        runtime_environment = "unknown"
+    deployed_revision = os.getenv("APP_REVISION", "")
+    integration_info = {
+        "environment": runtime_environment,
+        "revision": deployed_revision if re.fullmatch(r"[0-9a-fA-F]{7,64}", deployed_revision) else build_id[:12],
+        "revisionSource": "deployment" if re.fullmatch(r"[0-9a-fA-F]{7,64}", deployed_revision) else "console-build",
+        "authentication": "Authorization: Bearer <service_token>",
+        "api": {
+            "chat": {"method": "PUT", **be_api_address(os.getenv("CONSOLE_BE_CHAT_BASE_URL"), "/v1/chat/conversations/{conversationId}")},
+            "profiler": {"method": "POST", **be_api_address(os.getenv("CONSOLE_BE_PROFILER_BASE_URL"), "/api/internal/v1/ai/profile/extract-and-pool")},
+        },
+    }
 
     async def observed(operation):
         exchanges = []
@@ -1559,18 +1736,31 @@ def create_app(config=None):
     async def credential_state(source, field, services):
         state = await asyncio.to_thread(source.status)
         async def applied(kind):
-            if not state["configured"] or state["revision"] is None:
-                return "unverified"
+            runtime = {"configured": None, "matchesSavedRevision": None,
+                       "usage": {"state": "unverified", "lastSuccessfulCallAt": None, "scope": "responding-process"}}
             target = "profiling" if kind == "profiler" else "chat"
             try:
                 status, data = await backend.request(target, "GET", "/internal/credentials")
                 observed = data.get(field, {})
-                if status == 200 and data.get("service") == kind and data.get("environment") == state["environment"]:
-                    return "observed" if observed.get("configured") is True and observed.get("revision") == state["revision"] else "pending"
+                if (status == 200 and data.get("service") == kind and data.get("environment") == state["environment"]
+                        and isinstance(observed, dict) and type(observed.get("configured")) is bool):
+                    runtime["configured"] = observed["configured"]
+                    usage = observed.get("usage")
+                    if isinstance(usage, dict) and usage.get("scope") == "responding-process":
+                        succeeded = observed["configured"] and usage.get("state") == "succeeded" and observed_timestamp(usage.get("lastSuccessfulCallAt"))
+                        if field == "provider" and succeeded:
+                            runtime["usage"] = {"state": "succeeded", "lastSuccessfulCallAt": succeeded, "scope": "responding-process"}
+                        elif usage.get("state") == ("not-observed" if field == "provider" else "not-collected"):
+                            runtime["usage"]["state"] = usage["state"]
+                    if state["configured"] and state["revision"] is not None:
+                        runtime["matchesSavedRevision"] = observed["configured"] and observed.get("revision") == state["revision"]
+                        return ("observed" if runtime["matchesSavedRevision"] else "pending"), runtime
             except (HTTPException, httpx.HTTPError, KeyError, TypeError, AttributeError, ValueError):
                 pass
-            return "unverified"
-        state["application"] = dict(zip(services, await asyncio.gather(*(applied(kind) for kind in services))))
+            return "unverified", runtime
+        observations = await asyncio.gather(*(applied(kind) for kind in services))
+        state["application"] = {kind: value[0] for kind, value in zip(services, observations)}
+        state["runtime"] = {kind: value[1] for kind, value in zip(services, observations)}
         return state
 
     def unavailable(exc, services):
@@ -1659,6 +1849,7 @@ def create_app(config=None):
             "defaultRecipientUserId": backend.config.get("defaultRecipientUserId", 42),
             "defaultSenderUserId": backend.config.get("defaultSenderUserId", 7),
             "chatRecipients": backend.config.get("chatRecipients", []),
+            "quickCheckConfigured": bool(backend.config.get("liveModel") and "backend" in backend.targets and "search" in backend.targets),
             "build": {"id": build_id, **build},
         }
 
@@ -1666,6 +1857,16 @@ def create_app(config=None):
     async def chat(body: ChatInput, request: Request):
         key, _ = admin.session(request)
         return await observed(lambda: backend.chat(body, key))
+
+    @app.post("/api/chat/quick-check")
+    async def quick_check(body: QuickCheckInput, request: Request):
+        key, _ = admin.session(request)
+        return await observed(lambda: backend.quick_check(body, key))
+
+    @app.get("/api/chat/{tid}/diagnostics")
+    async def chat_diagnostics(tid: uuid.UUID, request: Request):
+        key, _ = admin.session(request)
+        return await observed(lambda: backend.diagnostics(str(tid), key))
 
     @app.get("/api/chat/{tid}")
     async def state(tid: uuid.UUID, request: Request):
@@ -1698,7 +1899,9 @@ def create_app(config=None):
 
     @app.get("/api/snapshot")
     async def snapshot():
-        return await backend.snapshot()
+        result = await backend.snapshot()
+        result["integration"] = {**integration_info, "readiness": integration_readiness(result)}
+        return result
 
     @app.get("/api/products/{ident}/image")
     async def product_image(ident: int):

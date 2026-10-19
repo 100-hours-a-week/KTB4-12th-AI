@@ -7,10 +7,10 @@ import * as core from '../static/core.js';
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-function screen({acceptance = 502, stored = 'PROCESSING', config, post, storage=new Map(), scope='synthetic', read} = {}) {
+function screen({acceptance = 502, stored = 'PROCESSING', config, post, quickPost, storage=new Map(), scope='synthetic', read} = {}) {
   const elements = new Map(), requests = [], listeners = new Map();
   const element = id => {
-    if (!elements.has(id)) elements.set(id, {value:id === 'message' ? 'SYNTHETIC' : 'all',textContent:'',disabled:false,
+    if (!elements.has(id)) elements.set(id, {value:id === 'message' ? 'SYNTHETIC' : 'all',textContent:'',disabled:false,checked:false,
       children:[],classList:{add(){},remove(){},toggle(){},contains(){return false;}},
       append(){},replaceChildren(){},setAttribute(){},getAttribute(){return '';},addEventListener(){}});
     return elements.get(id);
@@ -27,6 +27,7 @@ function screen({acceptance = 502, stored = 'PROCESSING', config, post, storage=
       requests.push([options.method ?? 'GET',path,options.body?JSON.parse(options.body):null]);
       if (path === '/api/config') return config ? config() : Response.json({mode:'LOCAL_TARGET',profileSendAllowed:false,chatSendAllowed:true});
       if (path === '/api/chat') return post ? post() : Response.json({detail:'SYNTHETIC'}, {status:acceptance});
+      if (path === '/api/chat/quick-check') return quickPost ? quickPost(JSON.parse(options.body)) : Response.json({detail:'SYNTHETIC'}, {status:acceptance});
       if (path.includes('/events?')) return new Response(new ReadableStream({start(controller){stream=controller;streams.push(controller);}}));
       if (path.startsWith('/api/chat/') && read)return read(path,options);
       if (path.startsWith('/api/chat/')) return stored
@@ -37,7 +38,7 @@ function screen({acceptance = 502, stored = 'PROCESSING', config, post, storage=
   const source = fs.readFileSync(new URL('../static/app.js', import.meta.url), 'utf8')
     .replace(/^import .+?;$/gm,'').replace(/^const adminSession=await initializeAdmin\(\);$/m,'')
     .replace(/^const chatStorageKey=.+$/m,`const chatStorageKey=${JSON.stringify('console-chat/'+scope)};`)
-    + '\nevents=()=>{};eventDetail=()=>{};renderHTTP=()=>{};globalThis.probe={sendChat,state,newChat,chatContext,record,connect};';
+    + '\nevents=()=>{};eventDetail=()=>{};renderHTTP=()=>{};globalThis.probe={sendChat,state,newChat,chatContext,record,connect,refreshDiagnostics,renderChatResult,observeImage};';
   vm.runInContext(source,context,{filename:'console/static/app.js'});
   return {element,requests,storage,probe:context.probe,settingsChanged:()=>listeners.get('admin-settings-saved')(),
     finish(index=streams.length-1,status='COMPLETED'){
@@ -270,3 +271,131 @@ for(const code of ['CONSOLE_CONVERSATION_UNCONFIRMED','CONSOLE_CONVERSATION_NOT_
   ui.finish();await settle();
  });
 }
+
+const quickConfig=()=>Response.json({chatSendAllowed:true,quickCheckConfigured:true,paidCallsEnabled:true,
+  defaultSenderUserId:701,defaultRecipientUserId:801,chatRecipients:[{label:'Synthetic recipient',senderUserId:701,recipientUserId:801}]});
+
+test('quick check requires a fresh consent click, sends only fixed binding, and cannot double submit',async()=>{
+ let complete;
+ const ui=screen({config:quickConfig,quickPost:body=>new Promise(resolve=>{complete=()=>resolve(Response.json({httpStatus:202,plan:{...body,message:'Server synthetic question'},body:{data:{status:'PROCESSING'}}}));})});
+ await settle();assert.equal(ui.requests.some(([method])=>method==='POST'),false);
+ await ui.element('quick-check').onclick();assert.equal(ui.requests.some(([method])=>method==='POST'),false);
+ ui.element('message').value='SYNTHETIC_PRIVATE_DRAFT';ui.element('quick-check-consent').checked=true;ui.element('quick-check-consent').onchange();
+ const first=ui.element('quick-check').onclick();await ui.element('quick-check').onclick();await ui.probe.sendChat(false);
+ const posts=ui.requests.filter(([method])=>method==='POST');assert.equal(posts.length,1);
+ assert.equal(posts[0][1],'/api/chat/quick-check');assert.equal(posts[0][2].confirmCost,true);
+ assert.deepEqual(Object.keys(posts[0][2]).sort(),['confirmCost','conversation_id','recipientUserId','request_id','senderUserId','turn_id']);
+ assert.ok(!JSON.stringify(posts).includes('SYNTHETIC_PRIVATE_DRAFT'));
+ assert.equal(ui.element('message').value,'SYNTHETIC_PRIVATE_DRAFT');assert.equal(ui.element('quick-check-consent').checked,false);
+ assert.equal(ui.element('new-chat').disabled,true);assert.equal(ui.element('quick-check').disabled,true);
+ complete();await first;await settle();
+ assert.equal(ui.probe.state.plan.message,'Server synthetic question');assert.equal(ui.probe.state.plan.quickCheck,true);
+ assert.equal(ui.element('quick-check-note').textContent.includes('1건 성공'),false);
+ ui.finish();await settle();await settle();assert.match(ui.element('quick-check-note').textContent,/이 질문 1건 성공/);
+ assert.equal(ui.probe.state.images.loaded,0);assert.equal(ui.probe.state.images.failed,0);
+ assert.equal(ui.element('message').value,'SYNTHETIC_PRIVATE_DRAFT');
+});
+
+test('quick check readiness cannot be bypassed with consent and never labels a demo success',async()=>{
+ const ui=screen({config:()=>Response.json({chatSendAllowed:true,mode:'DEMO',quickCheckConfigured:false})});await settle();
+ ui.element('quick-check-consent').checked=true;ui.element('quick-check-consent').onchange();await ui.element('quick-check').onclick();
+ assert.equal(ui.element('quick-check').disabled,true);assert.equal(ui.requests.some(([method])=>method==='POST'),false);
+ assert.match(ui.element('quick-check-note').textContent,/합성 수신자와 기존 BE 권한/);
+});
+
+test('lost quick check admission and reload use GET only; explicit retry preserves the original IDs and requires consent again',async()=>{
+ const storage=new Map(),ui=screen({config:quickConfig,storage,stored:null});await settle();
+ ui.element('quick-check-consent').checked=true;await ui.element('quick-check').onclick();
+ const plan=JSON.parse(JSON.stringify(ui.probe.state.plan)),first=ui.requests.find(([method])=>method==='POST')[2];
+ assert.equal(ui.requests.filter(([method])=>method==='POST').length,1);
+ const loaded=screen({config:quickConfig,storage,stored:null});await settle();await settle();
+ assert.equal(JSON.stringify(loaded.probe.state.plan),JSON.stringify(plan));assert.equal(loaded.requests.some(([method])=>method==='POST'),false);
+ assert.equal(loaded.element('retry-chat').disabled,true);await loaded.probe.sendChat(true);assert.equal(loaded.requests.some(([method])=>method==='POST'),false);
+ loaded.element('quick-check-consent').checked=true;loaded.element('quick-check-consent').onchange();await loaded.probe.sendChat(true);
+ const retried=loaded.requests.filter(([method])=>method==='POST');assert.equal(retried.length,1);assert.equal(retried[0][1],'/api/chat/quick-check');assert.deepEqual(retried[0][2],first);
+ assert.equal(loaded.element('quick-check-consent').checked,false);
+});
+
+test('lost quick check ACK recovers through GET and SSE, clearing the live failure while retaining its event without another POST',async()=>{
+ const ui=screen({config:quickConfig,acceptance:502,stored:'PROCESSING'});await settle();
+ ui.element('quick-check-consent').checked=true;await ui.element('quick-check').onclick();await settle();
+ assert.equal(ui.probe.state.status,'PROCESSING');assert.equal(ui.probe.state.quickCheckFailure,null);
+ assert.ok(!ui.element('quick-check-note').textContent.includes('HTTP 502'));
+ assert.ok(!ui.element('chat-note').textContent.includes('HTTP 502'));
+ assert.match(ui.element('quick-check-note').textContent,/저장 상태와 응답/);
+ ui.finish();await settle();await settle();
+ assert.equal(ui.probe.state.status,'COMPLETED');assert.match(ui.element('quick-check-note').textContent,/이 질문 1건 성공/);
+ assert.equal(ui.requests.filter(([method])=>method==='POST').length,1);
+ assert.equal(ui.probe.state.log.items.filter(event=>event.event==='console.error'&&event.data.httpStatus===502).length,1);
+});
+
+test('explicit quick check retry clears an earlier failure on confirmed admission and keeps the frozen request',async()=>{
+ let posts=0;
+ const ui=screen({config:quickConfig,stored:null,quickPost:()=>++posts===1?Response.json({}, {status:502}):accepted()});await settle();
+ ui.element('quick-check-consent').checked=true;await ui.element('quick-check').onclick();
+ assert.match(ui.element('quick-check-note').textContent,/HTTP 502/);const first=ui.requests.find(([method])=>method==='POST')[2];
+ ui.element('quick-check-consent').checked=true;await ui.probe.sendChat(true);await settle();
+ assert.equal(ui.probe.state.status,'PROCESSING');assert.equal(ui.probe.state.quickCheckFailure,null);
+ assert.ok(!ui.element('quick-check-note').textContent.includes('HTTP 502'));
+ assert.ok(!ui.element('chat-note').textContent.includes('HTTP 502'));
+ const submitted=ui.requests.filter(([method])=>method==='POST');assert.equal(submitted.length,2);assert.deepEqual(submitted[1][2],first);
+ ui.finish();await settle();await settle();
+ assert.match(ui.element('quick-check-note').textContent,/이 질문 1건 성공/);
+ assert.equal(ui.probe.state.log.items.filter(event=>event.event==='console.error'&&event.data.httpStatus===502).length,1);
+});
+
+for(const status of ['COMPLETED','FAILED','CANCELLED'])test(`observed quick check terminal ${status} replaces the transport failure, keeping history`,async()=>{
+ const ui=screen({config:quickConfig,stored:null,acceptance:502});await settle();ui.element('quick-check-consent').checked=true;await ui.element('quick-check').onclick();
+ assert.match(ui.element('quick-check-note').textContent,/HTTP 502/);
+ ui.probe.record({id:1,event:'turn.finished',data:{status}});
+ assert.equal(ui.probe.state.quickCheckFailure,null);assert.ok(!ui.element('quick-check-note').textContent.includes('HTTP 502'));
+ assert.ok(!ui.element('chat-note').textContent.includes('HTTP 502'));
+ assert.equal(ui.probe.state.status,status);assert.equal(ui.probe.state.log.items.filter(event=>event.event==='console.error').length,1);
+ assert.equal(ui.requests.filter(([method])=>method==='POST').length,1);
+});
+
+for(const code of ['CONSOLE_CONVERSATION_UNCONFIRMED','CONSOLE_CONVERSATION_NOT_OWNED'])test(`quick check ${code} retries only through fresh consent and IDs, never sending the normal draft`,async()=>{
+ let posts=0;
+ const ui=screen({config:quickConfig,stored:null,quickPost:()=>++posts===1?Response.json({detail:code},{status:409}):accepted()});await settle();
+ ui.element('message').value='SYNTHETIC_PRIVATE_NORMAL_DRAFT';ui.element('quick-check-consent').checked=true;await ui.element('quick-check').onclick();
+ const first=ui.requests.find(([method])=>method==='POST')[2];
+ assert.equal(ui.element('send-chat').textContent,'요청 보내기 ↗');assert.equal(ui.element('message').value,'SYNTHETIC_PRIVATE_NORMAL_DRAFT');
+ assert.match(ui.element('chat-note').textContent,/비용에 다시 동의한 뒤 빠른 점검을 다시 실행/);
+ assert.match(ui.element('quick-check-note').textContent,/비용에 다시 동의한 뒤 빠른 점검을 다시 실행/);
+ assert.ok(!ui.element('chat-note').textContent.includes('새 대화로 다시 보내기'));
+ assert.equal(ui.element('quick-check-consent').checked,false);assert.equal(ui.element('retry-chat').disabled,true);assert.equal(ui.storage.size,0);
+ await ui.probe.sendChat(true);await ui.element('quick-check').onclick();assert.equal(posts,1);
+ ui.element('quick-check-consent').checked=true;await ui.element('quick-check').onclick();await settle();
+ const sent=ui.requests.filter(([method])=>method==='POST');assert.equal(sent.length,2);assert.ok(sent.every(([,path])=>path==='/api/chat/quick-check'));
+ for(const key of ['request_id','conversation_id','turn_id'])assert.notEqual(sent[1][2][key],first[key]);
+ assert.ok(!JSON.stringify(sent).includes('SYNTHETIC_PRIVATE_NORMAL_DRAFT'));assert.equal(ui.element('message').value,'SYNTHETIC_PRIVATE_NORMAL_DRAFT');
+ ui.finish();await settle();
+});
+
+test('normal chat after quick check starts another conversation and preserves the normal draft',async()=>{
+ const ui=screen({config:quickConfig,quickPost:()=>accepted(),post:accepted,stored:'COMPLETED'});await settle();
+ ui.element('message').value='A normal follow-up draft';ui.element('quick-check-consent').checked=true;await ui.element('quick-check').onclick();await settle();
+ const quick={...ui.probe.state.plan};ui.finish();await settle();await settle();await ui.probe.sendChat(false);
+ assert.notEqual(ui.probe.state.plan.conversation_id,quick.conversation_id);assert.equal(ui.probe.state.plan.quickCheck,undefined);
+ assert.equal(ui.probe.state.plan.message,'A normal follow-up draft');assert.equal(ui.requests.filter(([method])=>method==='POST').at(-1)[1],'/api/chat');
+});
+
+test('late diagnostics for an old recipient cannot populate the new conversation',async()=>{
+ let complete;
+ const ui=screen({post:accepted,read:path=>path.endsWith('/diagnostics')?new Promise(resolve=>{complete=resolve;}):Response.json({data:{status:'PROCESSING'}})});
+ await settle();await ui.probe.sendChat(false);await settle();
+ const collecting=ui.probe.refreshDiagnostics();ui.probe.newChat();
+ complete(Response.json({model:{name:'synthetic/old-model',status:'completed'},final:{status:'COMPLETED',requestId:'11111111-1111-4111-8111-111111111111'}}));await collecting;
+ assert.equal(ui.probe.state.diagnostics,null);assert.equal(ui.element('processing-status').textContent,'미수집');
+});
+
+test('image diagnostics count browser image events only for the currently displayed cards',async()=>{
+ const ui=screen();await settle();
+ const image={tagName:'IMG',closest:()=>({getAttribute:()=> '101'})};
+ ui.element('chat-products').contains=target=>target===image;
+ ui.probe.observeImage({target:{tagName:'IMG'},type:'load'});assert.equal(ui.probe.state.images,undefined);
+ ui.probe.observeImage({target:image,type:'load'});assert.equal(ui.probe.state.images.loaded,1);
+ ui.probe.observeImage({target:image,type:'load'});assert.equal(ui.probe.state.images.loaded,1);
+ ui.probe.observeImage({target:image,type:'error'});assert.equal(ui.probe.state.images.loaded,0);assert.equal(ui.probe.state.images.failed,1);
+ ui.probe.newChat();assert.equal(ui.probe.state.images.loaded,0);assert.equal(ui.probe.state.images.failed,0);
+});

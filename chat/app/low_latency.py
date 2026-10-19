@@ -42,7 +42,7 @@ class ProviderAdapter:
    # Claude can stream a narration block before a valid tool_use block.
    # Keep that narration out of durable answers, then consume usage to settle cost.
    hold_text=body['model']=='anthropic/claude-haiku-5.5' and bool(tools)
-   buffered=[];text_size=0;has_tool=False;text_released=False
+   buffered=[];text_size=0;has_tool=False;text_released=False;finish=None;has_text=False
    async for packet in sse_json(response):
     if not isinstance(packet,dict) or packet.get('error'):raise ProviderError('provider_packet_error')
     metadata={k:packet[k] for k in ('model','provider') if isinstance(packet.get(k),str)}
@@ -53,6 +53,7 @@ class ProviderAdapter:
      delta=choice.get('delta',{})
      if text_released and (delta.get('content') or delta.get('tool_calls')):raise ProviderError('provider_content_after_finish')
      if delta.get('content'):
+      has_text=True
       if hold_text:
        value=delta['content']
        if not isinstance(value,str):raise ProviderError('invalid_answer')
@@ -63,7 +64,9 @@ class ProviderAdapter:
      for call in delta.get('tool_calls',[]):
       has_tool=True
       yield {'kind':'tool','value':call}
-     if choice.get('finish_reason') is not None:yield {'kind':'finish','value':choice['finish_reason']}
+     if choice.get('finish_reason') is not None:
+      finish=choice['finish_reason']
+      yield {'kind':'finish','value':finish}
     if hold_text and not has_tool and not text_released and any(c.get('finish_reason')=='stop' for c in packet.get('choices',[])):
      # stop determines an ordinary answer; accounting/[DONE] can arrive later.
      text_released=True
@@ -71,6 +74,8 @@ class ProviderAdapter:
      buffered=[]
    if hold_text and not has_tool and not text_released:
     for value in buffered:yield {'kind':'text','value':value}
+   if (finish=='stop' and has_text or finish=='tool_calls' and has_tool) and hasattr(self.runtime,'provider_succeeded'):
+    await self.runtime.provider_succeeded(response)
  async def close(self):pass
 
 class LowLatencyRuntime(AgentRuntime):

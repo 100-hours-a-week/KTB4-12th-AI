@@ -1,8 +1,46 @@
 """Owner-visible report from allowlisted facts. No private profile or raw prompts."""
 import math
+import re
+from datetime import datetime
 from app.public_answer import public_products
 
 def number(value):return value if type(value) in (int,float) and math.isfinite(value) and value>=0 else None
+
+def version(value):return value if type(value) is int and 0<=value<=2**53-1 else None
+
+def timestamp(value):
+    if not isinstance(value,str) or len(value)>40:return None
+    try:
+        parsed=datetime.fromisoformat(value.replace('Z','+00:00'))
+        return parsed.isoformat() if parsed.tzinfo is not None else None
+    except ValueError:return None
+
+def identifier(value):
+    return value if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}',value) else None
+
+def processing_summary(context):
+    """Project stored facts only; never interpret prompts, filters, or reasoning."""
+    snapshot=context.get('recipientProfile')
+    snapshot=snapshot if isinstance(snapshot,dict) else {}
+    data=snapshot.get('data')
+    data=data if isinstance(data,dict) else {}
+    candidates=context.get('observedProducts',context.get('candidates'))
+    diagnostics=context.get('diagnostics')
+    calls=diagnostics.get('modelCalls',[]) if isinstance(diagnostics,dict) else []
+    last=calls[-1] if isinstance(calls,list) and calls and isinstance(calls[-1],dict) else {}
+    status=last.get('status')
+    return {
+        'profile':{'status':snapshot.get('status') if snapshot.get('status') in
+                   ('AVAILABLE','NONE','UNAVAILABLE','NOT_PROVIDED','TEAM_SESSION','COMPLETED','PENDING','PROCESSING','FAILED') else None,
+                   'sourceVersion':version(snapshot.get('inputSourceVersion',data.get('sourceVersion'))),
+                   'receivedAt':timestamp(snapshot.get('receivedAt')),
+                   'analysisSourceVersion':version(snapshot.get('analysisSourceVersion'))},
+        'retrieval':{'candidateCount':len(candidates) if isinstance(candidates,list) else None,
+                     # Existing receipts do not record per-reason exclusion counts.
+                     # Private filters alone do not prove a candidate was excluded.
+                     'exclusionReasons':[], 'catalogSnapshotId':identifier(context.get('snapshotId'))},
+        'model':{'name':identifier(context.get('model')),
+                 'status':status if status in ('running','completed','cancelled','failed') else None}}
 
 def report(cid,turn,context):
     usage=[{k:number(u.get(k)) for k in ('prompt_tokens','completion_tokens','cost')} for u in context.get('usage',[]) if isinstance(u,dict)]
@@ -16,6 +54,7 @@ def report(cid,turn,context):
             'message':turn['message'],'blocks':turn['blocks'],'lastEventId':turn['lastEventId'],
             'products':public_products(context.get('selectedProducts',[])),
             'catalogSnapshotId':context.get('snapshotId'),
+            'processing':processing_summary(context),
             'metrics':{'elapsedMs':number(context.get('elapsedMs')),
                        'firstProviderAnswerMs':number(context.get('firstAnswerMs')),
                        'firstCommittedAnswerMs':number(streaming.get('firstCommittedDeltaMs')),

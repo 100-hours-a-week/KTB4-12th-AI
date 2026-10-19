@@ -9,13 +9,16 @@ leave readers on its old inode. External files are read-only to this module.
 import contextvars
 import copy
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import secrets
 import stat
+import threading
 import uuid
 
 
@@ -111,6 +114,10 @@ class ProviderKey:
         self.layout = layout
         self.mode = "aws" if aws_secret_id else "managed" if self.directory else "external" if external_file or value else "disabled"
         self.scope = (self.environment, self.purpose, self.layout, str(self.directory or external_file or aws_secret_id or self.mode))
+        # Runtime evidence is local to this object/process. Readers never write
+        # to the managed credential volume, which remains mounted read-only.
+        self._success_lock = threading.Lock()
+        self._last_success = None
 
     @property
     def purpose(self):
@@ -226,11 +233,12 @@ class ProviderKey:
             raise KeyUnavailable("PROVIDER_KEY_INVALID")
         return value
 
-    def status(self):
+    def _status(self):
         result = {"mode": self.mode, "configured": False, "revision": None, "state": "missing",
                   "verified": False, "writable": self.mode == "managed" and self.layout != "legacy-shared",
                   "environment": self.environment, "appliesTo": ["chat", "profiler"] if self.layout == "legacy-shared" else [self.kind], "migrationRequired": False,
                   "layout": self.layout}
+        snapshot = None
         try:
             if self.directory or self.aws_secret_id:
                 value, revision = self._stored()
@@ -239,11 +247,48 @@ class ProviderKey:
                 value, revision = snapshot.value, snapshot.revision
             result.update(configured=value is not None, revision=revision, state="configured" if value is not None else "missing",
                           source="dashboard" if self.mode == "managed" and revision is not None else "deployment")
+            if value is not None:
+                snapshot = KeySnapshot(value, revision, self.scope)
         except KeyUnavailable as exc:
             migration = exc.code.endswith("MIGRATION_REQUIRED")
             result.update(state="migration_required" if migration else "missing" if exc.code == "PROVIDER_KEY_MISSING" else "unavailable", migrationRequired=migration)
             if self.mode == "aws":
                 result["writable"] = False  # No blind overwrite after an unreadable current version.
+        return result, snapshot
+
+    def status(self):
+        return self._status()[0]
+
+    @staticmethod
+    def identity(snapshot):
+        """Private comparison only; never expose the key or its digest in status."""
+        return snapshot.scope, snapshot.revision, hashlib.sha256(snapshot.value.encode()).digest()
+
+    def record_success(self, identity):
+        """Record a completed model response for the exact credential sent.
+
+        A late response for a replaced key must not hide success for the new key.
+        A missing/unreadable current source grants no verification evidence.
+        """
+        if identity is None:
+            return
+        with self._success_lock:
+            try:
+                if identity != self.identity(self.snapshot()):
+                    return
+            except KeyUnavailable:
+                return
+            self._last_success = identity, datetime.now(timezone.utc).isoformat()
+
+    def runtime_status(self):
+        """The responding process's current key and successful-call evidence."""
+        result, snapshot = self._status()
+        with self._success_lock:
+            success = self._last_success
+        current = snapshot is not None and success is not None and success[0] == self.identity(snapshot)
+        result["usage"] = {"state": "succeeded" if current else "not-observed",
+                           "lastSuccessfulCallAt": success[1] if current else None,
+                           "scope": "responding-process"}
         return result
 
     def save(self, value, expected_revision, *, confirm_migration=False):
@@ -347,4 +392,6 @@ class ProviderAuth:
         if snapshot is None or snapshot.scope != self.source.scope:
             snapshot = self.source.snapshot()
         request.headers["Authorization"] = "Bearer " + snapshot.value
+        # HTTPX extensions stay in-process and are not sent as HTTP headers.
+        request.extensions["provider_key_identity"] = self.source.identity(snapshot)
         return request

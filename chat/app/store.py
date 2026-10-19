@@ -163,7 +163,7 @@ class Store:
    if old is None:return None
    if str(old['conversation'])!=cid or old['state']['message']!=message or old['requested_model']!=model or old['recipient_context']!=recipient_context or old['prepared_context']!=prepared_context:raise APIError(409,'같은 질문 ID에는 같은 질문, 모델, 수신자 정보를 사용해야 합니다.')
    return old['state']
- def start(self,cid,tid,message,owner,model=None,recipient_context=None,prepared_context=None):
+ def start(self,cid,tid,message,owner,model=None,recipient_context=None,prepared_context=None,quick_check=False):
   with self.pool.connection() as db:
    self._guard(db,owner);binding=self._conversation(db,cid,True)
    if prepared_context is not None:
@@ -178,6 +178,15 @@ class Store:
    if old:
     if str(old['conversation'])!=cid or old['state']['message']!=message or old['requested_model']!=model or old['recipient_context']!=recipient_context or old['prepared_context']!=prepared_context:raise APIError(409,'같은 질문 ID에는 같은 질문, 모델, 수신자 정보를 사용해야 합니다.')
     return [old['state'],False]
+   if quick_check:
+    # Check existing current-version consent inside the admission transaction.
+    # Project a boolean in SQL: recipient prose never leaves PostgreSQL here.
+    # The synthetic NONE context below is independent of the granted version.
+    if recipient_context!={'recipientUserId':binding['recipient'],'status':'NONE','sourceVersion':0,'giftPreference':None,'dislikedCategories':[]} or prepared_context is not None:
+     raise APIError(400,'QUICK_CHECK_SYNTHETIC_CONTEXT_REQUIRED')
+    if db.execute('SELECT 1 FROM turns WHERE conversation=%s LIMIT 1',(cid,)).fetchone():
+     raise APIError(409,'QUICK_CHECK_NEW_CONVERSATION_REQUIRED')
+    if not self.profile_lookup:raise APIError(409,'QUICK_CHECK_GRANT_REQUIRED')
    if db.execute("SELECT 1 FROM turns WHERE conversation=%s AND state->>'status'='PROCESSING'",(cid,)).fetchone():raise APIError(409,'이전 답변이 끝난 뒤 질문해 주세요.')
    # Serialize global admission across distinct conversations.
    db.execute('SELECT pg_advisory_xact_lock(908428)')
@@ -185,6 +194,15 @@ class Store:
    if db.execute("SELECT count(*) AS n FROM turns WHERE created>now()-interval '24 hours'").fetchone()['n']>=int(os.getenv('CHAT_DAILY_LIMIT','200')):raise APIError(429,'체험 서버의 일일 사용량을 모두 사용했습니다.')
    if n>=int(os.getenv('CHAT_MAX_ACTIVE','4')):raise APIError(429,'현재 요청이 많습니다. 잠시 후 다시 시도해 주세요.')
    if db.execute('SELECT paused FROM admission_control WHERE id=1 FOR SHARE').fetchone()['paused']:raise APIError(503,'배포를 위해 새 질문 접수를 잠시 중지했습니다. 같은 ID로 다시 시도해 주세요.')
+   if quick_check:
+    # Evaluate after potentially blocking admission locks, immediately before
+    # insertion; the existing function uses statement time for grant expiry.
+    allowed=db.execute("""SELECT COALESCE(
+      snapshot->>'source'='AI_PROFILE_STORE'
+      AND jsonb_typeof(snapshot->'inputSourceVersion')='number'
+      AND (snapshot->>'accessStatus') IS DISTINCT FROM 'NOT_AUTHORIZED', false) AS authorized
+      FROM (SELECT ai_profile.chat_recipient_snapshot(%s) AS snapshot) AS bound""",(cid,)).fetchone()
+    if not allowed or allowed['authorized'] is not True:raise APIError(409,'QUICK_CHECK_GRANT_REQUIRED')
    state={'turnId':tid,'status':'PROCESSING','message':message,'blocks':[],'lastEventId':0}
    context={'tracePersistence':{'version':1,'status':'pending'}}
    if self.profile_lookup and recipient_context is None:

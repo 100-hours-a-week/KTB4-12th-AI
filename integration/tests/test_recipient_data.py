@@ -306,6 +306,110 @@ def test_turn_snapshot_is_frozen_across_replay_context_updates_and_reopen(databa
         store.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('explicit_none', [False, True])
+async def test_ordinary_chat_without_grant_admits_without_private_profile(database, explicit_none):
+    """General chat remains usable; a stored private profile is never authority."""
+    from app.low_latency import LowLatencyRuntime
+    from app.model_config import ModelCatalog
+    from app.task_budget import BudgetHTTP
+    store = chat_store(database)
+    cid, tid, owner = str(uuid4()), str(uuid4()), str(uuid4())
+    canary, account = 'SYNTHETIC_UNAUTHORIZED_PROFILE_CANARY', 'synthetic-public-chat-only'
+    sent = []
+
+    class Adapter:
+        async def call(self, method, **args):
+            return getattr(store, method)(**args)
+
+    class Search:
+        async def metadata(self):
+            return {'snapshotId': 'synthetic-public-chat', 'categories': []}
+
+        async def search(self, *args, **kwargs):
+            raise AssertionError('A scripted greeting must not use private retrieval')
+
+    def reply(request):
+        assert request.url.host == 'synthetic.invalid'
+        sent.append(json.loads(request.content))
+        packet = {'choices': [{'delta': {'content': '안녕하세요.'}, 'finish_reason': 'stop'}],
+                  'usage': {'prompt_tokens': 10, 'completion_tokens': 10, 'cost': 0}}
+        return httpx.Response(200, text='data: ' + json.dumps(packet) + '\n\ndata: [DONE]\n\n')
+
+    try:
+        record(database, 8799, 8, payload(canary))
+        store.conversation(cid, 9799, 8799)
+        assert store.lease(owner)
+        store.budget_import(account, 0, '0' * 64)
+        empty = {'recipientUserId': 8799, 'status': 'NONE', 'sourceVersion': 0,
+                 'giftPreference': None, 'dislikedCategories': []}
+        state, made = store.start(cid, tid, '안녕', owner,
+                                  recipient_context=empty if explicit_none else None)
+        assert made and state['status'] == 'PROCESSING'
+        saved = store.context(cid, tid)
+        assert canary not in json.dumps(saved)
+        if explicit_none:
+            assert 'recipientProfile' not in saved
+        else:
+            assert saved['recipientProfile']['accessStatus'] == 'NOT_AUTHORIZED'
+            assert not saved['recipientProfile'].get('data')
+        async with httpx.AsyncClient(base_url='https://synthetic.invalid', transport=httpx.MockTransport(reply)) as http:
+            runtime = LowLatencyRuntime.__new__(LowLatencyRuntime)
+            adapter = Adapter()
+            runtime.init_state(adapter, Search(), owner)
+            runtime.model = 'openai/gpt-6-luna'
+            runtime.catalog = ModelCatalog(http)
+            runtime.http = BudgetHTTP(http, adapter, account, expected_limit=5)
+            receipt = {'startedMonotonic': time.monotonic(), 'usage': []}
+            await runtime.generate(cid, tid, receipt)
+        assert len(sent) == 1 and canary not in json.dumps(sent)
+        assert canary not in json.dumps(receipt)
+        assert receipt['recipientProfile']['status'] == ('NONE' if explicit_none else 'UNAVAILABLE')
+        store.emit(cid, tid, 'turn.finished', {'status': 'COMPLETED'}, owner)
+        assert store.read(cid)['turns'][0]['status'] == 'COMPLETED'
+    finally:
+        store.close()
+
+
+def test_quick_check_uses_current_grant_without_reading_profile_prose(database):
+    """Real SQL/roles on the scenario runner's newly created synthetic cluster."""
+    from app.errors import APIError
+    store = chat_store(database)
+    owner = str(uuid4())
+    try:
+        assert store.lease(owner)
+        for index, condition in enumerate(('missing', 'expired', 'revoked', 'wrong_sender', 'wrong_version', 'valid')):
+            rid, cid, tid = 8800 + index, str(uuid4()), str(uuid4())
+            record(database, rid, 8, payload('SYNTHETIC_PRIVATE_QUICK_CHECK_CANARY'))
+            store.conversation(cid, 9700 + index, rid)
+            grant_id = None
+            if condition != 'missing':
+                options = {'expired': True} if condition == 'expired' else {'revoked': True} if condition == 'revoked' else {'caller': 99999} if condition == 'wrong_sender' else {}
+                grant_id = grant(database, cid, 7 if condition == 'wrong_version' else 8, **options)
+            empty = {'recipientUserId': rid, 'status': 'NONE', 'sourceVersion': 0,
+                     'giftPreference': None, 'dislikedCategories': []}
+            args = dict(cid=cid, tid=tid, message='합성 점검', owner=owner,
+                        recipient_context=empty, quick_check=True)
+            if condition != 'valid':
+                with pytest.raises(APIError) as error:
+                    store.start(**args)
+                assert error.value.status == 409 and error.value.message == 'QUICK_CHECK_GRANT_REQUIRED'
+                with psycopg.connect(database['owner']) as db:
+                    assert db.execute('SELECT count(*) FROM ai_chat.turns WHERE id=%s', (tid,)).fetchone()[0] == 0
+                continue
+            state, made = store.start(**args)
+            assert made and state['status'] == 'PROCESSING'
+            assert store.recipient_context(cid, tid) == empty
+            assert 'recipientProfile' not in store.context(cid, tid)
+            assert 'SYNTHETIC_PRIVATE_QUICK_CHECK_CANARY' not in json.dumps(store.context(cid, tid))
+            with psycopg.connect(database['owner']) as db:
+                db.execute('UPDATE ai_profile.read_grants SET revoked_at=now() WHERE id=%s', (grant_id,))
+            assert store.start(**args)[1] is False  # Existing acceptance is read-only.
+            store.emit(cid, tid, 'turn.finished', {'status': 'CANCELLED'}, owner)
+    finally:
+        store.close()
+
+
 def test_missing_cleared_and_test_fixture_contexts_do_not_fetch_another_profile(database):
     store = chat_store(database)
     try:

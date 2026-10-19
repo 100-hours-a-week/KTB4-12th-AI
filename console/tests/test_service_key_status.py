@@ -8,6 +8,7 @@ import pytest
 
 from console.server import create_app
 from console.tests.auth_support import fixture
+from console.tests.auth_support import configured_app, login
 from integration.provider_key import ProviderKey
 from integration.service_token import ServiceToken
 
@@ -121,4 +122,55 @@ def test_deployment_defaults_do_not_turn_ui_demo_into_unconfigured_service_clien
             assert app.state.backend.config == {}
             await app.state.backend.http.aclose()
             await app.state.provider_usage.close()
+    asyncio.run(case())
+
+
+@pytest.mark.parametrize("source_kind,fault,application,match,usage", [
+    ("managed", None, "observed", True, "succeeded"),
+    ("managed", "stale", "pending", False, "succeeded"),
+    ("managed", "unconfigured", "pending", False, "unverified"),
+    ("managed", "offline", "unverified", None, "unverified"),
+    ("managed", "other-environment", "unverified", None, "unverified"),
+    ("managed", "other-service", "unverified", None, "unverified"),
+    ("managed", "invalid-time", "observed", True, "unverified"),
+    ("managed", "old-runtime", "observed", True, "unverified"),
+    ("deployment", None, "unverified", None, "succeeded"),
+])
+def test_runtime_success_is_process_scoped_and_saved_identity_is_independent(
+        tmp_path, monkeypatch, source_kind, fault, application, match, usage):
+    monkeypatch.setenv("AI_ENVIRONMENT", "develop")
+    monkeypatch.setenv("OPENROUTER_MANAGED_KEY_DIR", str(tmp_path))
+    synthetic = "sk-or-v1-" + "synthetic_observation_" * 4
+    if source_kind == "deployment": monkeypatch.setenv("PROFILING_OPENROUTER_API_KEY", synthetic)
+    source = ProviderKey.from_environment("profiler")
+    if source_kind == "managed": source.save(synthetic, None)
+    async def case():
+        app = configured_app({"targets": {"profiling": "http://127.0.0.1:1"}})
+        def runtime(request):
+            assert request.method == "GET" and request.url.path == "/internal/credentials"
+            if fault == "offline": raise httpx.ConnectError("SYNTHETIC_PRIVATE_ERROR")
+            state = source.status() | {"privateDigest": "SYNTHETIC_PRIVATE_DIGEST", "usage": {
+                "state": "succeeded", "lastSuccessfulCallAt": "2026-10-19T12:00:00Z", "scope": "responding-process"}}
+            if fault == "stale": state["revision"] = "older"
+            if fault == "unconfigured": state["configured"] = False
+            if fault == "old-runtime": state.pop("usage")
+            if fault == "invalid-time": state["usage"]["lastSuccessfulCallAt"] = "SYNTHETIC_PRIVATE_TIME"
+            return httpx.Response(200, json={"service": "chat" if fault == "other-service" else "profiler",
+                "environment": "production" if fault == "other-environment" else "develop", "provider": state})
+        await app.state.backend.http.aclose()
+        app.state.backend.http = httpx.AsyncClient(transport=httpx.MockTransport(runtime))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://127.0.0.1:9000",
+            headers={"Origin": "http://127.0.0.1:9000"}) as client:
+            await login(client)
+            response = await client.get("/api/admin/provider-key/profiler")
+            assert response.status_code == 200
+            state = response.json()
+            assert state["application"] == {"profiler": application}
+            observed = state["runtime"]["profiler"]
+            assert observed["matchesSavedRevision"] is match
+            assert observed["usage"] == {"state": usage, "scope": "responding-process",
+                "lastSuccessfulCallAt": "2026-10-19T12:00:00+00:00" if usage == "succeeded" else None}
+            assert synthetic not in response.text and "SYNTHETIC_PRIVATE" not in response.text
+        await app.state.backend.http.aclose()
+        await app.state.provider_usage.close()
     asyncio.run(case())

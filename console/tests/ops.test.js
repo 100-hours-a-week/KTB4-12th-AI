@@ -14,3 +14,35 @@ test('render between ticks freezes the latest visible tenth on outage',()=>{cons
 import {requestErrorMessage,parseProfileJSON} from '../static/core.js';
 test('validation errors identify safe fields without echoing private input',()=>{const error={detail:[{loc:['body','reviews',0,'rating'],msg:'PRIVATE_MSG',input:'PRIVATE_INPUT'},{loc:['body','PRIVATE_FIELD'],msg:'PRIVATE_DETAIL'}]};const message=requestErrorMessage(422,error);assert.match(message,/리뷰/);assert.match(message,/별점/);assert.ok(!message.includes('PRIVATE'));assert.match(requestErrorMessage(429,{}),/요청 한도/);assert.throws(()=>parseProfileJSON('PRIVATE_JSON','리뷰'),/리뷰는 JSON 배열/);assert.throws(()=>parseProfileJSON('{}','리뷰'),/JSON 배열/);assert.deepEqual(parseProfileJSON('[]','리뷰'),[]);});
 test('configured provider limits remain unverified until runtime policy matches',()=>{for(const verified of [undefined,false])assert.deepEqual(budgetView({budgetMode:'provider-key-limits',budgetPolicyVerified:verified}),{known:false,policyUnverified:true});});
+
+
+import {connectionView,copyIntegrationAddress,safeIntegrationAddress,renderIntegration} from '../static/ops.js';
+test('connection information distinguishes settings, observations, and unknown BE connectivity',()=>{
+ const view=connectionView({environment:'develop',revision:'abcdef123456',revisionSource:'console-build',readiness:{database:'ready',products:'empty'}},{chat:true,profiler:false,backend:null});
+ assert.equal(view.environment,'개발');assert.match(view.revision,/Console build/);
+ assert.match(view.keys,/Chat 설정됨/);assert.match(view.keys,/Profiler 미설정/);assert.match(view.token,/미수집/);
+ assert.equal(view.database,'DB 준비됨');assert.equal(view.products,'상품 데이터 상품 없음');
+ assert.equal(connectionView(null).environment,'환경 미확인');
+ assert.equal(connectionView({readiness:{database:'ready'}},{},true).database,'DB 이전 관측');
+});
+test('copy never accepts credentials, queries, or missing addresses and reports clipboard failure',async()=>{
+ const writes=[],clipboard={writeText:async value=>writes.push(value)};
+ for(const value of [null,'','javascript:alert(1)','https://user:PRIVATE@example.invalid','https://example.invalid?token=PRIVATE','https://example.invalid#PRIVATE','https://example.invalid/%50RIVATE']){
+  assert.equal(safeIntegrationAddress(value),false);assert.equal(await copyIntegrationAddress(value,clipboard),false);
+ }
+ const address='https://ai.example.invalid/v1/chat/conversations/{conversationId}';
+ assert.equal(await copyIntegrationAddress(address,clipboard),true);assert.deepEqual(writes,[address]);
+ assert.equal(await copyIntegrationAddress(address,{writeText:async()=>{throw Error('PRIVATE');}}),false);
+});
+test('connection panel hides invalid URLs and enables only validated copy actions',async t=>{
+ const elements=new Map();
+ const node=tag=>({tag,textContent:'',children:[],isConnected:true,append(...items){this.children.push(...items)},replaceChildren(){this.children=[]},setAttribute(name,value){this[name]=value}});
+ const element=id=>{if(!elements.has(id))elements.set(id,node('div'));return elements.get(id)};
+ const old=globalThis.document;t.after(()=>{if(old===undefined)delete globalThis.document;else globalThis.document=old});
+ globalThis.document={getElementById:element,createElement:node};
+ renderIntegration({environment:'production',api:{chat:{state:'configured',url:'https://ai.example.invalid/route',method:'PUT'},profiler:{state:'configured',url:'https://user:PRIVATE@example.invalid?token=PRIVATE',method:'POST'}}});
+ const rows=element('integration-api').children;
+ assert.equal(rows[0].children[1].disabled,false);assert.equal(rows[1].children[1].disabled,true);
+ assert.ok(!JSON.stringify(rows).includes('PRIVATE'));assert.equal(element('integration-environment').textContent,'운영');
+ renderIntegration(undefined);assert.ok(element('integration-api').children.every(row=>row.children[1].disabled));
+});

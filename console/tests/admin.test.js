@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {initializeAdmin,scheduleSessionExpiry} from '../static/admin.js';
+import {initializeAdmin,scheduleSessionExpiry,credentialObservationRows,credentialReadiness} from '../static/admin.js';
 
 test('30 day expiry avoids browser timer overflow and never slides', () => {
   let now = 1000, expired = 0;
@@ -25,7 +25,7 @@ test('logout removes saved conversations without clearing unrelated tab storage'
  assert.deepEqual([...storage],[['unrelated','keep']]);
 });
 
-function adminPage(t, {logout, refresh, save} = {}) {
+function adminPage(t, {logout, refresh, save, credential} = {}) {
   const elements = new Map(), requests = [], redirects = [], events = [];
   let sessionReads = 0, logoutCalls = 0;
   function element(id) {
@@ -54,6 +54,7 @@ function adminPage(t, {logout, refresh, save} = {}) {
     if (path === '/api/admin/logout') return logout ? logout(++logoutCalls, options, json) : json({authenticated:false});
     if (['/api/admin/provider-key/chat','/api/admin/provider-key/profiler','/api/admin/backend-token'].includes(path)) {
       if (options.method === 'PUT' && save) return save(path,options,json);
+      if (credential) return credential(path,options,json);
       return json({mode:'managed',configured:false,revision:null,state:'missing',verified:false,writable:true});
     }
     throw new Error('Unexpected test route');
@@ -153,4 +154,43 @@ test('lost provider save response still brackets usage invalidation without clai
   page.element('provider-key').value='synthetic-setting-value';
   await page.element('provider-form').onsubmit({preventDefault(){}});
   assert.deepEqual(page.events,['provider-key-changing','provider-key-change-finished']);
+});
+
+const successfulSetting=()=>({configured:true,source:'dashboard',revision:'synthetic-revision-current',application:{chat:'observed'},runtime:{chat:{configured:true,matchesSavedRevision:true,usage:{state:'succeeded',lastSuccessfulCallAt:'2026-10-19T12:34:56+00:00',scope:'responding-process'}}}});
+
+test('credential observations separate source, storage, application and one-process current-revision success',()=>{
+ const rows=credentialObservationRows(successfulSetting());
+ assert.deepEqual(rows.map(row=>row[0]),['설정 출처','저장 상태','런타임 적용','모델 응답 관측']);
+ assert.match(rows[0][1],/대시보드/);assert.match(rows[2][1],/읽기 확인/);
+ assert.match(rows[3][1],/현재 저장본으로 모델 응답 완료/);assert.match(rows[3][1],/2026-10-19T12:34:56/);assert.match(rows[3][1],/실행기 1곳/);
+});
+
+test('old keys, deployment identity, missing usage and non-process scopes never claim a current key success',()=>{
+ for(const fault of ['revision','missing','scope','bad-time']){
+  const value=successfulSetting(),runtime=value.runtime.chat;
+  if(fault==='revision')runtime.matchesSavedRevision=false;
+  if(fault==='missing')runtime.usage.state='not-observed';
+  if(fault==='scope')runtime.usage.scope='all-processes';
+  if(fault==='bad-time')runtime.usage.lastSuccessfulCallAt='PRIVATE_TIMESTAMP';
+  const detail=credentialObservationRows(value).at(-1)[1];
+  assert.ok(!detail.includes('2026-10-19T12:34:56'));assert.ok(!detail.includes('PRIVATE_TIMESTAMP'));assert.match(detail,/미수집/);
+ }
+ const backend=credentialObservationRows({...successfulSetting(),runtime:{chat:successfulSetting().runtime.chat,profiler:successfulSetting().runtime.chat}},'backend').at(-1)[1];
+ assert.match(backend,/BE 호출 성공은 미수집/);assert.ok(!backend.includes('2026-10-19T12:34:56'));
+});
+
+test('credential observation refresh uses only GET and preserves the integration readiness getter',async t=>{
+ const page=adminPage(t,{credential:(_path,_options,json)=>json({...successfulSetting(),writable:true})});
+ await initializeAdmin();assert.deepEqual(credentialReadiness(),{chat:true,profiler:true,backend:true});
+ const before=page.requests.length;await page.element('provider-refresh').onclick();
+ assert.equal(page.requests.length,before+1);assert.equal(page.requests.at(-1).path,'/api/admin/provider-key/chat');assert.equal(page.requests.at(-1).method,undefined);
+ assert.equal(page.requests.some(request=>request.method==='PUT'),false);
+});
+
+
+test('deployment success belongs only to the responding runtime and never proves Console setting identity',()=>{
+ const value=successfulSetting();value.source='deployment';value.revision=null;value.application.chat='unverified';value.runtime.chat.matchesSavedRevision=null;
+ const rows=credentialObservationRows(value),detail=rows.at(-1)[1];
+ assert.match(detail,/응답한 실행기에서 모델 응답 완료/);assert.match(detail,/2026-10-19T12:34:56/);assert.match(detail,/Console 설정과 동일성 미확인/);assert.ok(!detail.includes('현재 저장본으로'));
+ assert.match(rows[2][1],/동일 설정 적용 미확인/);
 });

@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {SSEParser,EventLog,redact,terminal,eventPreview,elapsedSince,elapsedLabel,HTTPHistory,httpTransport,httpBody,httpHeaders} from '../static/core.js';
+import test from 'node:test';import assert from 'node:assert/strict';import {SSEParser,EventLog,redact,terminal,eventPreview,elapsedSince,elapsedLabel,HTTPHistory,httpTransport,httpBody,httpHeaders,safeDiagnostics,diagnosticRows,chatResult,requestErrorMessage} from '../static/core.js';
 test('split frames, multi-line JSON and CRLF parse without losing cursor',()=>{const p=new SSEParser();assert.deepEqual(p.push('id: 2\nevent: answer.delta\nda'),[]);assert.equal(p.push('ta: {"delta":"x"}\n\n')[0].id,2);assert.equal(p.push('id: 3\r\nevent: turn.finished\r\ndata: {"status":"COMPLETED"}\r\n\r\n')[0].event,'turn.finished');});
 test('replayed event ID is deduplicated, bounded history retains cursor',()=>{const l=new EventLog(2);for(let id=1;id<4;id++)l.add({id,event:'delta',data:{},receivedAt:'now',round:1});assert.equal(l.cursor,3);assert.equal(l.items.length,2);assert.equal(l.dropped,1);assert.equal(l.add({id:2,event:'delta',data:{},receivedAt:'now',round:2}),false);});
 test('private originals hidden by default; tokens never revealed',()=>{const raw={delta:'PRIVATE_CANARY',authorization:'Bearer secret',nested:{api_key:'hidden'}};assert.equal(redact(raw).delta,'[원문 숨김]');assert.equal(redact(raw,true).delta,'PRIVATE_CANARY');assert.equal(redact(raw,true).authorization,'[토큰 마스킹]');assert.equal(redact({text:'Bearer actual-token'},true).text,'[토큰 마스킹]');});
@@ -21,3 +21,29 @@ test('hidden answer counts original Unicode characters without exposing text',()
 test('legacy empty card introduction is a notice, never invented model prose',()=>{for(const reveal of [false,true])assert.equal(eventPreview({event:'answer.delta',data:{delta:''}},reveal).body,'빈 답변 조각 수신 · 추가 텍스트 없음');});
 
 test('card-only notice requires completed final blocks, not an empty delta',()=>{const data={status:'COMPLETED',blocks:[{type:'text',text:''},{type:'cards',products:[{productId:101,reason:'fact'}]}]};assert.ok(eventPreview({event:'turn.finished',data}).body.includes('상품 카드 1개로 응답했습니다.'));for(const status of ['FAILED','PROCESSING'])assert.ok(!eventPreview({event:'turn.finished',data:{...data,status}}).body.includes('상품 카드'));assert.ok(!eventPreview({event:'turn.finished',data:{...data,blocks:[]}}).body.includes('상품 카드'));});
+
+test('processing summary renders observed zero separately from missing, never private context or unrecorded exclusions',()=>{
+ const value={profile:{status:'AVAILABLE',sourceVersion:5,analysisSourceVersion:4,receivedAt:'2026-10-19T12:00:00+00:00',giftPreference:'PRIVATE_PROFILE'},retrieval:{candidateCount:0,exclusionReasons:[{reason:'PRIVATE_EXCLUSION'}],catalogSnapshotId:'catalog-v2'},model:{name:'synthetic/model',status:'completed',prompt:'PRIVATE_PROMPT'},final:{status:'COMPLETED',requestId:'11111111-1111-4111-8111-111111111111',elapsedMs:0},raw:{token:'PRIVATE_TOKEN'}};
+ const safe=safeDiagnostics(value),rows=Object.fromEntries(diagnosticRows(value));
+ assert.equal(safe.profile.status,'AVAILABLE');assert.equal(safe.model.status,'completed');assert.equal(safe.profile.analysisSourceVersion,4);
+ assert.equal(rows['검색 후보 수'],'0개');assert.equal(rows['기록된 제외 이유'],'미수집');assert.equal(rows['서버 관측 소요 시간'],'0.0초');
+ assert.equal(Object.fromEntries(diagnosticRows({}))['검색 후보 수'],'미수집');assert.equal(rows['이 화면의 이미지 표시'],'미수집');
+ assert.ok(!JSON.stringify(safe).includes('PRIVATE_'));assert.ok(!JSON.stringify(rows).includes('PRIVATE_'));
+ const malformed=safeDiagnostics({profile:{sourceVersion:true},model:{name:'Bearer private-token'},final:{requestId:'PRIVATE_REQUEST',elapsedMs:NaN}});assert.equal(malformed.profile.sourceVersion,null);assert.equal(malformed.model.name,null);assert.equal(malformed.final.requestId,null);assert.equal(malformed.final.elapsedMs,null);
+});
+
+test('conversation shows the saved public answer once without duplicate deltas and keeps token masking',()=>{
+ const events=[{event:'answer.delta',data:{delta:'Partial '}},{event:'answer.delta',data:{delta:'response'}},{event:'cards',data:{products:[{productId:1}]}}];
+ assert.equal(chatResult(events).text,'Partial response');assert.equal(chatResult(events).products[0].productId,1);
+ events.push({event:'turn.finished',data:{status:'COMPLETED',blocks:[{type:'text',text:'Final Bearer synthetic-secret'},{type:'cards',products:[{productId:2,reason:'Observed public reason'}]}]}});
+ assert.equal(chatResult(events).text,'Final [토큰 마스킹]');assert.equal(chatResult(events).products[0].productId,2);assert.equal(chatResult([]).text,'');
+});
+
+test('quick check rejection identifies missing prerequisites without displaying raw backend detail',()=>{
+ assert.match(requestErrorMessage(409,{detail:'QUICK_CHECK_REQUEST_UNSUPPORTED'}),/Chat 서버의 버전과 요청 형식.*시작되지 않았습니다/);
+ assert.match(requestErrorMessage(409,{detail:'QUICK_CHECK_GRANT_REQUIRED'}),/현재 버전에 대한 기존 BE 접근 권한/);
+ assert.match(requestErrorMessage(409,{detail:'QUICK_CHECK_SYNTHETIC_RECIPIENT_REQUIRED'}),/합성 수신자와 기존 BE 권한/);
+ assert.match(requestErrorMessage(409,{detail:'QUICK_CHECK_SEARCH_NOT_READY'}),/검색 상품과 상품 버전/);
+ assert.match(requestErrorMessage(409,{detail:'QUICK_CHECK_LIVE_RUNTIME_REQUIRED'}),/실제 모델 런타임/);
+ assert.ok(!requestErrorMessage(409,{detail:'PRIVATE_UPSTREAM_ERROR'}).includes('PRIVATE_'));
+});

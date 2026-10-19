@@ -74,6 +74,9 @@ class PreparedContext(StrictModel):
 
 class PutTurn(StrictModel):
     message: Annotated[str, Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)]
+    # Older servers forbid unknown body fields, so they reject this diagnostic
+    # request instead of silently treating its header as an ordinary chat.
+    quick_check: bool = Field(default=False, alias='quickCheck', strict=True)
     model: str | None = Field(default=None, max_length=160, description='OpenRouter model ID. Omit to use the server default; preserve this value on retries.')
     prepared_context: PreparedContext | None = Field(default=None,description='Verified candidate IDs/snapshot; immutable on retry. Prepared-pool recommendation uses one responder call.')
     recipient_context: RecipientContext | None = Field(default=None, description='Backend-owned source snapshot for this turn. Omission means not supplied, never reuse a previous snapshot.')

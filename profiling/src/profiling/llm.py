@@ -106,6 +106,7 @@ class OpenRouterTagExtractor:
                 except ValueError:
                     raise TagExtractError("credential_unavailable", "Profiler key is unavailable") from None
                 request.headers["Authorization"] = "Bearer " + snapshot.value
+                request.extensions["provider_key_identity"] = credential_source.identity(snapshot)
                 yield request
         self.credential_source = credential_source
         self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_s, transport=transport,
@@ -143,6 +144,9 @@ class OpenRouterTagExtractor:
                            stop=choice.get("finish_reason"), cost_usd=u.get("cost"))
         if usage.stop == "length":
             raise TagExtractError("truncated", f"model={self.model} output_tokens={usage.output_tokens}", usage)
+        if (self.credential_source and r.status_code == 200 and not body.get("error") and not choice.get("error")
+                and text.strip() and usage.stop in {"stop", "end_turn"}):
+            self.credential_source.record_success(r.request.extensions.get("provider_key_identity"))
         log.debug("openrouter model=%s in_tok=%s out_tok=%s total_ms=%s cost=%s stop=%s", self.model, usage.input_tokens,
                   usage.output_tokens, usage.total_ms, usage.cost_usd, usage.stop)
         return TagReply(_strip_fence(text), usage)

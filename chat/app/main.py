@@ -245,7 +245,8 @@ async def credential_status():
  from integration.provider_key import ProviderKey
  from integration.service_token import ServiceToken
  provider=getattr(app.state.runtime,'provider_key',None) or ProviderKey.from_environment('chat')
- key,token=await asyncio.gather(asyncio.to_thread(provider.status),asyncio.to_thread(ServiceToken.from_environment('chat').status))
+ key,token=await asyncio.gather(asyncio.to_thread(provider.runtime_status),asyncio.to_thread(ServiceToken.from_environment('chat').status))
+ token['usage']={'state':'not-collected','lastSuccessfulCallAt':None,'scope':'responding-process'}
  return {'service':'chat','environment':provider.environment,'provider':key,'backend':token}
 @app.put(TEST_BASE+'/{conversationId}',response_model=SuccessResponse[Conversation],responses={201:{'model':SuccessResponse[Conversation]}})
 @app.put(BASE+'/{conversationId}',response_model=SuccessResponse[Conversation],responses={201:{'model':SuccessResponse[Conversation]}})
@@ -277,9 +278,12 @@ async def turn_snapshot(conversationId:UUID4,turnId:UUID4,request:Request,auth:S
 async def turn(conversationId:UUID4,turnId:UUID4,body:PutTurn,response:Response,request:Request,auth:Service):
  cid,tid=str(conversationId),str(turnId)
  runtime=await selected_runtime(cid,request)
+ quick_check=request.headers.get('x-console-quick-check')
+ if (quick_check is not None or body.quick_check) and (quick_check!='true' or body.quick_check is not True or getattr(app.state,'runtime_mode','live')!='live' or runtime is getattr(app.state,'fixture',None)):
+  raise APIError(400,'QUICK_CHECK_LIVE_RUNTIME_REQUIRED')
  if body.model is not None and (getattr(app.state,'runtime_mode','live')=='mock' or runtime is getattr(app.state,'fixture',None)):raise APIError(400,'고정 응답 서버에서는 LLM 모델을 선택하지 않습니다.')
  if body.prepared_context is not None and runtime is getattr(app.state,'fixture',None):raise APIError(400,'고정 응답에서는 실제 후보 준비를 사용하지 않습니다.')
- data=await runtime.accept(cid,tid,body.message,**({'model':body.model} if body.model else {}),**({'recipient_context':body.recipient_context.model_dump(by_alias=True)} if body.recipient_context is not None else {}),**({'prepared_context':body.prepared_context.model_dump(by_alias=True)} if body.prepared_context is not None else {}))
+ data=await runtime.accept(cid,tid,body.message,**({'model':body.model} if body.model else {}),**({'recipient_context':body.recipient_context.model_dump(by_alias=True)} if body.recipient_context is not None else {}),**({'prepared_context':body.prepared_context.model_dump(by_alias=True)} if body.prepared_context is not None else {}),**({'quick_check':True} if quick_check else {}))
  response.status_code=202 if data['status']=='PROCESSING' else 200
  return {'message':'질문 상태를 조회했습니다.','data':readable_turn(data)}
 @app.get(TEST_BASE+'/{conversationId}/turns/{turnId}/events',response_class=StreamingResponse,responses={200:{'content':{'text/event-stream':{'schema':{'type':'string'}}}}})
@@ -403,7 +407,7 @@ async def demo_turn(cid:UUID4,tid:UUID4,body:PutTurn,sender:Demo):
  await app.state.store.call('owned',cid=str(cid),sender=sender)
  throttle(('turns',sender),30,3600)
  binding=await app.state.store.call('binding',cid=str(cid));base=TEST_BASE if binding.get('protocolFixture') else BASE
- return await proxied(f'{base}/{cid}/turns/{tid}',body.model_dump(exclude_none=True))
+ return await proxied(f'{base}/{cid}/turns/{tid}',body.model_dump(exclude_none=True,exclude_defaults=True))
 @app.get('/demo/conversations/{cid}/turns/{tid}/events',include_in_schema=False)
 async def demo_events(cid:UUID4,tid:UUID4,sender:Demo,afterEventId:Annotated[int,Query(ge=0)]=0):
  await app.state.store.call('owned',cid=str(cid),sender=sender)

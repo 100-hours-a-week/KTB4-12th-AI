@@ -61,6 +61,14 @@ class Runtime:
   notify_turn(self,tid)
   self.cache.pop(tid,None)
   if not ok:raise asyncio.CancelledError()
+ async def provider_succeeded(self,response):
+  if not hasattr(self,'provider_key'):return
+  try:
+   request=response.request
+   if response.status_code!=200 or request.method!='POST' or request.url.host!='openrouter.ai' or request.url.path!='/api/v1/chat/completions':return
+   identity=request.extensions.get('provider_key_identity')
+  except (AttributeError,RuntimeError):return
+  await asyncio.to_thread(self.provider_key.record_success,identity)
  async def complete(self,messages,usage,structured=False,limit=1400):
   if structured and self.model_config and 'structured_outputs' not in self.model_config.parameters:
    messages=[{'role':'system','content':'다음 JSON 스키마에 맞는 객체만 반환하세요. 설명이나 코드펜스를 붙이지 마세요.\n'+json.dumps(simple_schema(structured.model_json_schema()),ensure_ascii=False)}]+messages
@@ -72,6 +80,8 @@ class Runtime:
    value=d['choices'][0]['message']['content'] or ''
    if d['choices'][0].get('finish_reason')=='length':raise ModelOutputError('추론·답변 토큰 한도에 도달했습니다. 질문을 짧게 나누거나 다른 모델을 선택해 주세요.')
    if not value.strip():raise ModelOutputError('모델이 답변 본문을 반환하지 않았습니다. 다른 모델을 선택하거나 다시 질문해 주세요.')
+   if not d.get('error') and not d['choices'][0].get('error') and d['choices'][0].get('finish_reason') in {'stop','end_turn'}:
+    await self.provider_succeeded(r)
    if not structured:return value
    try:
     if value.strip().startswith('```'):
@@ -94,6 +104,7 @@ class Runtime:
   model=None,
   recipient_context=None,
   prepared_context=None,
+  quick_check=False,
  ):
   """Own admission before its first write; HTTP cancellation must not lose it."""
   if prepared_context is not None:
@@ -131,6 +142,7 @@ class Runtime:
     or admission.get("model") != model
     or admission.get("recipient_context") != recipient_context
     or admission.get("prepared_context") != prepared_context
+    or admission.get("quick_check", False) != quick_check
    ):
     raise APIError(
      409,
@@ -155,6 +167,7 @@ class Runtime:
    "config": None,
    "recipient_context": recipient_context,
    "prepared_context": prepared_context,
+   "quick_check": quick_check,
    "accepted": accepted_future,
   }
   self.admissions[tid] = admission
@@ -247,6 +260,7 @@ class Runtime:
         if admission.get("prepared_context") is not None
         else {}
        ),
+       **({"quick_check": True} if admission.get("quick_check") else {}),
       )
      break
     except (APIError, httpx.HTTPError, TimeoutError) as exc:
