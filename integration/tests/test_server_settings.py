@@ -1,4 +1,4 @@
-"""Server (ECS) settings — unset keeps the local guarded behaviour unchanged."""
+"""Server settings use provider limits by default; ledger runs opt into guarded."""
 
 import os
 
@@ -119,16 +119,20 @@ def launcher(monkeypatch):
     os.environ.update(saved)
 
 
-def test_budget_mode_defaults_to_guarded_and_rejects_unknown(monkeypatch):
+def test_budget_mode_defaults_to_provider_limits_and_requires_explicit_guarded(monkeypatch):
     monkeypatch.delenv("AI_BUDGET_MODE", raising=False)
-    assert entrypoint.budget_mode() == "guarded"
-    monkeypatch.setenv("AI_BUDGET_MODE", "off")
-    with pytest.raises(ValueError):
-        entrypoint.budget_mode()
-    monkeypatch.setenv("AI_BUDGET_MODE", "provider-key-limits")
-    assert entrypoint.budget_mode() == "provider-key-limits"
-    with pytest.raises(ValueError):
-        entrypoint.budget_mode(smoke=True)
+    for value in (None, "", "  ", "provider-key-limits"):
+        if value is not None:
+            monkeypatch.setenv("AI_BUDGET_MODE", value)
+        assert entrypoint.budget_mode() == "provider-key-limits"
+        with pytest.raises(ValueError):
+            entrypoint.budget_mode(smoke=True)
+    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
+    assert entrypoint.budget_mode() == entrypoint.budget_mode(smoke=True) == "guarded"
+    for value in ("off", "GUARDED", "auto"):
+        monkeypatch.setenv("AI_BUDGET_MODE", value)
+        with pytest.raises(ValueError):
+            entrypoint.budget_mode()
 
 
 def test_guarded_fence_only_approves_the_pinned_model(monkeypatch):
@@ -141,29 +145,81 @@ def test_guarded_fence_only_approves_the_pinned_model(monkeypatch):
             == "google/gemini-3.5-flash-lite")
 
 
-def test_missing_ledger_without_explicit_mode_still_blocks(launcher):
+@pytest.mark.parametrize("role", ["chat", "profiler"])
+def test_explicit_guarded_without_ledger_still_blocks(launcher, role):
+    launcher.setenv("AI_BUDGET_MODE", "guarded")
     with pytest.raises((KeyError, ValueError)):
-        entrypoint.configure("profiler")
+        entrypoint.configure(role)
 
 
-def test_provider_mode_profiler_uses_configured_model_without_ledger(launcher):
-    launcher.setenv("AI_BUDGET_MODE", "provider-key-limits")
+@pytest.mark.parametrize("mode", [None, "provider-key-limits"])
+def test_provider_mode_profiler_uses_configured_model_without_ledger(launcher, mode):
+    if mode is not None:
+        launcher.setenv("AI_BUDGET_MODE", mode)
     launcher.setenv("PROFILING_TAGGER_MODEL", "google/gemini-3.5-flash-lite")
     assert entrypoint.configure("profiler") is None
     env = entrypoint.os.environ
     assert env["PROFILING_TAGGER_MODEL"] == "google/gemini-3.5-flash-lite"
-    assert env["PROFILING_OPENROUTER_API_KEY"] == "unit-openrouter_api_key"
+    assert env["PROFILING_OPENROUTER_API_KEY"] == "unit-profiling_openrouter_api_key"
     assert env["PROFILING_TAG_SPEC"] == "tag3disliked"
     assert "PROFILING_BUDGET_URL" not in env and "STORE_TOKEN" not in env
 
 
-def test_provider_mode_chat_uses_configured_model_without_ledger(launcher):
-    launcher.setenv("AI_BUDGET_MODE", "provider-key-limits")
+@pytest.mark.parametrize("mode", [None, "provider-key-limits"])
+def test_provider_mode_chat_uses_configured_model_without_ledger(launcher, mode):
+    if mode is not None:
+        launcher.setenv("AI_BUDGET_MODE", mode)
     launcher.setenv("CHAT_MODEL", "openai/gpt-6-luna")
     assert entrypoint.configure("chat") is None
     env = entrypoint.os.environ
     assert env["CHAT_MODEL"] == "openai/gpt-6-luna" and env["CHAT_RUNTIME_MODE"] == "live"
     assert "BUDGET_STORE_URL" not in env
+
+
+@pytest.mark.parametrize("mode", [None, "", "  ", "provider-key-limits", "guarded", "off"])
+def test_native_profiler_selects_policy_before_database_or_model(monkeypatch, mode):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from integration import profiler_runtime as runtime
+
+    monkeypatch.delenv("AI_BUDGET_MODE", raising=False)
+    if mode is not None:
+        monkeypatch.setenv("AI_BUDGET_MODE", mode)
+    calls = []
+    monkeypatch.setattr(runtime, "get_settings", lambda: SimpleNamespace(
+        SERVICE_TOKEN="synthetic", TAGGER="openrouter", CATALOG_SOURCE="db", EMBEDDING_DIR="/synthetic"))
+    monkeypatch.setattr(runtime, "ProviderKey", SimpleNamespace(from_environment=lambda *args: object()))
+    monkeypatch.setattr(runtime, "shared_token_configured", lambda: False)
+    monkeypatch.setattr(runtime.main, "strict_problems", lambda *a, **kw: [])
+
+    class Budget:
+        def __init__(self, *args): calls.append("ledger")
+        def call(self, method): calls.append(method)
+        def close(self): calls.append("close")
+
+    monkeypatch.setattr(runtime, "SharedBudget", Budget)
+    monkeypatch.setattr(runtime, "BudgetedExtractor", lambda *a, **kw: calls.append("guarded"))
+    monkeypatch.setattr(runtime, "ProviderLimitedExtractor", lambda *a, **kw: calls.append("provider-key-limits"))
+    original = runtime.llm.OpenRouterTagExtractor
+
+    class BeforeDatabase(Exception): pass
+
+    @asynccontextmanager
+    async def database_boundary(app):
+        runtime.llm.OpenRouterTagExtractor()
+        raise BeforeDatabase()
+        yield
+
+    monkeypatch.setattr(runtime.main, "lifespan", database_boundary)
+    async def case():
+        with pytest.raises(RuntimeError if mode == "off" else BeforeDatabase):
+            async with runtime.lifespan(SimpleNamespace(state=SimpleNamespace())):
+                pytest.fail("Synthetic check must stop before the DB boundary")
+    asyncio.run(case())
+    assert calls == ([] if mode == "off" else ["ledger", "budget_summary", "guarded", "close"]
+                     if mode == "guarded" else ["provider-key-limits"])
+    assert runtime.llm.OpenRouterTagExtractor is original
 
 
 def test_provider_limited_extractor_keeps_destination_and_generation_checks():
@@ -198,3 +254,70 @@ def test_provider_mode_counts_as_a_required_model_guard():
     assert model_state(health)["required"] is True
     health["integration"]["budgetGuard"] = "unverified"
     assert model_state(health)["required"] is False
+
+
+@pytest.mark.parametrize("source_kind", ["dotenv", "environment", "file", "missing_file", "managed", "saved_missing", "aws", "legacy"])
+def test_native_profiler_dotenv_key_preserves_explicit_and_managed_sources(tmp_path, monkeypatch, source_kind):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from profiling.settings import Settings
+    from integration import profiler_runtime as runtime
+    from integration.provider_key import ProviderKey, KeyUnavailable
+
+    for name in tuple(os.environ):
+        if any(part in name for part in ("OPENROUTER", "CREDENTIAL", "BE_SERVICE_TOKEN", "AI_BUDGET_MODE")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("AI_ENVIRONMENT", "local")
+    dotenv = tmp_path / "synthetic.env"
+    dotenv.write_text("PROFILING_OPENROUTER_API_KEY=synthetic-dotenv-key\n")
+    settings = Settings(_env_file=dotenv, SERVICE_TOKEN="synthetic", TAGGER="openrouter",
+                        CATALOG_SOURCE="db", EMBEDDING_DIR="/synthetic")
+    assert settings.OPENROUTER_API_KEY.get_secret_value() == "synthetic-dotenv-key"
+    expected = "synthetic-dotenv-key"
+    if source_kind == "environment":
+        monkeypatch.setenv("PROFILING_OPENROUTER_API_KEY", "synthetic-environment-key")
+        expected = "synthetic-environment-key"
+    elif source_kind in {"file", "missing_file"}:
+        key_file = tmp_path / "synthetic-key"
+        if source_kind == "file": key_file.write_text("synthetic-file-key")
+        monkeypatch.setenv("PROFILING_OPENROUTER_API_KEY_FILE", str(key_file))
+        expected = "synthetic-file-key" if source_kind == "file" else None
+    elif source_kind in {"managed", "saved_missing", "legacy"}:
+        directory = tmp_path / "managed"; directory.mkdir(mode=0o700)
+        monkeypatch.setenv("OPENROUTER_MANAGED_KEY_DIR", str(directory))
+        if source_kind == "legacy":
+            monkeypatch.setenv("AI_CREDENTIAL_LAYOUT", "legacy-shared")
+            expected = None
+        else:
+            managed = ProviderKey(kind="profiler", managed_directory=str(directory))
+            expected = "sk-or-v1-" + "a" * 32
+            managed.save(expected, None)
+            if source_kind == "saved_missing":
+                (directory / managed.record_file).unlink()
+                expected = None
+    elif source_kind == "aws":
+        monkeypatch.setenv("AI_ENVIRONMENT", "develop")
+        monkeypatch.setenv("AI_CREDENTIAL_BACKEND", "aws-secrets-manager")
+        monkeypatch.setenv("OPENROUTER_PROFILER_SECRET_ARN", "synthetic-typed-secret")
+    monkeypatch.setattr(runtime, "get_settings", lambda: settings)
+    monkeypatch.setattr(runtime, "shared_token_configured", lambda: False)
+    monkeypatch.setattr(runtime.main, "strict_problems", lambda *a, **kw: [])
+
+    class BeforeDatabase(Exception): pass
+    @asynccontextmanager
+    async def before_database(app):
+        source = app.state.provider_key
+        if source_kind == "aws":
+            assert source.mode == "aws" and source._value is None
+        elif expected is None:
+            with pytest.raises(KeyUnavailable): source.snapshot()
+        else:
+            assert source.snapshot().value == expected
+        raise BeforeDatabase()
+        yield
+    monkeypatch.setattr(runtime.main, "lifespan", before_database)
+    async def case():
+        with pytest.raises(BeforeDatabase):
+            async with runtime.lifespan(SimpleNamespace(state=SimpleNamespace())): pass
+    asyncio.run(case())

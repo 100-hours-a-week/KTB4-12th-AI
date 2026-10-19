@@ -171,7 +171,8 @@ def build_pool(rq: ProfileRequest, products: list[ProductRecord], pool_size: int
 
     점수 (두 모드 공통, v2 2단계 · 가이드 10-11 보강 A·D):
       인기   = **조회수 순위 백분위** × 2 (0~2) = 2 × (조회수가 나보다 낮은 후보 수) ÷ (후보 수 − 1). 1위 2.0 · 꼴찌 0 · 같은 조회수는 같은 값.
-               후보는 **재고 필터만 거친 상품**(비선호를 빼기 전) — 두 모드에서 같은 상품의 인기가 같다.
+               후보는 **재고 필터만 거친 상품 중 조회수가 관측된 상품**(비선호를 빼기 전). 미확인 조회수는 모수에서 빼고 기여도 0으로 둔다.
+               두 모드에서 같은 상품의 인기가 같다.
                (10-12: 조회수 ÷ 최대 × 2 에서 바꿈. 순위는 조회수 분포와 상관없이 0~2 를 고르게 쓴다 — 실제 조회수는 소수 상품에
                몰리는 분포가 흔해, 비율이면 대부분이 0 근처로 눌린다. 지금 BE 조회수(임의값)는 고르게 퍼져 있어 두 방식 결과가 같다.
                주의: 상위 30개는 카탈로그의 0.7%라 편향 +0.67 이면 편향 소분류가 30개를 거의 다 차지한다 — 정규화가 아니라
@@ -240,7 +241,7 @@ class ScoredProduct(NamedTuple):
     """rank_products() 한 줄 — 점수가 어떻게 나왔는지까지(시나리오 검증 도구가 그대로 보여 준다). total = popularity + bias + penalty."""
 
     product: ProductRecord
-    popularity: float      # 조회수 순위 백분위 × 2 (0~2)
+    popularity: float      # 관측된 조회수 순위 백분위 × 2 (0~2), 미확인 조회수는 기여 없음
     bias: float            # BIAS_WEIGHT × 소분류 편향 (리뷰 없는 소분류 0)
     penalty: float         # PENALTY 이고 직접 고른 비선호면 DISLIKED_CATEGORY_SCORE, 아니면 0
     total: float
@@ -281,13 +282,13 @@ def rank_products(rq: ProfileRequest, products: list[ProductRecord], *, dislike_
     return out
 
 
-def _view_percentile(candidates: list[ProductRecord]) -> Callable[[int], float]:
-    """조회수 → 순위 백분위(0~1) = (조회수가 더 낮은 후보 수) ÷ (후보 수 − 1). 같은 조회수는 같은 값, 후보가 1개 이하면 0."""
-    views = sorted(p.viewCount for p in candidates)
+def _view_percentile(candidates: list[ProductRecord]) -> Callable[[int | None], float]:
+    """관측된 조회수만 순위 모수에 포함한다. unknown은 점수 기여 없이 보존한다."""
+    views = sorted(p.viewCount for p in candidates if p.viewCount is not None)
     span = len(views) - 1
     if span <= 0:
         return lambda v: 0.0
-    return lambda v: bisect_left(views, v) / span
+    return lambda v: 0.0 if v is None else bisect_left(views, v) / span
 
 
 def category_scores(rq: ProfileRequest, products: list[ProductRecord], catalog: CatalogReader) -> list[CategoryScore]:

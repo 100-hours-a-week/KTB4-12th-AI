@@ -1,1 +1,1 @@
-{"revision":"integrated-rc-20261017","contract":"1.5.2","environment":"release-candidate","emmetCommit":"02a4f7569b877376d0ed9276ec22b822f008fc60","pcHarnessCommit":"1ea3cdefe3137503be6725651452f0a25f0a1892","harness":"stable-v4.12+ai-be-v1"}
+{"revision":"pr20-compat-20261019-2b66da67a2625888","contract":"1.5.2","environment":"local-review","emmetCommit":"02a4f7569b877376d0ed9276ec22b822f008fc60","pcHarnessCommit":"1ea3cdefe3137503be6725651452f0a25f0a1892","harness":"stable-v4.12+ai-be-v1","integrationBaseCommit":"06c0a9cca9cab9f5e84ae0cbc5546f79f11f708a"}

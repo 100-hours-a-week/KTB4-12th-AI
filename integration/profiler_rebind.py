@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import hmac
 import threading
 import time
 from collections import Counter
@@ -10,7 +11,7 @@ from typing import Annotated
 
 import anyio
 from fastapi import Depends, Header, HTTPException, Request
-from profiling.intake import require_service_token, settings_dep
+from profiling.intake import settings_dep
 from profiling.ports import NoActiveCatalog
 from profiling.search_api import SearchCatalog
 from profiling.settings import Settings
@@ -337,9 +338,13 @@ async def require_refresh_token(
     settings: Annotated[Settings, Depends(settings_dep)],
     authorization: Annotated[str | None, Header()] = None,
 ):
-    if not settings.SERVICE_TOKEN:
+    token = getattr(settings, "SEARCH_TOKEN", "") or settings.SERVICE_TOKEN
+    if hasattr(token, "get_secret_value"):
+        token = token.get_secret_value()
+    if not token:
         raise HTTPException(503, "REFRESH_AUTH_NOT_CONFIGURED")
-    await require_service_token(authorization, settings)
+    if not authorization or not hmac.compare_digest(authorization.encode(), ("Bearer " + token).encode()):
+        raise HTTPException(401, "UNAUTHORIZED")
 
 
 def unfinished_profile_runs(engine):

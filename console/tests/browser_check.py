@@ -3,12 +3,14 @@
 import argparse
 import asyncio
 import json
+import getpass
 from pathlib import Path
 
 from playwright.async_api import async_playwright, expect
 
 
 async def main(args):
+    password = getattr(args, 'password', None) or getpass.getpass('Console administrator password: ')
     results = []
     errors = []
     chat_requests = []
@@ -42,7 +44,10 @@ async def main(args):
             ),
         )
         await page.goto(args.url)
-        await page.locator("#mode").wait_for()
+        await page.fill('#admin-password', password)
+        await page.click('#login-submit')
+        await expect(page.locator("#mode")).not_to_have_text("—")
+        await page.locator('[data-page="chat"]').click()
         await page.select_option("#scenario", "/mock reconnect")
         await page.locator("#send-chat").dblclick()
         await page.locator(".eventrow").first.wait_for()
@@ -66,8 +71,9 @@ async def main(args):
         results.append(
             "double-click one request; disconnect/reconnect deduplicated and stored completion"
         )
-        await page.locator(".eventrow").filter(has_text="answer.delta").first.click()
-        assert "[원문 숨김]" in await page.locator("#event-json").inner_text()
+        await page.locator(".eventrow").filter(has_text="answer.delta").first.locator(".eventheading").click()
+        await expect(page.locator("#event-meta")).to_contain_text("answer.delta")
+        await expect(page.locator("#event-json")).to_contain_text("[원문 숨김]")
         selected = await page.locator("#event-meta").inner_text()
         await page.locator("#autoscroll").uncheck()
         await page.fill("#event-filter", "finished")

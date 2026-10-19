@@ -10,13 +10,62 @@ import signal
 import socket
 import subprocess
 import tempfile
+import sys
 import time
 from pathlib import Path
 
 import httpx
 import psycopg
+from psycopg import sql
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+
+def initialize_database(url, python, run):
+    """Only the newly created fixture cluster receives synthetic application roles."""
+    from integration.migrate_single_server import ROLES
+    with psycopg.connect(url) as db:
+        for role in [*ROLES.values(), 'ai_console_service']:
+            db.execute(sql.SQL('CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE').format(sql.Identifier(role)))
+    run([str(python), '-B', '-m', 'alembic', 'upgrade', '0011'], ROOT/'profiling', {
+        'PROFILING_DATABASE_URL': url.replace('postgresql://', 'postgresql+psycopg://'),
+        'PROFILING_APP_DB_ROLE': ROLES['profiler'], 'PROFILING_TAGGER': 'none',
+        'PYTHONPATH': str(ROOT/'profiling/src'),
+    })
+    run([str(python), '-B', '-m', 'integration.migrate_single_server', '--database', 'emmet4930_console'], ROOT, {
+        'MIGRATION_DATABASE_URL': url, 'INTEGRATION_SYNTHETIC_ONLY': '1', 'PYTHONPATH': str(ROOT),
+    })
+    with psycopg.connect(url) as db:
+        db.execute('CREATE TABLE ai_catalog.integration_marker(id boolean PRIMARY KEY CHECK(id))')
+        db.execute('INSERT INTO ai_catalog.integration_marker VALUES(true)')
+        db.execute('GRANT USAGE ON SCHEMA ai_runtime,ai_catalog,ai_chat,ai_profile TO ai_console_service')
+        db.execute('GRANT SELECT ON ai_runtime.database_identity,ai_catalog.integration_marker,ai_chat.turns,ai_chat.events,ai_chat.task_budget_attempts,ai_profile.profile_runs,ai_catalog.generation_products,ai_catalog.catalog_state TO ai_console_service')
+
+
+def check_database(url):
+    """Resume only the current prepared fixture; never silently rewrite older state."""
+    try:
+        with psycopg.connect(url, options='-c default_transaction_read_only=on', connect_timeout=3) as db:
+            row = db.execute('''SELECT current_database(),database_name,version,
+                (SELECT version_num FROM public.alembic_version) FROM ai_runtime.database_identity WHERE singleton''').fetchone()
+            if row != ('emmet4930_console', 'emmet4930_console', 'single-server/1', '0011'):
+                raise ValueError('Unexpected fixture database version')
+            db.execute('SELECT id,turn,note,created FROM ai_chat.turn_reviews LIMIT 0')
+            if db.execute('SELECT count(*) FROM ai_catalog.integration_marker').fetchone()[0] != 1:
+                raise ValueError('Fixture database marker missing')
+    except (psycopg.Error, ValueError):
+        raise RuntimeError('Fixture database needs a separately verified migration; existing state was preserved. Use a new state directory for a fresh fixture.') from None
+
+
+def stop_children(children):
+    for process in reversed(children):
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError('Graceful shutdown incomplete; processes/state retained') from None
 
 
 def source_hashes():
@@ -74,6 +123,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pg-bin", type=Path, required=True)
     parser.add_argument("--embedding-assets", type=Path, required=True)
+    parser.add_argument("--environment-root", type=Path, default=ROOT,
+                        help="Existing service .venv directories; application source stays in this checkout")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--console-port", type=int)
     parser.add_argument(
@@ -91,13 +142,16 @@ def main():
         "--resume", action="store_true", help="Resume only this launcher’s marked state"
     )
     args = parser.parse_args()
+    from console.admin_auth import AdminAuth
+    AdminAuth().credential()  # Fail before starting a DB if the operator hash is missing.
     if not 0.1 <= args.shutdown_wait <= 300:
         parser.error("--shutdown-wait must be between 0.1 and 300 seconds")
     if args.resume and not args.state_dir:
         parser.error("--resume requires --state-dir")
     required = [args.pg_bin / name for name in ("initdb", "pg_ctl")]
+    environments = args.environment_root.resolve()
     required += [
-        ROOT / service / ".venv/bin/python"
+        environments / service / ".venv/bin/python"
         for service in ("chat", "product-search", "profiling", "console")
     ]
     required += [args.embedding_assets / name for name in ("models", "node_modules")]
@@ -116,7 +170,7 @@ def main():
     for service in ("chat", "product-search", "profiling", "console"):
         result = subprocess.run(
             [
-                str(ROOT / service / ".venv/bin/python"),
+                str(environments / service / ".venv/bin/python"),
                 "-B",
                 "-c",
                 "import fastapi,httpx,psycopg,uvicorn",
@@ -188,7 +242,7 @@ def main():
         OPENBLAS_NUM_THREADS="1",
         OMP_NUM_THREADS="1",
     )
-    env.pop("PYTHONPATH", None)
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT), str(ROOT/'profiling/src')])
     env.pop("PYTHONHOME", None)
     scratch = (
         args.state_dir.resolve()
@@ -217,6 +271,7 @@ def main():
     logs = []
     children = []
     pg_started = False
+    console_ready = False
     done = False
 
     def stop(*unused):
@@ -256,7 +311,7 @@ def main():
 
     def app(service, module, bind):
         return [
-            str(ROOT / service / ".venv/bin/python"),
+            str(environments / service / ".venv/bin/python"),
             "-B",
             "-m",
             "uvicorn",
@@ -267,6 +322,20 @@ def main():
             str(bind),
             "--no-access-log",
         ]
+
+    def wait_ready(service, url, path, token):
+        with httpx.Client(timeout=3, trust_env=False) as http:
+            for _ in range(150):
+                if any(process.poll() is not None for process in children):
+                    raise RuntimeError('Fixture process stopped during startup: ' + service)
+                try:
+                    response = http.get(url + path, headers={'Authorization': 'Bearer ' + token})
+                    if response.status_code == 200 and (service != 'profiling' or response.json()['catalog']['active']):
+                        return
+                except httpx.HTTPError:
+                    pass
+                time.sleep(0.2)
+        raise RuntimeError('Fixture readiness failed: ' + service)
 
     try:
         db_port = saved["dbPort"] if saved else port()
@@ -307,25 +376,9 @@ def main():
         db = bootstrap.rsplit("/",1)[0]+"/emmet4930_console"
         runtime = scratch / "search-root"
         if not saved:
-            run(
-                [
-                    str(ROOT / "profiling/.venv/bin/python"),
-                    "-m",
-                    "alembic",
-                    "upgrade",
-                    "0007",
-                ],
-                ROOT / "profiling",
-                {
-                    "PROFILING_DATABASE_URL": db.replace(
-                        "postgresql://", "postgresql+psycopg://"
-                    ),
-                    "PROFILING_TAGGER": "none",
-                },
-            )
-            run([str(ROOT/"profiling/.venv/bin/python"),"-B","-m","integration.catalog_transition"],ROOT,{"PYTHONPATH":str(ROOT),"CATALOG_OWNER_DATABASE_URL":db})
-            with psycopg.connect(db) as connection:
-                connection.execute((ROOT / "integration/schema.sql").read_text())
+            initialize_database(db, environments/'profiling/.venv/bin/python', run)
+        check_database(db)
+        if not saved:
             runtime.mkdir()
             (runtime / "embedding").mkdir()
             for file in (ROOT / "product-search/embedding").iterdir():
@@ -337,11 +390,14 @@ def main():
                 )
             run(
                 [
-                    str(ROOT / "product-search/.venv/bin/python"),
-                    str(ROOT / "integration/catalog.py"),
-                    str(runtime),
+                    str(environments / "product-search/.venv/bin/python"),
+                    '-B', '-c',
+                    'import os; from pathlib import Path; from integration.containers.smoke_init import stage_catalog; '
+                    'stage_catalog(Path(os.environ["FIXTURE_RUNTIME"]), os.environ["CATALOG_OWNER_DATABASE_URL"], Path(os.environ["FIXTURE_SOURCE"]))',
                 ],
-                extra={"CATALOG_OWNER_DATABASE_URL": db},
+                extra={"CATALOG_OWNER_DATABASE_URL": db.replace('fixture_owner@','ai_catalog_sync@'),
+                       "FIXTURE_RUNTIME": str(runtime), "FIXTURE_SOURCE": str(ROOT/'integration/tests/fixture.json'),
+                       "PYTHONPATH": os.pathsep.join([str(ROOT), str(ROOT/'product-search'), str(ROOT/'profiling/src')])},
             )
         urls = {
             key: "http://127.0.0.1:" + str(port())
@@ -383,8 +439,10 @@ def main():
                 ),
                 "SEARCH_RUNTIME_ROOT": str(runtime),
                 "SEARCH_MEDIA_ROOT": str(ROOT / "integration/tests/media"),
+                "SEARCH_SERVICE_TOKEN": token,
             },
         )
+        wait_ready('search', urls['search'], '/readyz', token)
         start(
             "profiling",
             app(
@@ -393,9 +451,12 @@ def main():
             ROOT / "profiling",
             {
                 "PROFILING_DATABASE_URL": db.replace(
-                    "fixture_owner@", "ai_app@"
+                    "fixture_owner@", "ai_profiler_service@"
                 ).replace("postgresql://", "postgresql+psycopg://"),
-                "PROFILING_CATALOG_SOURCE": "db",
+                "PROFILING_CATALOG_SOURCE": "search_http",
+                "PROFILING_SEARCH_BASE_URL": urls["search"],
+                "PROFILING_SEARCH_TOKEN": token,
+                "PROFILING_APP_DB_ROLE": "ai_profiler_service",
                 "PROFILING_TAGGER": "none",
                 "PROFILING_SERVICE_TOKEN": token,
                 "PROFILING_BACKEND_BASE_URL": urls["callback"],
@@ -425,8 +486,8 @@ def main():
         config = {
             "label": "로컬 합성 서비스 · 무료 실행기",
             "targets": {s: urls[s] for s in ["chat", "search", "profiling"]},
-            "tokens": {"chat": token, "profiling": token},
-            "database": db,
+            "tokens": {"chat": token, "profiling": token, "search": token},
+            "database": db.replace('fixture_owner@','ai_console_service@'),
             "localFixtureProfilerFree": True,
             "launcherPid": os.getpid(),
             "safetyEvidence": "Owned marked synthetic DB; stripped provider keys; explicit TAGGER=none and CHAT_RUNTIME_MODE=mock",
@@ -434,28 +495,8 @@ def main():
         private = scratch / "targets.json"
         private.write_text(json.dumps(config))
         private.chmod(0o600)
-        with httpx.Client(timeout=3, trust_env=False) as http:
-            for service, path in [
-                ("chat", "/readyz"),
-                ("search", "/readyz"),
-                ("profiling", "/health"),
-            ]:
-                for _ in range(150):
-                    try:
-                        response = http.get(
-                            urls[service] + path,
-                            headers={"Authorization": "Bearer " + token},
-                        )
-                        if response.status_code == 200 and (
-                            service != "profiling"
-                            or response.json()["catalog"]["active"]
-                        ):
-                            break
-                    except httpx.HTTPError:
-                        pass
-                    time.sleep(0.2)
-                else:
-                    raise RuntimeError("Fixture readiness failed: " + service)
+        for service, path in [('chat', '/readyz'), ('profiling', '/health')]:
+            wait_ready(service, urls[service], path, token)
         start(
             "console",
             app("console", "console.server:app", int(urls["console"].split(":")[-1])),
@@ -465,7 +506,7 @@ def main():
         with httpx.Client(timeout=3, trust_env=False) as http:
             for _ in range(50):
                 try:
-                    response = http.get(urls["console"] + "/api/config")
+                    response = http.get(urls["console"] + "/healthz")
                     if (
                         response.status_code == 200
                         and response.json()["build"]["serverSha256"]
@@ -479,6 +520,7 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError("Console startup/version handshake failed")
+        console_ready = True
         args.output.parent.mkdir(parents=True, exist_ok=True)
         public = {
             "url": urls["console"],
@@ -532,7 +574,7 @@ def main():
             time.sleep(0.2)
     finally:
         # Close the local UI first, then allow accepted synthetic jobs to finish.
-        if children and pg_started:
+        if console_ready and children and pg_started:
             if len(children) == 5 and children[-1].poll() is None:
                 children[-1].terminate()
                 children[-1].wait(timeout=30)
@@ -540,15 +582,9 @@ def main():
                 raise RuntimeError(
                     "Active/unknown jobs preserved; refusing forced shutdown. Inspect owned fixture logs before another launch."
                 )
-        for process in reversed(children):
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    raise RuntimeError(
-                        "Graceful shutdown incomplete; processes/state retained"
-                    ) from None
+        # No Console request was admitted before startup completed. A failed
+        # readiness probe must not prevent cleanup of this launcher's children.
+        stop_children(children)
         if pg_started:
             run(
                 [

@@ -43,13 +43,13 @@ async def test_recommend_redisplay_recall_has_no_research_or_boilerplate():
         tool_events('list_gifts', {'product_ids':['11'], 'format':'brief'}),
         tool_events('recall_gift', {'position':1})])
     cards = await run(h, s, '양말 하나 추천해줘', 'cards')
-    assert [(k,v['delta']) for k,v in cards if k=='text'] == [('text','')]
+    assert [(k,v['delta']) for k,v in cards if k=='text'] == []
     names = await run(h, s, '방금 그 상품 이름만', 'names')
     name_text = next(v['delta'] for k,v in names if k=='text')
     assert name_text == '1. 면 혼방 양말 상품 11'
     gallery = await run(h, s, '사진도 보여줘', 'gallery')
     assert [p['product_id'] for k,v in gallery if k=='catalog' for p in v['products']] == ['11']
-    assert [v['delta'] for k,v in gallery if k=='text'] == ['']
+    assert [v['delta'] for k,v in gallery if k=='text'] == []
     recall = await run(h, s, '첫 번째 얼마야?', 'recall')
     assert any('5,500원' in v['delta'] for k,v in recall if k=='text')
     assert len(search.calls) == 1 and len(provider.calls) == 5

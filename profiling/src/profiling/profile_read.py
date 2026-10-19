@@ -57,7 +57,11 @@ def read_profile(engine, request):
 
 @router.post("/internal/v1/profiles/read")
 async def profile_read(body: ProfileReadRequest, request: Request, response: Response):
-    token = get_settings().SERVICE_TOKEN
+    provider = getattr(request.app.state, "be_token_provider", None)
+    try:
+        token = (await anyio.to_thread.run_sync(provider)).value if provider else get_settings().SERVICE_TOKEN
+    except ValueError:
+        raise HTTPException(503, "SERVICE_TOKEN_UNAVAILABLE") from None
     if not token or not secrets.compare_digest(request.headers.get("authorization", "").encode(), ("Bearer " + token).encode()):
         raise HTTPException(401, "UNAUTHORIZED")
     response.headers["Cache-Control"] = "no-store"

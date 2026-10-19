@@ -16,6 +16,8 @@ os.environ.update(
     OPENROUTER_API_KEY="test-only-not-a-real-key",
     SEARCH_TOKEN="test-search-token",
     STORE_TOKEN="test-store-token",
+    BUDGET_ACCOUNT="synthetic-budget",
+    BUDGET_EXPECTED_LIMIT_USD="5",
 )
 
 

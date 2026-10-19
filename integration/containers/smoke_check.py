@@ -13,14 +13,23 @@ def main():
     auth = {"Authorization": "Bearer " + token}
     if not token.startswith("synthetic-"):
         raise ValueError("Smoke client refuses real credentials")
+    origin = "http://console:18800"
+    console_headers = {"Host": "127.0.0.1:18811", "Origin": "http://127.0.0.1:18811"}
     with httpx.Client(trust_env=False, timeout=10) as http:
         for _ in range(100):
             try:
-                if http.get("http://127.0.0.1:18800/api/snapshot").status_code == 200:
+                if http.get(origin + "/healthz", headers=console_headers).status_code == 200:
                     break
             except httpx.HTTPError:
                 pass
             time.sleep(0.1)
+        else:
+            raise RuntimeError("Synthetic Console did not become ready")
+        password = Path("/run/fixture/console_admin_password").read_text().strip()
+        assert password.startswith("synthetic-admin-")
+        login = http.post(origin + "/api/admin/login", json={"password": password}, headers=console_headers)
+        assert login.status_code == 200
+        assert http.get(origin + "/api/snapshot", headers=console_headers).status_code == 200
         assert http.get("http://127.0.0.1:8001/readyz").json()["ready"]
         assert http.get("http://127.0.0.1:8000/readyz").status_code == 200
         body = {
@@ -99,7 +108,7 @@ def main():
         count = http.get("http://127.0.0.1:18942/fixture/count").json()
         assert count["synthetic"] and count["providerReservations"] == 1
         assert (
-            http.get("http://127.0.0.1:18800/api/snapshot").json()["services"][
+            http.get(origin + "/api/snapshot", headers=console_headers).json()["services"][
                 "profiling"
             ]["status"]
             == "ready"

@@ -122,6 +122,7 @@ class BudgetedExtractor(UpstreamExtractor):
         timeout_s=120,
         seed=42,
         transport=None,
+        credential_source=None,
     ):
         if not official(base_url) or model != "openai/gpt-6-luna":
             raise ValueError("Only the pinned existing provider/model is supported")
@@ -133,6 +134,7 @@ class BudgetedExtractor(UpstreamExtractor):
             timeout_s=timeout_s,
             seed=seed,
             transport=self.guard_transport,
+            credential_source=credential_source,
         )
 
     def bind_generation(self, check):
@@ -172,7 +174,7 @@ class PreflightTransport(httpx.BaseTransport):
 class ProviderLimitedExtractor(UpstreamExtractor):
     """Any configured model; spend is capped by the provider key's own limit."""
 
-    def __init__(self, base_url, api_key, model, *, timeout_s=120, seed=42, transport=None):
+    def __init__(self, base_url, api_key, model, *, timeout_s=120, seed=42, transport=None, credential_source=None):
         if not official(base_url) or not str(model or "").strip():
             raise ValueError("Official provider and an explicit model are required")
         self.guard_transport = PreflightTransport(transport)
@@ -183,6 +185,7 @@ class ProviderLimitedExtractor(UpstreamExtractor):
             timeout_s=timeout_s,
             seed=seed,
             transport=self.guard_transport,
+            credential_source=credential_source,
         )
 
     def bind_generation(self, check):

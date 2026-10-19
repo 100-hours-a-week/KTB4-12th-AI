@@ -96,11 +96,22 @@ class OpenRouterTagExtractor:
     """
 
     def __init__(self, base_url: str, api_key: str, model: str, *, timeout_s: float = 120.0, seed: int = 42,
-                 transport: httpx.BaseTransport | None = None) -> None:
+                 transport: httpx.BaseTransport | None = None, credential_source=None) -> None:
         self.model = model
         self._seed = seed
+        class CredentialAuth(httpx.Auth):
+            def auth_flow(self, request):
+                try:
+                    snapshot = credential_source.snapshot()
+                except ValueError:
+                    raise TagExtractError("credential_unavailable", "Profiler key is unavailable") from None
+                request.headers["Authorization"] = "Bearer " + snapshot.value
+                yield request
+        self.credential_source = credential_source
         self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_s, transport=transport,
-                                    headers={"Authorization": f"Bearer {api_key}", "X-Title": "ktb4-profiling-tag-bench"})
+                                    trust_env=False, follow_redirects=False,
+                                    auth=CredentialAuth() if credential_source else None,
+                                    headers={"X-Title": "ktb4-profiling-tag-bench", **({} if credential_source else {"Authorization": f"Bearer {api_key}"})})
 
     def __repr__(self) -> str:
         return f"OpenRouterTagExtractor(model={self.model!r})"

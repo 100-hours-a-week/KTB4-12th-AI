@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # 1) 상수 · 타입 별칭 — 클래스 필드가 아님. 응답 본문에 들어가는 값의 "허용 범위"를 정의한다.
@@ -166,7 +166,7 @@ class ProfileCallbackAccepted(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-## 상품 레코드 — data.products[] 한 건. description만 null 허용.
+## 상품 레코드 — BE 관측 필드 검증을 유지하며, Search snapshot context에서만 미확인 관측값을 받는다.
 ## 모르는 필드는 무시(extra="ignore") — Backend가 필드를 더 보내도 상품이 버려지지 않게.
 class ProductRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -190,11 +190,12 @@ class ProductRecord(BaseModel):
         default="unknown", validation_alias=AliasChoices("availability", "available"),
         description="재고 상태 3값(검색기와 같은 형). 7.9는 boolean available로 보내므로 true→available · false→unavailable로 받고, "
                     "필드가 없거나 null이면 unknown(=재고 정보가 없는 상품). unknown을 available/unavailable로 추정하지 않는다")
-    updatedAt: datetime = Field(description="상품·카테고리 updated_at 중 늦은 값 (UTC ISO 8601)")
+    updatedAt: datetime | None = Field(description="상품·카테고리 updated_at 중 늦은 값 (UTC ISO 8601). 검증된 Search 계약의 명시적 null은 미관측")
     ## v1이후 삭제 예정
-    viewCount: int = Field(default=0, ge=0, validation_alias=AliasChoices("viewCount", "views", "view_count"),
+    viewCount: int | None = Field(default=0, ge=0, validation_alias=AliasChoices("viewCount", "views", "view_count"),
                            description="조회수 — v1 추천 풀 정렬 기준(내림차순). Backend가 초기에는 임의 값을 넣어 보냄(09-22 합의). "
-                                       "Backend 열 이름이 views라 viewCount·views·view_count 어느 이름으로 와도 받는다. 없으면 0")
+                                       "Backend 열 이름이 views라 viewCount·views·view_count 어느 이름으로 와도 받는다. 없으면 0. "
+                                       "검증된 Search snapshot/export의 명시적 null은 관측값 없음이며 인기 점수에 쓰지 않는다")
     tags: frozenset[tuple[str, str]] | None = Field(
         default=None, exclude=True,
         description="상품 축 태그 (축, 대표 이름) 집합 — DB 카탈로그가 판(tags_rule · tags_sha256)이 코드와 같을 때만 채운다(0011). "
@@ -207,6 +208,20 @@ class ProductRecord(BaseModel):
         if isinstance(v, bool):
             return "available" if v else "unavailable"
         return "unknown" if v is None else v
+
+    @model_validator(mode="after")
+    def _source_signals(self, info: ValidationInfo):
+        # Only the bound Search contract can allow unknown ranking metadata.
+        # Direct Backend/file validation retains its existing required fields.
+        source = info.context.get("catalog_source") if isinstance(info.context, dict) else None
+        if source in {"catalog-snapshot", "backend-export"} and not {"updatedAt", "viewCount"} <= self.model_fields_set:
+            raise ValueError("Search observation fields must be explicit")
+        if source == "catalog-snapshot":
+            if self.updatedAt is not None or self.viewCount is not None or self.availability != "unknown":
+                raise ValueError("Snapshot observation metadata must remain unknown")
+        elif source != "backend-export" and (self.updatedAt is None or self.viewCount is None):
+            raise ValueError("Observed catalog metadata required")
+        return self
 
 
 PRODUCT_FIELDS = frozenset(ProductRecord.model_fields) - {"tags"}                        # 계약 필드 이름 (CLI 보고용) — tags 는 DB 전용

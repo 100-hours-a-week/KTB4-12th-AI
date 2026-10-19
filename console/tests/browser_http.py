@@ -3,12 +3,15 @@
 import argparse
 import asyncio
 import json
+import getpass
+import re
 from pathlib import Path
 
 from playwright.async_api import async_playwright, expect
 
 
 async def main(args):
+    password = getattr(args, 'password', None) or getpass.getpass('Console administrator password: ')
     errors = []
     outside = []
     async with async_playwright() as p:
@@ -30,6 +33,10 @@ async def main(args):
         page = await context.new_page()
         page.on("pageerror", lambda e: errors.append(str(e)))
         await page.goto(args.url)
+        await page.fill('#admin-password', password)
+        await page.click('#login-submit')
+        await expect(page.locator('#mode')).not_to_have_text('—')
+        await page.locator('[data-page="chat"]').click()
         await page.locator("#send-chat").click()
         await expect(page.locator("#chat-status")).to_have_text("COMPLETED")
         await page.locator("#retry-chat").click()
@@ -61,7 +68,11 @@ async def main(args):
         assert "시작 +" in text and "소요 " in text
         if args.live:
             assert "AI 200 → 201 → 202" in text
-            assert "AI 200 → 200 → 200" in text
+            retry_traces = await page.evaluate("""() => Array.from(document.querySelectorAll('.httprow'))
+                .filter(row => row.querySelector('.httpmethod')?.textContent === 'POST'
+                    && row.querySelector('.httppath')?.textContent === '/api/chat')
+                .map(row => JSON.parse(row.querySelector('pre').textContent).upstream.exchanges)""")
+            assert len(retry_traces[1]) == 1 and retry_traces[1][0]["method"] == "GET"
             assert "upstream 미호출" in text
         # Controlled relay fixtures: no external/paid requests; actual transport logic is covered by Python MockTransport tests.
         mode = 429
@@ -135,7 +146,7 @@ async def main(args):
             await page.locator('[data-page="chat"]').click()
             await page.locator("#new-chat").click()
             await page.locator("#send-chat").click()
-            await expect(page.locator("#chat-status")).to_have_text("접수 오류")
+            await expect(page.locator("#chat-status")).to_have_text(re.compile(r"^접수 확인 실패"))
         await page.locator("#reveal").check()
         await page.locator('[data-page="network"]').click()
         await page.locator("#http-polls").uncheck()
@@ -146,11 +157,13 @@ async def main(args):
         assert "Retry-After 2" in text
         assert "PRIVATE_" not in text and "fake-secret" not in text
         await page.locator("#http-errors").check()
+        # Two uncertain sends verify storage; their missing turns remain folded.
         assert await page.locator(".httprow").count() == 4
+        assert await page.locator(".httppoll").count() == 2
         await expect(page.locator("#toast")).to_be_hidden()
         await page.screenshot(path=str(args.output.with_suffix(".png")), full_page=True)
         await page.locator("#http-errors").uncheck()
-        assert int(await page.locator("#http-count").inner_text()) == before + 4
+        assert int(await page.locator("#http-count").inner_text()) == before + 6
         assert not errors and not outside
         await browser.close()
     result = {
@@ -171,7 +184,7 @@ async def main(args):
         "sourceMode": "free live service plus browser failure fixtures"
         if args.live
         else "built-in demo plus browser failure fixtures",
-        "recordCount": before + 4,
+        "recordCount": before + 6,
     }
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))

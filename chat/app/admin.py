@@ -7,7 +7,7 @@ from fastapi import APIRouter,Depends,Request,Response,Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel,Field,UUID4
 from app.errors import APIError
-from app.review_models import ReportReview
+from app.review_models import ReportReview,TurnReview
 from app.release import revision as app_revision
 from app.security import SIGNER,SECURE,admin_session,admin_access_version,same_origin,throttle,valid_token
 router=APIRouter(include_in_schema=False)
@@ -34,6 +34,9 @@ async def conversations(request:Request,auth:Admin,limit:Annotated[int,Query(ge=
 async def conversation(cid:UUID4,request:Request,auth:Admin,after:Annotated[int,Query(ge=0)]=0,limit:Annotated[int,Query(ge=1,le=50)]=20,focus:Annotated[UUID4|None,Query(alias='focusTurnId')]=None):
  if focus and after:raise APIError(400,'의견 위치 이동과 다음 페이지 조회는 함께 사용할 수 없습니다.')
  return await request.app.state.store.call('admin_conversation',cid=str(cid),after=after,limit=limit,focus_tid=str(focus) if focus else None)
+@router.put('/admin/api/conversations/{cid}/turns/{tid}/reviews/{review_id}')
+async def turn_review(cid:UUID4,tid:UUID4,review_id:UUID4,body:TurnReview,request:Request,auth:Admin):
+ return await request.app.state.store.call('admin_turn_review',cid=str(cid),tid=str(tid),review_id=str(review_id),note=body.note)
 @router.get('/admin/api/feedback')
 async def feedback(request:Request,auth:Admin):return await request.app.state.store.call('admin')
 @router.put('/admin/api/feedback/{fid}')

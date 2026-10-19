@@ -120,6 +120,7 @@ def run_models(database, export, contract, search_url, be, callbacks, token, out
                     'PROFILING_TAG_SPEC': 'tag3disliked', 'PROFILING_TAGGER_MODEL': MODEL,
                     'PROFILING_TAGGER_REQUIRED': 'true', 'PROFILING_EMBEDDING_REQUIRED': 'true',
                     'PROFILING_OPENROUTER_API_KEY': key, 'PROFILING_BUDGET_URL': budget_url, 'STORE_TOKEN': store_token,
+                    'AI_BUDGET_MODE': 'guarded',
                     'PROFILING_CATALOG_SOURCE': 'search_http', 'PROFILING_SEARCH_BASE_URL': search_url,
                     'PROFILING_SEARCH_TOKEN': token, 'PROFILING_STRICT_STARTUP': 'true',
                     'PROFILING_CALLBACK_MAX_ATTEMPTS': '1', 'INTEGRATION_SYNTHETIC_ONLY': '1',
@@ -158,6 +159,7 @@ def run_models(database, export, contract, search_url, be, callbacks, token, out
                 'PYTHONPATH': os.pathsep.join(map(str, [ROOT/'chat', ROOT])), 'STORE_MODE': 'postgres',
                 'DATABASE_URL': database['chat']+'?options=-csearch_path%3Dai_chat,public',
                 'CHAT_RUNTIME_MODE': 'live', 'CHAT_MODEL': MODEL, 'CHAT_HARNESS_VARIANT': 'stable-v4.12',
+                'AI_BUDGET_MODE': 'guarded',
                 'AI_SERVICE_TOKEN': token, 'SESSION_SECRET': token, 'QA_ADMIN_PASSWORD': token,
                 'DEMO_ACCESS_TOKEN': token, 'COOKIE_SECURE': 'false', 'OPENROUTER_API_KEY': key,
                 'SEARCH_URL': search_url, 'SEARCH_TOKEN': token, 'BUDGET_STORE_URL': budget_url, 'STORE_TOKEN': store_token})

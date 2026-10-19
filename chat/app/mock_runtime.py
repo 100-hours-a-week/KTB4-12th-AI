@@ -11,6 +11,8 @@ from pathlib import Path
 from app.errors import APIError
 from app.runtime import Runtime
 
+_PROMPT_VERSION=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+
 SCENARIOS = [
     {'key':'cards','label':'답변 + 카드','message':'/mock cards'},
     {'key':'text','label':'텍스트만','message':'/mock text'},
@@ -71,8 +73,7 @@ class MockRuntime(Runtime):
         return await super().accept(cid,tid,message,recipient_context=recipient_context)
 
     def trace_config(self):
-        revision=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
-        return {'promptVersion':revision,'settingsVersion':'mock-v1',
+        return {'promptVersion':_PROMPT_VERSION,'settingsVersion':'mock-v1',
                 'settings':{'mode':'mock','model':self.model,'profileEnabled':False,
                             'llmEnabled':False,'searchEnabled':False},'mode':'mock'}
 

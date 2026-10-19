@@ -60,7 +60,7 @@ data: {&quot;turnId&quot;:&quot;11111111-1111-4111-8111-111111111111&quot;,&quot
 <tr><td>SSE 연결</td><td>전체 <code>CHAT_MAX_SSE_CONNECTIONS=32</code>, 턴당 <code>CHAT_MAX_SSE_PER_TURN=4</code></td><td>연결 시작 전 503. 기존 UUID·커서로 복구.</td></tr>
 <tr><td>자원 보호 재시도</td><td><code>CHAT_RESOURCE_RETRY_AFTER_SECONDS=2</code></td><td>Retry-After 이후 횟수를 제한해 재시도. 성공 시각 보장 아님.</td></tr>
 </tbody></table></div>
-<p>미접수 작업 8은 기존 생성 4건과 별도로 접수 단계의 여유를 두면서 대기를 제한하는 값입니다. 턴당 SSE 4는 프록시·탭·재연결 중첩을 허용하고 전체 32는 저장소 조회 연결의 상한을 둡니다. 양의 정수 설정을 사용합니다. 생성/일일 한도는 Store 프로세스, 접수/SSE 보호는 단일 활성 Runtime에 적용됩니다. HF bridge에서는 Store 설정이 AI 소유 NUC worker에 있으므로 HF 변수만으로 4/200 변경을 가정하지 않습니다.</p>
+<p>표의 값은 소스 기본값이며 실제 배포 설정을 확인합니다. 생성·24시간 한도는 Store 프로세스, 접수·SSE 제한은 단일 활성 Runtime에 적용됩니다. 통합 실행은 Chat 프로세스의 Store가 PostgreSQL에 연결합니다. 원격 Store를 사용하는 별도 배포에서는 해당 Store 프로세스에 생성·24시간 한도를 설정합니다. 설정값은 양의 정수여야 하며 worker 수를 늘려 용량이 비례한다고 가정하지 않습니다.</p>
 <p>이미 소유한 같은 UUID/body의 요청은 원래 접수를 공유합니다. 저장된 종료 턴의 PUT도 접수 보호가 가득 차면 먼저 503을 받을 수 있으므로 GET 상태를 확인하고 UUID/body를 유지합니다. SSE 종료·오류 때 슬롯을 회수하고 구독자/실행 작업이 없는 알림 자원을 정리합니다. SSE 종료가 생성 취소나 비용 환급을 뜻하지 않습니다.</p>
 <p>기존 오류 JSON과 429/503 코드는 유지합니다. 모든 429에 Retry-After가 있다고 가정하지 않습니다. 202 이후 실패·연결 중단은 저장 상태와 커서로 복구합니다. 사용자별 업무 한도·공급자 요청 속도·확장 오류 사유는 별도 합의 항목입니다. 기존 USD 5는 실험 비용 원장이며 사용자 크레딧 정책이 아닙니다.</p>
 <p>적용 범위와 재시도·비용 설명은 <a href="/guide/integration.md">Markdown 명세의 요청 제한 절</a>에서 확인합니다.</p>

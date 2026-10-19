@@ -3,7 +3,8 @@ import copy,hashlib,json,time
 from dataclasses import replace
 from types import SimpleNamespace
 from contextlib import aclosing
-from app.runtime import Runtime
+from pathlib import Path
+from app.runtime import Runtime, _PROMPT_VERSION as _RUNTIME_PROMPT_VERSION
 from app.agent import AgentRuntime
 from app.errors import APIError
 from app.gift_core.contracts import Filters,Profile
@@ -14,6 +15,10 @@ from app.diagnostics import operation,event
 from app.public_answer import PUBLIC_ANSWER_VERSION,previous_public_products
 from app.conversation_memory import history_messages,last_completed_turn
 from app.model_trace import TRACE
+from app.integrated_harness import IntegratedHarness, protocol_manifest
+
+_ROOT=Path(__file__).parent
+_PROMPT_VERSION=hashlib.sha256(_RUNTIME_PROMPT_VERSION.encode()+b''.join(p.read_bytes() for p in [_ROOT/'low_latency.py',_ROOT/'gift_adapter.py',_ROOT/'model_trace.py',*sorted((_ROOT/'gift_core').glob('*.py'))])).hexdigest()[:16]
 
 class ProviderAdapter:
  mode='openrouter'
@@ -70,7 +75,6 @@ class ProviderAdapter:
 
 class LowLatencyRuntime(AgentRuntime):
  def harness_class(self):
-  from app.integrated_harness import IntegratedHarness
   return IntegratedHarness
  agent_name='gift-tool-loop-v1'
  @property
@@ -81,10 +85,7 @@ class LowLatencyRuntime(AgentRuntime):
   return config
  def trace_config(self):
   result=super().trace_config();
-  from pathlib import Path
-  root=Path(__file__).parent
-  paths=[root/'low_latency.py',root/'gift_adapter.py',root/'model_trace.py',*sorted((root/'gift_core').glob('*.py'))]
-  result['promptVersion']=hashlib.sha256(result['promptVersion'].encode()+b''.join(p.read_bytes() for p in paths)).hexdigest()[:16]
+  result['promptVersion']=_PROMPT_VERSION
   result['settings']['agent']=self.agent_name;result['settingsVersion']=hashlib.sha256(json.dumps(result['settings'],sort_keys=True).encode()).hexdigest()[:16]
   return result
  async def generate(self,cid,tid,receipt):
@@ -95,25 +96,39 @@ class LowLatencyRuntime(AgentRuntime):
  async def _generate(self,cid,tid,receipt):
   conversation=await self.store.call('read',cid=cid)
   snapshot=await self.recipient_profile(cid,tid);receipt['recipientProfile']=snapshot
+  # Missing/expired/revoked consent disables private enrichment, not ordinary
+  # message-only BE chat. Other lookup failures must remain visible failures.
+  if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='UNAVAILABLE' and snapshot.get('accessStatus')!='NOT_AUTHORIZED':
+   raise APIError(503,'수신자 취향의 조회 권한 또는 상태를 확인할 수 없습니다.')
   previous=last_completed_turn(conversation['turns'],tid);old=await self.store.call('context',cid=cid,tid=previous['turnId']) if previous else {}
   prepared=self.admissions.get(tid,{}).get('prepared_context')
   # Metadata failure must not prevent a one-call ordinary conversation.
   meta,meta_error,_=await self.planning_metadata()
   if meta is None:meta={'snapshotId':'unavailable','categories':[]}
   catalog=CatalogAdapter(self.search,meta,receipt)
-  data=snapshot.get('data') or {};raw_preferences='';disliked=[]
-  if snapshot.get('source')=='BACKEND_REQUEST' and snapshot.get('status')=='AVAILABLE':
-   raw_preferences=data.get('giftPreference') or '';disliked=[str(c['categoryId']) for c in data.get('dislikedCategories',[])]
+  data=snapshot.get('data') or {};raw_preferences='';disliked=[];disliked_tags=[]
+  if snapshot.get('source') in {'BACKEND_REQUEST','AI_PROFILE_STORE'} and snapshot.get('status')=='AVAILABLE':
+   raw_preferences=(data.get('giftPreference') or '') if snapshot.get('source')=='BACKEND_REQUEST' else ''
+   disliked=[str(c['categoryId']) for c in data.get('dislikedCategories',[])]
+   if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('analysisCurrent'):
+    from profiling.vocab import AXES,query_text
+    valid=lambda t:isinstance(t,dict) and t.get('axis') in AXES and isinstance(t.get('tag'),str) and bool(t['tag'].strip())
+    likes=[q for t in data.get('preferredTags',[]) if valid(t) and (q:=query_text(t['axis'],t['tag']))]
+    disliked_tags=[{'axis':t['axis'],'tag':t['tag']} for t in data.get('dislikedTags',[]) if valid(t)]
+    # Only current analysis separates likes from dislikes. Never turn stored
+    # raw prose into a positive query while that analysis is pending or failed.
+    raw_preferences=' '.join(likes)
   elif snapshot.get('status')=='COMPLETED':
    raw_preferences=' '.join(data.get('preferredTags',[]));tags=set(data.get('dislikedTags',[]))
    disliked=[c['category_id'] for c in catalog.categories if c['category'] in tags or c['category_group'] in tags]
+  disliked=list(dict.fromkeys(disliked))
   raw_preferences=raw_preferences[:500]
   binding=await self.store.call('binding',cid=cid)
   identity=hashlib.sha256(str(binding['recipientUserId']).encode()).hexdigest()
   prior_state=old.get('lowLatencyState',{}) if old.get('agent') in {'gift-tool-loop-v1',self.agent_name} else {}
   same=prior_state.get('recipientIdentity')==identity
   prior_filters=Filters.model_validate(prior_state.get('publicFilters',{})) if same else Filters()
-  profile=Profile(recipient_id=str(data.get('recipientUserId','bound-recipient')),preferences=raw_preferences,disliked_category_ids=disliked)
+  profile=Profile(recipient_id=str(data.get('recipientUserId','bound-recipient')),preferences=raw_preferences,disliked_category_ids=disliked,disliked_tags=disliked_tags)
   if prepared:
    if meta_error:raise meta_error
    if prepared['snapshotId']!=catalog.snapshot:raise APIError(409,'준비된 후보의 상품 snapshot이 변경됐습니다. 새 질문 ID로 후보를 다시 준비해 주세요.')
@@ -158,7 +173,6 @@ class LowLatencyRuntime(AgentRuntime):
   # Runtime owns the existing 180s turn deadline; HTTP retains its 75s idle limit.
   harness=self.harness_class()(catalog,context,ProviderAdapter(self,receipt),turn_timeout=None)
   receipt['harnessVariant']=getattr(harness,'variant','baseline')
-  from app.integrated_harness import protocol_manifest
   receipt['harnessProtocol']=protocol_manifest()
   message=next(t['message'] for t in conversation['turns'] if t['turnId']==tid)
   request=SimpleNamespace(message=message,intent_hint='gift' if prepared else 'auto',model=self.model_config.model)

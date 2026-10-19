@@ -3,6 +3,7 @@ import asyncio
 import copy
 import json
 import os
+import re
 import platform
 import sys
 import time
@@ -20,12 +21,19 @@ def clean(value):
     """Remove credentials, including ones accidentally echoed in provider output."""
     secrets = [v for k, v in os.environ.items() if len(v) >= 8 and
                any(word in k.upper() for word in ('TOKEN', 'PASSWORD', 'SECRET', 'API_KEY'))]
+    try:
+        from integration.provider_key import ACTIVE_KEY
+        current = ACTIVE_KEY.get()
+        if current is not None: secrets.append(current.value)
+    except ImportError:
+        pass  # Standalone Chat images use their existing environment credential.
     def visit(v):
         if isinstance(v, dict):
-            return {k: '[REDACTED]' if k.lower() in ('authorization', 'api_key', 'apikey', 'password', 'secret', 'access_token') else visit(x) for k, x in v.items()}
+            return {k: '[REDACTED]' if k.lower() in ('authorization', 'api_key', 'apikey', 'password', 'secret', 'access_token', 'passwordhash', 'password_hash', 'csrf', 'cookie', 'set-cookie', 'session') else visit(x) for k, x in v.items()}
         if isinstance(v, (list, tuple)): return [visit(x) for x in v]
         if isinstance(v, str):
             for secret in secrets: v = v.replace(secret, '[REDACTED]')
+            v = re.sub(r'\bsk-or-v1-[A-Za-z0-9_-]{20,200}', '[REDACTED]', v)
         return v
     return visit(copy.deepcopy(value))
 

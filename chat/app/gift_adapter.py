@@ -1,5 +1,6 @@
 """Typed HF search adapter. Raw recipient data never enters responder messages."""
 import asyncio,hashlib,json
+from types import SimpleNamespace
 from app.gift_core.contracts import Filters,ResolvedFilters,Profile
 from app.gift_core.harness import Harness
 from app.search_models import Filters as SearchFilters,SearchRequest
@@ -15,6 +16,7 @@ def view(raw):
          'price':facts.get('price'),'category':facts.get('category') or '',
          'category_id':str(category),'description':facts.get('description') or '',
          'product_type':raw.get('productType'),'sold_out':availability in ('UNAVAILABLE','unavailable'),
+         'product_kind':raw.get('productKind'),'category_group':raw.get('categoryGroup'),
          'category_status':'ASSIGNED','image':facts.get('image'),'availability':availability,
          'description_origin':raw.get('descriptionOrigin')}
 
@@ -27,6 +29,7 @@ def hf_facts(rows):
 class CatalogAdapter:
  def __init__(self,search,meta,receipt):
   self.search_api=search;self.snapshot=meta['snapshotId'];self.products={};self.receipt=receipt
+  self.private_disliked_tags=[]
   self.brand_names=[b['name'] for b in meta.get('brands',[]) if isinstance(b,dict) and isinstance(b.get('name'),str)]
   self.categories=[{'category_id':str(c['id']),'category':c['name'],'category_group':c['group'],'parent_id':str(c['parentId'])} for c in meta['categories']]
   self.parents={};self.category_ids=set()
@@ -41,12 +44,22 @@ class CatalogAdapter:
   if f.budget_action=='preserve':f.min_price,f.max_price=(prior.min_price,prior.max_price) if f.recipient_scope==prior.recipient_scope else (None,None)
   elif f.budget_action=='clear':f.min_price,f.max_price=None,None
   self.public_filters=f.model_copy(deep=True)
+  self.private_disliked_tags=list(profile.disliked_tags) if f.recipient_scope=='current' else []
   if f.recipient_scope=='current' and set(profile.disliked_category_ids)-self.category_ids:raise ValueError('Unknown recipient category mapping')
   f.category_ids=self.expand(f.category_ids);f.exclude_category_ids=self.expand(f.exclude_category_ids)
   f.exclude_category_ids=self.expand(list(dict.fromkeys(f.exclude_category_ids+(profile.disliked_category_ids if f.recipient_scope=='current' else []))))
   return ResolvedFilters.model_validate(f.model_dump())
  def allowed(self,p,f):
-  return ((not f.brands or p['brand'] in f.brands) and p['brand'] not in f.exclude_brands and not p['sold_out'] and type(p['price']) is int and p['price']>=0 and (f.min_price is None or p['price']>=f.min_price) and (f.max_price is None or p['price']<=f.max_price) and (not f.category_ids or p['category_id'] in f.category_ids) and p['category_id'] not in f.exclude_category_ids and p['product_id'] not in f.exclude_product_ids and (f.product_type is None or p['product_type']==f.product_type))
+  return (self.allowed_private(p,f) and (not f.brands or p['brand'] in f.brands) and p['brand'] not in f.exclude_brands and not p['sold_out'] and type(p['price']) is int and p['price']>=0 and (f.min_price is None or p['price']>=f.min_price) and (f.max_price is None or p['price']<=f.max_price) and (not f.category_ids or p['category_id'] in f.category_ids) and p['category_id'] not in f.exclude_category_ids and p['product_id'] not in f.exclude_product_ids and (f.product_type is None or p['product_type']==f.product_type))
+ def allowed_private(self,p,f):
+  if f.recipient_scope!='current' or not self.private_disliked_tags:return True
+  from profiling.vocab import matcher,set_catalog_brands
+  # Use Profiler's existing axis/alias policy. Keep the catalog selection and
+  # matching synchronous so interleaved snapshots cannot share brand context.
+  set_catalog_brands(self.brand_names)
+  product=SimpleNamespace(name=p['name'],brand=p['brand'],productKind=p.get('product_kind'),
+   categoryName=p['category'],parentCategoryName=p.get('category_group'))
+  return not any(matcher(t.axis,t.tag)(product) for t in self.private_disliked_tags)
  async def hydrate(self,ids):
   if not ids:return [],[]
   numeric=[int(x) for x in ids]
@@ -64,6 +77,8 @@ class CatalogAdapter:
   if result.get('snapshotId')!=self.snapshot:raise ValueError('Search snapshot changed')
   rows=[view(p) for p in result['hits']]
   if include_ids and any(p['product_id'] not in include_ids for p in rows):raise ValueError('Prepared search scope invariant')
+  # Search enforces the wire filters; private derived terms remain local.
+  rows=[p for p in rows if self.allowed_private(p,f)]
   if any(not self.allowed(p,f) for p in rows):raise ValueError('Search filter invariant')
   self.products.update({p['product_id']:p for p in rows});return rows
 
@@ -74,11 +89,11 @@ class ContextAdapter:
   if profile.candidate_ids and not expand:
    rows,unknown=await self.catalog.hydrate(profile.candidate_ids)
    if unknown:raise ValueError('Unknown prepared product ID')
-   rows=rows if raw_pool else [p for p in rows if self.catalog.allowed(p,filters)];source='saved_pool'
+   rows=[p for p in rows if self.catalog.allowed_private(p,filters)] if raw_pool else [p for p in rows if self.catalog.allowed(p,filters)];source='saved_pool'
   else:
    if profile.candidate_ids and profile.candidate_scope=='only' and expand:raise ValueError('prepared_scope_forbids_expansion')
    # Private profile text is an independent retrieval input, never responder input.
-   effective=list(dict.fromkeys(([profile.preferences.strip()] if filters.recipient_scope=='current' and profile.preferences.strip() else [])+list(queries)))[:2]
+   effective=list(dict.fromkeys(([profile.preferences.strip()[:500]] if filters.recipient_scope=='current' and profile.preferences.strip() else [])+list(queries)))
    if not effective:return {'products':[],'source':'no_pool','snapshot':self.catalog.snapshot},False
    self.catalog.receipt['searchBranches']=len(effective)
    branches=await asyncio.gather(*(self.catalog.search(q,filters) for q in effective));rows=[];seen=set()

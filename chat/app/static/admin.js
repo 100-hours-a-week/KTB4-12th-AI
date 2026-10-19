@@ -2,6 +2,43 @@ const $ = s => document.querySelector(s), el = (tag, text, cls) => { const n = d
 let next = null, current = null, detailPage = null, detailStart = 0, selectedFocus = null, allTurns = [], selectionVersion = 0, listVersion = 0;
 const labels = {COMPLETED: '완료', FAILED: '실패', CANCELLED: '취소', PROCESSING: '생성 중'};
 const when = s => new Date(s).toLocaleString('ko-KR');
+function traceMessage(context) {
+  const marker = context?.tracePersistence;
+  if (marker === undefined || marker === null) return '추적 저장 상태 미기록(기존 자료)';
+  const messages = {recorded: '실행 추적 저장됨', interrupted: '중단 시점의 실행 추적 저장됨', not_recorded: '실행 추적 저장 누락', pending: '실행 추적 저장 대기'};
+  return marker.version === 1 && Object.hasOwn(messages, marker.status) ? messages[marker.status] : '추적 저장 상태 확인 필요';
+}
+function reviewNote(review) {
+  const note = el('div', undefined, 'review-note');
+  note.append(el('p', when(review.created), 'meta'), el('p', review.note));
+  return note;
+}
+function reviewEditor(turn, cid) {
+  const section = el('section', undefined, 'evaluation'), notes = el('div'), form = el('form', undefined, 'review-form');
+  section.append(el('h3', '관리자 평가'), notes);
+  for (const review of turn.reviews) notes.append(reviewNote(review));
+  const label = el('label', '평가 메모'), input = el('textarea'), save = el('button', '메모 저장'), status = el('p', '', 'meta');
+  input.rows = 3; input.maxLength = 1500; input.required = true;
+  input.placeholder = '판단과 근거를 적어 주세요. 근거가 부족하면 판단 보류로 남겨 주세요.';
+  save.type = 'submit'; status.setAttribute('role', 'status'); label.append(input); form.append(label, save, status); section.append(form);
+  let pending = null, saving = false;
+  form.onsubmit = async event => {
+    event.preventDefault(); const note = input.value.trim(); if (!note || saving) return;
+    if (!pending || pending.note !== note) pending = {reviewId: crypto.randomUUID(), note};
+    saving = true; save.disabled = input.disabled = true; status.textContent = '저장하고 있습니다…'; status.className = 'meta';
+    try {
+      const result = await api(`/admin/api/conversations/${cid}/turns/${turn.turnId}/reviews/${pending.reviewId}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({note: pending.note})});
+      if (!turn.reviews.some(review => review.reviewId === result.reviewId)) {
+        const review = {reviewId: result.reviewId, note: result.note, created: result.created};
+        turn.reviews.push(review); notes.append(reviewNote(review));
+      }
+      input.value = ''; pending = null; status.textContent = '평가 메모를 저장했습니다.';
+    } catch (error) { status.textContent = error.message; status.className = 'error'; }
+    finally { saving = false; save.disabled = input.disabled = false; }
+  };
+  return section;
+}
 function clearSelection() { selectionVersion++; current = null; selectedFocus = null; allTurns = []; $('#detail').replaceChildren(); }
 async function api(path, options = {}) {
   return ChatHTTP.json(path, options, () => { listVersion++; clearSelection(); $('#items').replaceChildren(); $('#login').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true; });
@@ -69,6 +106,7 @@ function render(data) {
     const context = turn.context || {}, profile = context.recipientProfile;
     if (profile?.source === 'TEST_FIXTURE') article.append(el('p', '테스트 수신자: ' + profile.label + ' · 선호: ' + profile.data.preferredTags.join(', ') + ' · 비선호: ' + profile.data.dislikedTags.join(', '), 'meta'));
     article.append(el('p', `${context.model || '모델 기록 없음'} · ${context.elapsedMs !== undefined ? (context.elapsedMs / 1000).toFixed(2) + '초' : '시간 기록 없음'} · 의견 ${turn.feedback.length}개`, 'meta'));
+    article.append(el('p', traceMessage(context), 'meta' + (context.tracePersistence?.version === 1 && context.tracePersistence.status === 'not_recorded' ? ' failed' : '')));
     for (const feedback of turn.feedback) {
       const note = el('div', `${feedback.payload.reporterName || '익명'} · ${feedback.payload.verdict}\n${feedback.payload.note || ''}`, 'feedback'), button = el('button', feedback.reviewed ? '검토 완료 ✓' : '검토 완료로 표시');
       button.onclick = async () => {
@@ -78,6 +116,7 @@ function render(data) {
       };
       note.append(button); article.append(note);
     }
+    if (Array.isArray(turn.reviews)) article.append(reviewEditor(turn, data.conversationId));
     const details = el('details'), summary = el('summary', '검색 · 수신자 정보 · 모델 설정 · 오류 기록');
     details.append(summary, el('pre', JSON.stringify({turnId: turn.turnId, eventCount: turn.state.lastEventId, ...context}, null, 2))); article.append(details); box.append(article);
   }

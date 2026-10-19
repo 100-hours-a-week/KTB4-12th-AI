@@ -15,6 +15,26 @@ from integration.migrate_single_server import migrate, ROLES
 from integration.containers.entrypoint import prepare_encoder
 
 
+def stage_catalog(runtime, url, fixture_path):
+    """Publish the same three-product fixture for native and container launchers."""
+    from search.complete_export import digest
+    from tools.sync_postgres import sync
+    fixture = json.loads(Path(fixture_path).read_text())
+    if fixture.get('synthetic') is not True:
+        raise ValueError('Only the explicit synthetic catalog fixture is allowed')
+    categories = {'message':'synthetic','data':{'categories':[{'categoryId':1,'name':'합성 선물','children':[
+        {'categoryId':11,'name':'컵'}, {'categoryId':12,'name':'음향'}]}]}}
+    names = {'CAT-CUP':(11,'컵'), 'CAT-AUDIO':(12,'음향')}
+    export = {'message':'synthetic','data':{'generatedAt':'2026-10-17T00:00:00Z','products':[
+        {'productId':p['id'],'name':p['name'],'brand':'SYNTHETIC','description':'합성 시험 상품',
+         'categoryId':names[p['category']][0],'categoryName':names[p['category']][1],
+         'price':p['price'],'available':p['availability']!='unavailable','viewCount':p['views'],
+         'updatedAt':'2026-10-17T00:00:00Z'} for p in fixture['products']]}}
+    export['data']['snapshot']={'id':str(uuid4()),'complete':True,'productCount':3,
+                               'sha256':digest(export['data']['products'],categories)}
+    return sync(runtime, url, lambda:(export,categories), apply=True)
+
+
 def main():
     if os.environ.get("INTEGRATION_SYNTHETIC_ONLY") != "1":
         raise ValueError("Synthetic-only initialization required")
@@ -38,29 +58,22 @@ def main():
         db.execute('CREATE TABLE ai_catalog.integration_marker(id boolean PRIMARY KEY CHECK(id))')
         db.execute('INSERT INTO ai_catalog.integration_marker VALUES(true)')
         db.execute('GRANT USAGE ON SCHEMA ai_runtime,ai_catalog,ai_chat,ai_profile TO ai_console_service')
-        db.execute('GRANT SELECT ON ai_runtime.database_identity,ai_catalog.integration_marker,ai_chat.turns,ai_chat.events,ai_chat.task_budget_attempts,ai_profile.profile_runs TO ai_console_service')
+        db.execute('GRANT SELECT ON ai_runtime.database_identity,ai_catalog.integration_marker,ai_chat.turns,ai_chat.events,ai_chat.task_budget_attempts,ai_profile.profile_runs,ai_catalog.generation_products,ai_catalog.catalog_state TO ai_console_service')
     shared = Path("/shared")
     shared.mkdir(exist_ok=True)
     runtime = shared / "catalog"
     prepare_encoder(runtime, "/assets")
-    from search.complete_export import digest
-    from tools.sync_postgres import sync
-    fixture = json.loads(Path('/workspace/integration/tests/fixture.json').read_text())
-    categories = {'message':'synthetic','data':{'categories':[{'categoryId':1,'name':'합성 선물','children':[
-        {'categoryId':11,'name':'컵'}, {'categoryId':12,'name':'음향'}]}]}}
-    names = {'CAT-CUP':(11,'컵'), 'CAT-AUDIO':(12,'음향')}
-    export = {'message':'synthetic','data':{'generatedAt':'2026-10-17T00:00:00Z','products':[
-        {'productId':p['id'],'name':p['name'],'brand':'SYNTHETIC','description':'합성 시험 상품',
-         'categoryId':names[p['category']][0],'categoryName':names[p['category']][1],
-         'price':p['price'],'available':p['availability']!='unavailable','viewCount':p['views'],
-         'updatedAt':'2026-10-17T00:00:00Z'} for p in fixture['products']]}}
-    export['data']['snapshot']={'id':str(uuid4()),'complete':True,'productCount':3,
-                               'sha256':digest(export['data']['products'],categories)}
-    sync(runtime, url.replace('fixture_owner@','ai_catalog_sync@'), lambda:(export,categories), apply=True)
+    stage_catalog(runtime, url.replace('fixture_owner@','ai_catalog_sync@'),
+                  '/workspace/integration/tests/fixture.json')
     # PG now holds a pending generation. Only the serving Search activates it.
     (shared / "media").mkdir(exist_ok=True)
     for p in Path("/workspace/integration/tests/media").glob("*.svg"):
         shutil.copyfile(p, shared / "media" / p.name)
+    from console.admin_auth import password_hash
+    password = "synthetic-admin-" + uuid4().hex
+    for name, value in [("console_admin_password", password), ("console_admin.hash", password_hash(password))]:
+        (shared / name).write_text(value)
+        (shared / name).chmod(0o600)
     fake = "synthetic-container-fixture-only"
     for name in [
         "ai_service_token",

@@ -1,10 +1,17 @@
+import {adminFetch, initializeAdmin} from './admin.js';
+const adminSession=await initializeAdmin();
+const chatStorageKey='console-chat/'+Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(adminSession.csrf))),b=>b.toString(16).padStart(2,'0')).join('');
+import {initializeProviderUsage} from './usage.js';
+initializeProviderUsage();
+import {createProductCards,createProductLoader} from './products.js';
 import {renderOperations,tickOperations,acceptSnapshot} from './ops.js';
 import {SSEParser,EventLog,redact,terminal,eventPreview,elapsedSince,elapsedLabel,HTTPHistory,httpTransport,httpBody,requestErrorMessage,parseProfileJSON} from './core.js';
 /** @returns {any} */ const $=id=>document.getElementById(id);
-/** @type {any} */ const state={log:new EventLog(),selected:null,plan:null,abort:null,round:0,started:null,ended:null,sending:false,status:'준비',admitted:false,profile:null,profileBody:null,snapshot:null,page:'chat',lastProfileState:null,profileEpoch:0,chatEpoch:0,collectionFailed:null};
+/** @type {any} */ const state={log:new EventLog(),selected:null,plan:null,abort:null,round:0,started:null,ended:null,sending:false,profileSending:false,chatSendAllowed:false,profileSendAllowed:false,status:'준비',admitted:false,profile:null,profileBody:null,snapshot:null,page:'chat',lastProfileState:null,profileEpoch:0,chatEpoch:0,collectionFailed:null};
 let profileTimer=null;
 let unseen=0;const expanded=new WeakSet();
 const httpHistory=new HTTPHistory(),httpOrigins=new Map(),httpOpen=new Set();
+const loadProduct=createProductLoader(id=>api('/api/products/'+id));
 function toast(message){$('toast').textContent=message;$('toast').classList.remove('hidden');setTimeout(()=>$('toast').classList.add('hidden'),4500);}
 function beginHTTP(path,method='GET',body=null,stream=false){
   const family=path.startsWith('/api/chat')?'chat':path.startsWith('/api/profile')?'profile':null;if(!family)return null;
@@ -44,11 +51,34 @@ function renderHTTP(){
 }
 async function api(path,method='GET',body=null,options={}){
   const item=beginHTTP(path,method,body);let response=null,recorded=false;
-  try{response=await fetch(path,{method,...(options.signal?{signal:options.signal}:{}),headers:body?{'Content-Type':'application/json'}:{},...(body?{body:JSON.stringify(body)}:{})});const data=await response.json();finishHTTP(item,response,data);recorded=true;if(!response.ok)throw Object.assign(new Error(requestErrorMessage(response.status,data)),{httpStatus:response.status});return data;
+  try{response=await adminFetch(path,{method,...(options.signal?{signal:options.signal}:{}),headers:body?{'Content-Type':'application/json'}:{},...(body?{body:JSON.stringify(body)}:{})});const data=await response.json();finishHTTP(item,response,data);recorded=true;if(!response.ok)throw Object.assign(new Error(requestErrorMessage(response.status,data)),{httpStatus:response.status,conversationRestart:response.status===409&&['CONSOLE_CONVERSATION_NOT_OWNED','CONSOLE_CONVERSATION_UNCONFIRMED'].includes(data?.detail)});return data;
   }catch(e){if(!recorded){finishHTTP(item,response,null,response?'NON_JSON_RESPONSE':'CONNECTION_FAILED');if(e.name==='AbortError')throw e;throw new Error(response?'응답 JSON 형식 확인 필요':'연결 응답 없음');}throw e;}
 }
 function time(value){return value?new Date(value).toLocaleTimeString('ko-KR',{hour12:false}):'미수집';}
-function setStatus(value,reset=false){if(!reset&&terminal(state.status)&&value!==state.status)return;if(terminal(value)&&state.ended===null)state.ended=performance.now();if(terminal(value)&&state.started!==null)$('elapsed').textContent='경과 '+((state.ended-state.started)/1000).toFixed(1)+'s · 브라우저 관측';state.status=value;$('chat-status').textContent=value;$('chat-status').className='status '+(value==='FAILED'?'bad':terminal(value)?'good':'busy');$('cancel-chat').disabled=!state.plan||!state.admitted||terminal(value);}
+function chatControls(){
+  const busy=state.sending||state.restoring;
+  $('send-chat').disabled=busy||!state.chatSendAllowed||Boolean(state.plan&&(state.admitted||state.uncertain)&&!terminal(state.status));
+  $('retry-chat').disabled=busy||!state.plan||state.conversationRejected;
+  $('send-chat').textContent=state.conversationRejected?'새 대화로 다시 보내기':'요청 보내기 ↗';
+  $('new-chat').disabled=$('chat-recipient').disabled=Boolean(busy);
+  $('cancel-chat').disabled=busy||!state.plan||!state.admitted||terminal(state.status);
+}
+function saveChat(){
+  try{if(state.plan&&!state.conversationRejected)sessionStorage.setItem(chatStorageKey,JSON.stringify(state.plan));else sessionStorage.removeItem(chatStorageKey);}
+  catch{if(!state.storageWarning){state.storageWarning=true;toast('브라우저 저장을 사용할 수 없어 새로고침 후 대화 복원이 제한됩니다.');}}
+}
+function savedChat(config){
+  try{
+    for(let i=sessionStorage.length-1;i>=0;i--){const key=sessionStorage.key(i);if(key?.startsWith('console-chat/')&&key!==chatStorageKey)sessionStorage.removeItem(key);}
+    const raw=sessionStorage.getItem(chatStorageKey);if(!raw)return null;if(raw.length>12000)throw Error();const plan=JSON.parse(raw);
+    const uuid=value=>typeof value==='string'&&/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i.test(value);
+    if(Object.keys(plan).sort().join(',')!=='conversation_id,message,recipientUserId,request_id,senderUserId,turn_id'||!['conversation_id','request_id','turn_id'].every(key=>uuid(plan[key]))||typeof plan.message!=='string'||!plan.message.length||plan.message.length>3000)throw Error();
+    const choices=config.chatRecipients?.length?config.chatRecipients:[{senderUserId:config.defaultSenderUserId??7,recipientUserId:config.defaultRecipientUserId??42}];
+    if(!choices.some(p=>p.senderUserId===plan.senderUserId&&p.recipientUserId===plan.recipientUserId))throw Error();
+    return plan;
+  }catch{try{sessionStorage.removeItem(chatStorageKey);}catch{}return null;}
+}
+function setStatus(value,reset=false){if(!reset&&terminal(state.status)&&value!==state.status)return;if(terminal(value)&&state.ended===null)state.ended=performance.now();if(terminal(value)&&state.started!==null)$('elapsed').textContent='경과 '+((state.ended-state.started)/1000).toFixed(1)+'s · 브라우저 관측';state.status=value;if(terminal(value))state.uncertain=false;$('chat-status').textContent=value;$('chat-status').className='status '+(value==='FAILED'?'bad':terminal(value)?'good':'busy');chatControls();}
 function eventDetail(){const e=state.selected;if(!e)return;$('event-meta').textContent=`${e.event} · event ID ${e.id??'없음'}\n${elapsedLabel(e.elapsedMs)} 경과 · ${time(e.receivedAt)} 콘솔 수신 · 연결 ${e.round}회차`;$('event-json').textContent=JSON.stringify(['progress','answer.delta','cards','turn.finished'].includes(e.event)&&!e.data?.error?redact(e.data,$('reveal').checked):httpBody(e.data),null,2);$('event-preview-detail').textContent=eventPreview(e,$('reveal').checked).body;}
 function eventMatches(event){const preview=eventPreview(event,$('reveal').checked),category=$('event-kind').value;return (category==='all'||preview.category===category)&&`${event.event} ${event.id} ${preview.title} ${preview.body}`.toLowerCase().includes($('event-filter').value.toLowerCase());}
 function newEventHint(){const hint=$('new-events');hint.textContent=`새 이벤트 ${unseen}개 ↓`;hint.classList.toggle('hidden',unseen===0);}
@@ -63,7 +93,9 @@ function events(){
     const num=document.createElement('span'),type=document.createElement('span'),clock=document.createElement('span');num.className='eventnum';num.textContent='#'+(event.id??'—');type.className='eventtype';type.textContent=preview.title;clock.className='eventtime';clock.textContent=elapsedLabel(event.elapsedMs);heading.append(num,type,clock);
     const body=document.createElement('div');body.className='eventpreview';const full=expanded.has(event),length=full?Math.min(preview.body.length,2000):260;body.textContent=preview.body.slice(0,length);
     const meta=document.createElement('div');meta.className='eventsub';meta.textContent=event.event+' · 연결 '+event.round+'회차';
-    card.append(heading,body,meta);card.onclick=()=>{state.selected=event;events();eventDetail();};
+    card.append(heading);if(event.event!=='cards')card.append(body);
+    if(event.event==='cards')card.append(createProductCards(event.data?.products,{reveal:$('reveal').checked,loadProduct}));
+    card.append(meta);card.onclick=()=>{state.selected=event;events();eventDetail();};
     if(preview.body.length>260){const more=document.createElement('button');more.className='preview-more';more.textContent=full?'접기':'더 보기';if(full&&preview.body.length>2000)more.textContent='접기 · 전체 내용은 상세에서';more.onclick=e=>{e.stopPropagation();if(full)expanded.delete(event);else expanded.add(event);events();};card.append(more);}
     list.append(card);
   }
@@ -77,17 +109,17 @@ function chatContext(){return state.plan?{epoch:state.chatEpoch,turnId:state.pla
 function currentChat(context){return Boolean(context&&context.epoch===state.chatEpoch&&context.turnId===state.plan?.turn_id);}
 function record(event,context=chatContext(),round=state.round){if(!currentChat(context))return;const e={...event,receivedAt:new Date().toISOString(),elapsedMs:elapsedSince(state.started,performance.now()),round};if(state.log.add(e)){if((event.event==='turn.finished'||event.event==='console.cancellation')&&terminal(event.data?.status))setStatus(event.data.status);if(!state.selected)state.selected=e;unseen++;events();eventDetail();}}
 async function reconcile(context=chatContext()){
-  if(!currentChat(context))return;
+  if(!currentChat(context))return false;
   try{const value=await api('/api/chat/'+context.turnId);if(!currentChat(context))return;
-    let status=value.data?.status??'알 수 없음';if(['PROCESSING','COMPLETED','CANCELLED','FAILED'].includes(status))state.admitted=true;setStatus(status);status=state.status;$('chat-note').textContent=terminal(status)?'저장된 최종 상태로 확인했습니다.':'연결 상태와 서버 작업 상태는 다릅니다. 저장 상태: '+status;
-  }catch(e){if(currentChat(context))$('chat-note').textContent='상태 수집 실패 · '+e.message;}
+    let status=value.data?.status??'알 수 없음';const found=['PROCESSING','COMPLETED','CANCELLED','FAILED'].includes(status);if(found)state.admitted=true;if(status==='PROCESSING'&&!terminal(state.status))state.ended=null;setStatus(status);status=state.status;$('chat-note').textContent=terminal(status)?'저장된 최종 상태로 확인했습니다.':'연결 상태와 서버 작업 상태는 다릅니다. 저장 상태: '+status;return found;
+  }catch(e){if(currentChat(context))$('chat-note').textContent='상태 수집 실패 · '+e.message;return false;}
 }
 async function connect(){
   const context=chatContext();if(!currentChat(context))return;if(state.abort)state.abort.abort();
   const controller=new AbortController();state.abort=controller;const round=++state.round;
   const currentStream=()=>currentChat(context)&&state.abort===controller;
   $('connection-state').textContent=`연결 ${round}회차 · 수신 중`;$('disconnect').disabled=false;$('reconnect').disabled=true;const parser=new SSEParser(),httpItem=beginHTTP(`/api/chat/${context.turnId}/events?afterEventId=${state.log.cursor}`,'GET',null,true);
-  try{const response=await fetch(`/api/chat/${context.turnId}/events?afterEventId=${state.log.cursor}`,{signal:controller.signal});
+  try{const response=await adminFetch(`/api/chat/${context.turnId}/events?afterEventId=${state.log.cursor}`,{signal:controller.signal});
     finishHTTP(httpItem,response,{stream:'SSE events recorded separately'});httpItem.streamState='수신 중';
     if(!currentStream()){await response.body?.cancel();return;}
     if(!response.ok)throw new Error('SSE HTTP '+response.status);const reader=response.body.getReader(),decoder=new TextDecoder();
@@ -98,16 +130,25 @@ async function connect(){
   }catch(e){httpItem.streamDurationMs=performance.now()-httpItem.started;if(httpItem.relayStatus===null)finishHTTP(httpItem,null,null,e.name==='AbortError'?'CLIENT_DISCONNECTED':'CONNECTION_FAILED');httpItem.streamState=e.name==='AbortError'?'연결 끊김 · 작업 상태 별도':'연결 오류';if(currentStream()){$('connection-state').textContent=e.name==='AbortError'?'연결 끊김 · 작업은 유지':'연결 오류';if(e.name!=='AbortError')record({id:null,event:'console.error',data:{code:e.message}},context,round);await reconcile(context);}}
   finally{if(httpItem.streamDurationMs===null)httpItem.streamDurationMs=performance.now()-httpItem.started;if(httpItem.streamState==='수신 중')httpItem.streamState='스트림 종료 · 작업 상태 별도';renderHTTP();if(currentStream()){state.abort=null;$('disconnect').disabled=true;$('reconnect').disabled=false;}}
 }
-function newChat(){if(state.sending)return;state.chatEpoch++;if(state.abort)state.abort.abort();state.abort=null;state.plan=null;state.admitted=false;state.log=new EventLog();unseen=0;state.selected=null;state.round=0;state.started=null;state.ended=null;$('elapsed').textContent='경과 —';setStatus('준비',true);$('ids').textContent='새 시험을 시작하면 UUID가 생성됩니다.';$('event-json').textContent='이벤트 대기';$('event-preview-detail').textContent='이벤트를 선택하면 안전한 내용 요약이 표시됩니다.';$('event-meta').textContent='이벤트를 선택하세요.';$('retry-chat').disabled=true;$('reconnect').disabled=true;$('disconnect').disabled=true;events();}
+function resetTurn(){state.chatEpoch++;if(state.abort)state.abort.abort();state.abort=null;state.plan=null;state.admitted=false;state.uncertain=false;state.conversationRejected=false;state.log=new EventLog();unseen=0;state.selected=null;state.round=0;state.started=null;state.ended=null;$('elapsed').textContent='경과 —';setStatus('준비',true);$('ids').textContent='메시지를 보내면 대화를 시작합니다.';$('event-json').textContent='이벤트 대기';$('event-preview-detail').textContent='이벤트를 선택하면 안전한 내용 요약이 표시됩니다.';$('event-meta').textContent='이벤트를 선택하세요.';$('retry-chat').disabled=true;$('reconnect').disabled=true;$('disconnect').disabled=true;events();}
+function newChat(){if(state.sending||state.restoring)return;resetTurn();state.conversationId=null;$('message').value='';$('chat-note').textContent='새 대화입니다. 같은 수신자의 다음 메시지는 이 대화에서 이어집니다.';saveChat();}
+async function restoreChat(plan){
+  resetTurn();state.conversationId=plan.conversation_id;state.plan=plan;state.uncertain=true;state.restoring=true;$('message').value=plan.message;
+  $('ids').textContent=plan.conversation_id+'\n'+plan.turn_id;setStatus('저장 상태 확인 중',true);
+  const context=chatContext();
+  try{if(await reconcile(context))connect();}
+  finally{if(currentChat(context)){state.restoring=false;chatControls();}}
+}
 async function sendChat(retry=false){
-  if(state.sending)return;if(!retry){newChat();state.plan={request_id:crypto.randomUUID(),conversation_id:crypto.randomUUID(),turn_id:crypto.randomUUID(),message:$('message').value,...(state.liveRecipient?{recipientUserId:state.liveRecipient}:{})};}
+  if(state.sending||state.restoring||retry&&(!state.plan||state.conversationRejected))return;
+  if(!retry){if(!state.chatSendAllowed||state.plan&&(state.admitted||state.uncertain)&&!terminal(state.status))return;resetTurn();state.conversationId??=crypto.randomUUID();state.plan={request_id:crypto.randomUUID(),conversation_id:state.conversationId,turn_id:crypto.randomUUID(),message:$('message').value,recipientUserId:state.liveRecipient??42,senderUserId:state.liveSender??7};}
   const context=chatContext();if(!currentChat(context))return;
-  $('ids').textContent=state.plan.conversation_id+'\n'+state.plan.turn_id;state.sending=true;$('send-chat').disabled=true;$('retry-chat').disabled=true;
+  $('ids').textContent=state.plan.conversation_id+'\n'+state.plan.turn_id;state.sending=true;state.uncertain=true;saveChat();chatControls();
   let upstreamStatus=null;
   try{if(!retry)state.started=performance.now();if(!terminal(state.status))state.ended=null;const reply=await api('/api/chat','POST',state.plan);upstreamStatus=reply.httpStatus;if(!currentChat(context))return;
-    record({id:null,event:'console.accepted',data:{httpStatus:reply.httpStatus,requestId:reply.requestId}},context);if(![200,202].includes(reply.httpStatus))throw Object.assign(new Error(requestErrorMessage(reply.httpStatus,reply.body)),{httpStatus:reply.httpStatus});state.admitted=true;setStatus('PROCESSING');connect();
-  }catch(e){if(currentChat(context)){upstreamStatus=e.httpStatus??upstreamStatus;if(state.ended===null)state.ended=performance.now();$('elapsed').textContent='경과 '+((state.ended-state.started)/1000).toFixed(1)+'s · 브라우저 관측';toast(e.message);setStatus('접수 확인 실패'+(upstreamStatus?' · HTTP '+upstreamStatus:''));$('chat-note').textContent=e.message+' · 동일 요청 재전송으로 재확인하세요. 서버 작업 상태는 별도입니다.';record({id:null,event:'console.error',data:{code:e.message,httpStatus:upstreamStatus}},context);}}
-  finally{if(currentChat(context)){state.sending=false;$('send-chat').disabled=false;$('retry-chat').disabled=false;}}
+    record({id:null,event:'console.accepted',data:{httpStatus:reply.httpStatus,requestId:reply.requestId}},context);if(![200,202].includes(reply.httpStatus))throw Object.assign(new Error(requestErrorMessage(reply.httpStatus,reply.body)),{httpStatus:reply.httpStatus});state.admitted=true;state.uncertain=false;setStatus('PROCESSING');connect();
+  }catch(e){if(currentChat(context)){upstreamStatus=e.httpStatus??upstreamStatus;state.uncertain=upstreamStatus===null||upstreamStatus===408||upstreamStatus>=500;if(e.conversationRestart){state.conversationRejected=true;state.conversationId=null;state.admitted=false;state.uncertain=false;saveChat();}if(state.ended===null)state.ended=performance.now();$('elapsed').textContent='경과 '+((state.ended-state.started)/1000).toFixed(1)+'s · 브라우저 관측';toast(e.message);setStatus('접수 확인 실패'+(upstreamStatus?' · HTTP '+upstreamStatus:''));$('chat-note').textContent=e.message+(state.conversationRejected?' 새 대화로 다시 보내기를 눌러 주세요.':' · 동일 요청 재전송으로 재확인하세요. 서버 작업 상태는 별도입니다.');record({id:null,event:'console.error',data:{code:e.message,httpStatus:upstreamStatus}},context);if((state.admitted||state.uncertain)&&await reconcile(context))connect();}}
+  finally{if(currentChat(context)){state.sending=false;chatControls();}}
 }
 $('send-chat').onclick=()=>sendChat(false);$('retry-chat').onclick=()=>sendChat(true);$('new-chat').onclick=newChat;$('scenario').onchange=()=>{$('message').value=$('scenario').value;};$('event-filter').oninput=events;$('reveal').onchange=()=>{events();eventDetail();};$('event-kind').onchange=events;$('error-count').onclick=()=>{$('event-kind').value='error';events();};$('new-events').onclick=()=>{$('event-list').scrollTop=$('event-list').scrollHeight;unseen=0;newEventHint();};$('event-list').onscroll=()=>{const l=$('event-list');if(l.scrollTop+l.clientHeight>=l.scrollHeight-30){unseen=0;newEventHint();}};$('disconnect').onclick=()=>{if(state.abort)state.abort.abort();};$('reconnect').onclick=connect;$('cancel-chat').onclick=async()=>{
   const context=chatContext();if(!currentChat(context))return;$('cancel-chat').disabled=true;
@@ -129,12 +170,12 @@ $('send-profile').onclick=async()=>{
     if(state.profile&&state.profile.recipientUserId===body.recipientUserId&&state.profile.sourceVersion===body.sourceVersion&&JSON.stringify(state.profileBody)!==JSON.stringify(body))throw new Error('같은 버전에는 같은 본문을 사용하세요. 새 시험은 버전을 올리세요.');
     const epoch=++state.profileEpoch;clearInterval(profileTimer);profileTimer=null;state.profile=null;state.profileBody=null;state.lastProfileState=null;
     $('profile-history').replaceChildren();$('profile-attempts').textContent='미수집';$('profile-http').textContent='접수 중';$('profile-status').textContent='미접수';$('profile-source').textContent=`시험 수신자 ${body.recipientUserId} / 버전 ${body.sourceVersion} · 접수 대기`;$('profile-json').textContent='새 요청 접수 중';$('refresh-profile').disabled=true;
-    $('send-profile').disabled=true;const r=await api('/api/profile','POST',body);if(epoch!==state.profileEpoch)return;
+    state.profileSending=true;$('send-profile').disabled=true;const r=await api('/api/profile','POST',body);if(epoch!==state.profileEpoch)return;
     $('profile-http').textContent=String(r.httpStatus);$('profile-json').textContent=JSON.stringify(redact(r),null,2);$('profile-note').textContent=r.httpStatus===202?'접수됨 · 아직 결과 생성/전달 완료가 아닙니다.':requestErrorMessage(r.httpStatus,r.body);
     if(r.httpStatus===202){state.profile=body;state.profileBody=body;$('refresh-profile').disabled=false;await profileState();if(epoch===state.profileEpoch&&!['DELIVERED','FAILED','SUPERSEDED'].includes(state.lastProfileState))profileTimer=setInterval(profileState,1000);}
     else $('profile-status').textContent='접수 거절';
   }catch(e){toast(e.message);$('profile-note').textContent=e.message;if(!state.profile){$('profile-http').textContent='접수 실패';$('profile-status').textContent='미접수';}}
-  finally{$('send-profile').disabled=false;}
+  finally{state.profileSending=false;$('send-profile').disabled=!state.profileSendAllowed;}
 };$('refresh-profile').onclick=profileState;
 function counts(value){return value===null||value===undefined?'미수집':Object.entries(value).length?Object.entries(value).map(([key,n])=>`${key} ${n}`).join(' · '):'정상 수집 · 0건';}
 function dashboardStale(){return Boolean(state.collectionFailed||state.snapshot&&Date.now()-Date.parse(state.snapshot.collectedAt)>15000);}
@@ -148,6 +189,46 @@ document.querySelectorAll('[data-page]').forEach(button=>button.addEventListener
 setInterval(()=>{if(state.started!==null)$('elapsed').textContent='경과 '+(((state.ended??performance.now())-state.started)/1000).toFixed(1)+'s · 브라우저 관측';if(state.page==='dashboard'){const stale=dashboardStale();tickOperations(stale);if(stale&&!$('dashboard').classList.contains('is-stale'))renderDashboard();}},100);
 setInterval(()=>{if(state.page==='dashboard')refreshDashboard();if(state.page==='network')renderHTTP();},5000);
 if(new URLSearchParams(location.search).get('view')==='dashboard')document.querySelector('[data-page="dashboard"]').click();
-api('/api/config').then(r=>{$('target').textContent=r.targetLabel;$('mode').textContent=r.paidCallsEnabled?'LIVE · 비용 예약':r.mode==='DEMO'?'FREE · 합성':'LOCAL TARGET';if(r.paidCallsEnabled){state.liveRecipient=r.defaultRecipientUserId??42;$('recipient').value=String(state.liveRecipient);$('scenario').disabled=true;$('message').value='합성 검증: 3만원 이하의 실용적인 컵 선물 하나를 상품 검색으로 확인하고 추천해 주세요.';$('chat-note').textContent='실제 LLM · 중앙 누적 예산 선예약 · 합성 입력만 사용';$('profile-note').textContent='실제 태깅/임베딩 · 콜백 저장 후 다음 새 채팅에 수신자 스냅샷 적용';}if(!r.profileSendAllowed){$('send-profile').disabled=true;$('profile-note').textContent='모델 비용 정책 미확인 · 전송 차단';}}).catch(e=>toast(e.message));
+let configEpoch=0;
+function chooseChatRecipient(){
+  const recipient=state.chatRecipients?.[Number($('chat-recipient').value)];
+  if(recipient){
+    if(state.sending||state.restoring){$('chat-recipient').value=String(state.chatRecipients.findIndex(p=>p.recipientUserId===state.liveRecipient&&p.senderUserId===state.liveSender));return;}
+    if(recipient.recipientUserId!==state.liveRecipient||recipient.senderUserId!==state.liveSender)newChat();
+    state.liveRecipient=recipient.recipientUserId;state.liveSender=recipient.senderUserId;
+  }
+}
+$('chat-recipient').onchange=chooseChatRecipient;
+async function refreshConfig(){
+  const epoch=++configEpoch;
+  state.chatSendAllowed=state.profileSendAllowed=false;
+  $('send-chat').disabled=$('send-profile').disabled=true;
+  try{
+    const r=await api('/api/config');if(epoch!==configEpoch)return;
+    $('target').textContent=r.targetLabel;
+    $('mode').textContent=r.paidCallsEnabled?(r.budgetPolicyVerified!==true?'LIVE · 비용 정책 미확인':r.budgetMode==='provider-key-limits'?'LIVE · 키별 한도':'LIVE · 비용 예약'):r.mode==='DEMO'?'FREE · 합성':'LOCAL TARGET';
+    if(state.liveRecipient===undefined){state.liveRecipient=r.defaultRecipientUserId??42;state.liveSender=r.defaultSenderUserId??7;}
+    let restore=null;if(!state.restoreChecked){state.restoreChecked=true;restore=savedChat(r);if(restore){state.liveRecipient=restore.recipientUserId;state.liveSender=restore.senderUserId;}}
+    if(r.paidCallsEnabled){
+      // A settings refresh must preserve the operator's draft and current turn.
+      if(!state.liveInitialized){state.liveInitialized=true;$('recipient').value=String(state.liveRecipient);if(!restore)$('message').value='3만원 이하로 이 친구에게 어울리는 실용적인 선물 두 개를 추천해 주세요.';}
+      $('scenario').disabled=true;
+    }
+    state.chatRecipients=r.chatRecipients??[];
+    $('chat-recipient-field').classList.toggle('hidden',!state.chatRecipients.length);
+    $('chat-recipient').replaceChildren();
+    state.chatRecipients.forEach((recipient,index)=>{const option=document.createElement('option');option.value=String(index);option.textContent=recipient.label;option.selected=recipient.recipientUserId===state.liveRecipient&&recipient.senderUserId===state.liveSender;$('chat-recipient').append(option);});
+    if(state.chatRecipients.length){const selected=state.chatRecipients.findIndex(p=>p.recipientUserId===state.liveRecipient&&p.senderUserId===state.liveSender);$('chat-recipient').value=String(Math.max(0,selected));chooseChatRecipient();}
+    state.chatSendAllowed=r.chatSendAllowed===true;
+    state.profileSendAllowed=r.profileSendAllowed===true;
+    chatControls();
+    $('send-profile').disabled=state.profileSending||!state.profileSendAllowed;
+    if(!state.plan)$('chat-note').textContent=!state.chatSendAllowed?'Chat 키·서버·비용 정책 확인 필요 · 운영 대시보드에서 설정 저장 후 다시 확인합니다.':r.paidCallsEnabled?(r.budgetMode==='provider-key-limits'?'실제 LLM · OpenRouter 키별 한도 정책 · 합성 입력만 사용':'실제 LLM · 중앙 누적 예산 선예약 · 합성 입력만 사용'):'합성 입력으로 요청·저장 상태를 확인합니다.';
+    if(!state.profile&&!state.profileSending)$('profile-note').textContent=!state.profileSendAllowed?'모델 비용 정책 미확인 · 전송 차단':r.paidCallsEnabled?'실제 태깅/임베딩 · 콜백 수락과 실제 BE 저장은 별도 확인':'합성 입력으로 접수·콜백 상태를 확인합니다.';
+    if(restore)await restoreChat(restore);
+  }catch(e){if(epoch===configEpoch)toast(e.message);}
+}
+document.addEventListener('admin-settings-saved',refreshConfig);
+refreshConfig();
 
 $('http-family').onchange=renderHTTP;$('http-errors').onchange=renderHTTP;$('http-polls').onchange=renderHTTP;$('http-latest').onclick=()=>{$('http-list').scrollTop=$('http-list').scrollHeight;};

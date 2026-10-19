@@ -24,7 +24,29 @@ from app.low_latency import LowLatencyRuntime
 from app.card_contract import readable_conversation, readable_turn, readable_replay
 
 BASE='/v1/chat/conversations';TEST_BASE='/v1/chat/test/conversations';STATIC=Path(__file__).parent/'static'
-TOKEN=os.environ['AI_SERVICE_TOKEN'];OWNER=str(uuid.uuid4())
+TOKEN=os.getenv('AI_SERVICE_TOKEN','');OWNER=str(uuid.uuid4())
+def current_service_token():
+ from integration.service_token import shared_token_configured
+ if shared_token_configured() or os.getenv('CHAT_BE_SERVICE_TOKEN_FILE'):
+  from integration.service_token import expected_token
+  from integration.provider_key import KeyUnavailable
+  try:return expected_token('chat')
+  except KeyUnavailable:raise APIError(503,'서비스 인증이 아직 설정되지 않았습니다.') from None
+ return TOKEN
+
+def service_header_valid(value):
+ try:
+  expected=current_service_token()
+  return bool(expected) and valid_token(value,'Bearer '+expected)
+ except APIError:return False
+
+class LocalServiceAuth(httpx.Auth):
+ def auth_flow(self,request):
+  request.headers['Authorization']='Bearer '+current_service_token()
+  yield request
+ async def async_auth_flow(self,request):
+  request.headers['Authorization']='Bearer '+await asyncio.to_thread(current_service_token)
+  yield request
 LEASE_RELEASE_TIMEOUT_SECONDS=5
 from app.security import SIGNER,SECURE,same_origin,throttle,valid_token,has_demo_access,require_demo_access,demo_access_version,DEMO_ACCESS_SECONDS
 from app.admin import router as admin_router
@@ -40,11 +62,26 @@ def runtime_info():
  elif getattr(app.state.runtime,'model_config',None):result.update(app.state.runtime.model_config.public())
  return result
 
+async def provider_key_request(request):
+ # This send boundary keeps tracing without creating a local budget reservation.
+ url=request.url
+ official=(url.scheme=='https' and url.host=='openrouter.ai' and url.port in (None,443)
+           and not (url.username or url.password or url.query or url.fragment))
+ metadata=request.method=='GET' and (url.path.startswith('/api/v1/model/') or
+           url.path.startswith('/api/v1/models/') and url.path.endswith('/endpoints'))
+ completion=request.method=='POST' and url.path=='/api/v1/chat/completions'
+ if not official or not (metadata or completion):raise APIError(503,'허용된 OpenRouter 요청만 전송할 수 있습니다.')
+ if completion:
+  from app.model_trace import attempted
+  attempted(json.loads(request.content),None)
+
 @asynccontextmanager
 async def lifespan(app):
  if not os.getenv('DEMO_ACCESS_TOKEN'):raise ValueError('DEMO_ACCESS_TOKEN is required')
  app.state.runtime_mode=os.getenv('CHAT_RUNTIME_MODE','live')
  if app.state.runtime_mode not in {'live','mock'}:raise ValueError('CHAT_RUNTIME_MODE must be live or mock')
+ app.state.budget_mode=os.getenv('AI_BUDGET_MODE','').strip() or 'provider-key-limits'
+ if app.state.budget_mode not in {'guarded','provider-key-limits'}:raise ValueError('AI_BUDGET_MODE must be guarded or provider-key-limits')
  mode=os.getenv('STORE_MODE','http');bridge_mode=mode=='bridge'
  if mode=='postgres':
   from app.local_store import LocalStore
@@ -60,25 +97,35 @@ async def lifespan(app):
   runtime_type=LowLatencyRuntime
  app.state.runtime=runtime_type(app.state.store,app.state.search,OWNER)
  app.state.budget_store=None
- if app.state.runtime_mode=='live':
-  from app.task_budget import BudgetHTTP
+ app.state.budget_account=None
+ bridge_budget=False
+ if app.state.runtime_mode=='live' and app.state.budget_mode=='guarded':
+  from app.task_budget import BudgetHTTP,budget_settings,validate_limit
+  account,expected_limit=budget_settings()
+  app.state.budget_account=account
   budget_store=app.state.store
   if os.getenv('BUDGET_STORE_URL'):
    from app.budget_ledger import BudgetLedger
    budget_store=BudgetLedger(os.environ['BUDGET_STORE_URL'],os.environ['STORE_TOKEN'])
-   await budget_store.call('budget_summary',account=__import__('app.task_budget',fromlist=['ACCOUNT']).ACCOUNT)
    app.state.budget_store=budget_store
-  app.state.runtime.http=BudgetHTTP(app.state.runtime.http,budget_store)
+  # A bridge attaches after lifespan yields; keep it unready until its ledger responds.
+  bridge_budget=bridge_mode and app.state.budget_store is None
+  if not bridge_budget:validate_limit(await budget_store.call('budget_summary',account=account),expected_limit)
+  app.state.runtime.http=BudgetHTTP(app.state.runtime.http,budget_store,account=account,expected_limit=expected_limit,check_summary=bridge_budget)
   app.state.runtime.catalog.http=app.state.runtime.http
+ elif app.state.runtime_mode=='live':
+  app.state.runtime.http.follow_redirects=False
+  app.state.runtime.http.event_hooks['request'].append(provider_key_request)
  from app.protocol_fixture import ProtocolFixture
  app.state.fixture=ProtocolFixture(app.state.runtime)
  app.state.runtime.healthy=False
- app.state.proxy=httpx.AsyncClient(base_url=os.getenv('INTERNAL_URL','http://127.0.0.1:7860'),headers={'Authorization':'Bearer '+TOKEN},timeout=120)
+ app.state.proxy=httpx.AsyncClient(base_url=os.getenv('INTERNAL_URL','http://127.0.0.1:7860'),auth=LocalServiceAuth(),timeout=120)
  async def heartbeat():
   epoch=None;owned=False;pending=None
   while True:
    try:
     runtime=app.state.runtime
+    if bridge_budget:validate_limit(await budget_store.call('budget_summary',account=account),expected_limit)
     current=app.state.store.epoch if bridge_mode else 0
     reconnect=current!=epoch or not runtime.healthy or runtime.recovery_version!=runtime.recovered_version
     if reconnect:
@@ -134,7 +181,8 @@ if os.getenv('CHAT_MEDIA_ROOT'):
  app.mount('/media',StaticFiles(directory=os.environ['CHAT_MEDIA_ROOT']),name='product-media')
 bearer=HTTPBearer(auto_error=False)
 async def service(credentials:Annotated[HTTPAuthorizationCredentials|None,Depends(bearer)]):
- if credentials is None or not valid_token(credentials.credentials,TOKEN):raise APIError(401,'서비스 인증에 실패했습니다.')
+ expected=await asyncio.to_thread(current_service_token)
+ if credentials is None or not expected or not valid_token(credentials.credentials,expected):raise APIError(401,'서비스 인증에 실패했습니다.')
 Service=Annotated[None,Depends(service)]
 async def demo_session(request:Request):
  same_origin(request);require_demo_access(request)
@@ -148,7 +196,7 @@ async def headers(request,call_next):
  from app.errors import error_body
  if request.method in {'POST','PUT'} and int(request.headers.get('content-length','0'))>20000:
   response=JSONResponse(error_body('요청이 너무 큽니다.',413),status_code=413)
- elif (request.url.path in {'/docs','/redoc','/openapi.json','/docs/oauth2-redirect','/guide/maintenance.md'} or (request.url.path.startswith('/guide/') and request.url.path not in {'/guide/integration.md','/guide/testing.md','/guide/backend-client.py'})) and not has_demo_access(request) and not valid_token(request.headers.get('authorization',''), 'Bearer '+TOKEN):
+ elif (request.url.path in {'/docs','/redoc','/openapi.json','/docs/oauth2-redirect','/guide/maintenance.md'} or (request.url.path.startswith('/guide/') and request.url.path not in {'/guide/integration.md','/guide/testing.md','/guide/backend-client.py'})) and not has_demo_access(request) and not await asyncio.to_thread(service_header_valid, request.headers.get('authorization','')):
   response=JSONResponse(error_body('체험 토큰 또는 서비스 토큰이 필요합니다.',401),status_code=401)
  else:response=await call_next(request)
  response.headers['Cache-Control']='no-store, no-transform'
@@ -180,18 +228,25 @@ def live():return {'alive':True,'revision':app_revision(),'mode':getattr(app.sta
 @app.get('/readyz',dependencies=[Depends(service)])
 async def ready():
  if not app.state.runtime.healthy:raise APIError(503,'실행 서버가 준비되지 않았습니다.')
+ if hasattr(app.state.runtime,'provider_key') and not (await asyncio.to_thread(app.state.runtime.provider_key.status))['configured']:raise APIError(503,'LLM 키가 설정되지 않았거나 읽을 수 없습니다.')
  try:
   async with asyncio.timeout(5):await app.state.store.call('health')
  except (APIError,httpx.HTTPError,TimeoutError,DatabaseUnavailable):raise APIError(503,'대화 저장소 연결을 복구하고 있습니다.',headers={'Retry-After':'5'}) from None
  try:
   async with asyncio.timeout(5):await app.state.search.ready()
  except (httpx.HTTPError,ValueError,TimeoutError):raise APIError(503,'검색 서버 연결을 복구하고 있습니다.',headers={'Retry-After':'5'}) from None
- result={'ready':True,'database':'postgresql',**runtime_info()}
+ result={'ready':True,'database':'postgresql','budgetMode':app.state.budget_mode,**runtime_info()}
  if app.state.budget_store is not None:
-  from app.task_budget import ACCOUNT
-  result['sharedBudget']=await app.state.budget_store.call('budget_summary',account=ACCOUNT)
-  result['budgetAccount']=ACCOUNT
+  result['sharedBudget']=await app.state.budget_store.call('budget_summary',account=app.state.budget_account)
+  result['budgetAccount']=app.state.budget_account
  return result
+@app.get('/internal/credentials',dependencies=[Depends(service)])
+async def credential_status():
+ from integration.provider_key import ProviderKey
+ from integration.service_token import ServiceToken
+ provider=getattr(app.state.runtime,'provider_key',None) or ProviderKey.from_environment('chat')
+ key,token=await asyncio.gather(asyncio.to_thread(provider.status),asyncio.to_thread(ServiceToken.from_environment('chat').status))
+ return {'service':'chat','environment':provider.environment,'provider':key,'backend':token}
 @app.put(TEST_BASE+'/{conversationId}',response_model=SuccessResponse[Conversation],responses={201:{'model':SuccessResponse[Conversation]}})
 @app.put(BASE+'/{conversationId}',response_model=SuccessResponse[Conversation],responses={201:{'model':SuccessResponse[Conversation]}})
 async def conversation(conversationId:UUID4,body:PutConversation,response:Response,request:Request,auth:Service):

@@ -11,20 +11,37 @@ import httpx
 import psycopg
 
 from console.server import target_url
+from console.admin_auth import login_client
+from integration.provider_key import read_file
 
 
-def check(runtime, previous=None):
+def fixture_settings(scratch, marker):
+    settings = json.loads(read_file(scratch/'targets.json', private=True, limit=16384))
+    db = psycopg.conninfo.conninfo_to_dict(settings['database'])
+    if (settings.get('localFixtureProfilerFree') is not True or settings.get('liveModel')
+            or target_url(settings['targets']['search']) != target_url(marker['urls']['search'])
+            or db.get('host') != '127.0.0.1' or db.get('port') != str(marker['dbPort'])
+            or db.get('user') != 'ai_console_service' or not db.get('dbname', '').startswith('emmet4930_')
+            or not settings.get('tokens', {}).get('search')):
+        raise ValueError('Marked synthetic fixture configuration required')
+    return settings
+
+
+def check(runtime, previous=None, *, password=None):
     manifest = json.loads(runtime.read_text())
     scratch = Path(manifest["scratch"])
     marker = json.loads((scratch / "fixture-state.json").read_text())
     if marker["format"] != "synthetic-console-fixture/1":
         raise ValueError("Only marked synthetic fixtures are supported")
+    settings = fixture_settings(scratch, marker)
     base = target_url(manifest["url"])
     callback = target_url(marker["urls"]["callback"])
     search = target_url(marker["urls"]["search"])
+    search_headers = {'Authorization': 'Bearer ' + settings['tokens']['search']}
     headers = {"Origin": base}
     tests = []
     with httpx.Client(timeout=25, trust_env=False, follow_redirects=False) as http:
+        headers = login_client(http, base, password=password)
 
         def get_turn(tid):
             response = http.get(base + "/api/chat/" + tid)
@@ -56,9 +73,8 @@ def check(runtime, previous=None):
             old = json.loads(previous.read_text())
             # The console deliberately keeps its browser/admission history in memory.
             # Confirm preserved service records, then re-admit the exact old UUID/body.
-            db = f"postgresql://fixture_owner@127.0.0.1:{marker['dbPort']}/postgres"
             with psycopg.connect(
-                db, options="-c default_transaction_read_only=on"
+                settings['database'], options="-c default_transaction_read_only=on"
             ) as connection:
                 for tid, state in old["turns"].items():
                     row = connection.execute(
@@ -129,6 +145,7 @@ def check(runtime, previous=None):
         response = http.post(
             search + "/v1/search",
             json={"query": "SYNTHETIC", "mode": "hybrid", "limit": 3},
+            headers=search_headers,
         )
         response.raise_for_status()
         result = response.json()
@@ -137,11 +154,12 @@ def check(runtime, previous=None):
         response = http.post(
             search + "/v1/products",
             json={"ids": [101], "snapshotId": "wrong-synthetic-version"},
+            headers=search_headers,
         )
         assert response.status_code == 409
         assert (
             http.post(
-                search + "/v1/search", json={"query": "SYNTHETIC", "limit": 0}
+                search + "/v1/search", json={"query": "SYNTHETIC", "limit": 0}, headers=search_headers
             ).status_code
             == 422
         )

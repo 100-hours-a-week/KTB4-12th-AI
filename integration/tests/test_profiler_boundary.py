@@ -143,6 +143,8 @@ def test_guarded_startup_rejects_required_configuration_before_database_or_wire(
     from profiling.settings import Settings
     from integration import profiler_runtime
 
+    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
+
     values = {
         "SERVICE_TOKEN": "synthetic-token",
         "TAGGER": "openrouter",

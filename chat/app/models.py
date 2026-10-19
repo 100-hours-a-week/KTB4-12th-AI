@@ -21,6 +21,14 @@ class StrictModel(BaseModel):
         validate_by_alias=True, validate_by_name=False, serialize_by_alias=True,
     )
 
+    @field_validator("*", mode="before")
+    @classmethod
+    def reject_null_characters(cls, value):
+        # PostgreSQL text/JSONB cannot store NUL; reject it before any DB call.
+        if isinstance(value, str) and "\x00" in value:
+            raise ValueError("NUL characters are not supported")
+        return value
+
 
 class PutConversation(StrictModel):
     sender_id: SafeIntegerId = Field(alias="senderUserId")

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 for key in list(os.environ):
-    if re.search(r'TOKEN|SECRET|PASSWORD|API_KEY|DATABASE_URL|^PROFILING_|^SEARCH_', key):
+    if re.search(r'TOKEN|SECRET|PASSWORD|API_KEY|ADMIN_HASH|DATABASE_URL|^PROFILING_|^SEARCH_', key):
         os.environ.pop(key)
 
 
@@ -20,6 +20,12 @@ def no_external_calls(monkeypatch):
 
     monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', deny)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', deny_async)
+    try:
+        import botocore.endpoint
+    except ImportError:
+        pass
+    else:
+        monkeypatch.setattr(botocore.endpoint.Endpoint, 'make_request', deny)
     try:
         import psycopg
     except ImportError:

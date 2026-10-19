@@ -1,6 +1,7 @@
-"""Dedicated container launcher; role-specific guarded apps, no arbitrary app/command override."""
+"""Dedicated container launcher; fixed application roles and explicit legacy ledger support."""
 
 import hashlib
+import ipaddress
 import json
 import os
 import shutil
@@ -18,15 +19,14 @@ ROLES = {
 }
 
 
-# Cost guard modes. `guarded` (default, local) keeps the central $5 ledger fence and fails closed
-# without it. `provider-key-limits` (ECS) skips the ledger; spend is capped by per-key limits set
-# on the provider account. It must be chosen explicitly — a missing ledger never disables it.
+# Normal runs use provider key limits without a central ledger. Existing ledger
+# experiments explicitly select `guarded`; their reservations remain fail closed.
 BUDGET_MODES = ("guarded", "provider-key-limits")
 PINNED_MODEL = "openai/gpt-6-luna"
 
 
 def budget_mode(*, smoke=False):
-    mode = os.environ.get("AI_BUDGET_MODE", "").strip() or "guarded"
+    mode = os.environ.get("AI_BUDGET_MODE", "").strip() or "provider-key-limits"
     if mode not in BUDGET_MODES:
         raise ValueError("AI_BUDGET_MODE must be one of: " + ", ".join(BUDGET_MODES))
     if smoke and mode != "guarded":
@@ -138,6 +138,11 @@ def prepare_encoder(root, source):
 def configure(role):
     if role not in ROLES:
         raise ValueError("Only dedicated fixed application roles are supported")
+    if role == "console" and os.environ.get("CONSOLE_TARGET_FILE"):
+        config = json.loads(Path(os.environ["CONSOLE_TARGET_FILE"]).read_text())
+        if not isinstance(config, dict):
+            raise ValueError("Explicit Console configuration must be an object")
+        return None
     smoke = role.endswith("-smoke")
     if smoke and not Path("/workspace/integration/containers/smoke_only").is_file():
         raise ValueError("Synthetic mode is absent from guarded image")
@@ -146,7 +151,17 @@ def configure(role):
         and not Path("/workspace/integration/tests/emmet_fixture_profiler.py").is_file()
     ):
         raise ValueError("Synthetic provider is absent from guarded release image")
-    os.environ["AI_SERVICE_TOKEN"] = secret("AI_SERVICE_TOKEN")
+    from integration.service_token import shared_token_configured
+    managed_auth = role in {"chat", "profiler"} and shared_token_configured()
+    internal_token = secret("AI_INTERNAL_SERVICE_TOKEN" if managed_auth else "AI_SERVICE_TOKEN")
+    if managed_auth:
+        from integration.service_token import ServiceToken
+        os.environ["AI_INTERNAL_SERVICE_TOKEN"] = internal_token
+        # The independent healthcheck sees the same explicit source, without
+        # relying on mutations made only in this launcher's child environment.
+        ServiceToken.from_environment(role)
+    else:
+        os.environ["AI_SERVICE_TOKEN"] = internal_token
     if role == "backend":
         state = json.loads(Path(os.environ["LIVE_BACKEND_STATE"]).read_text())
         if (
@@ -176,8 +191,15 @@ def configure(role):
                 from integration.containers.relay import BudgetRelay
 
                 token = secret("STORE_TOKEN")
-            key = secret("OPENROUTER_API_KEY")
-            if smoke and not key.startswith("synthetic-"):
+                # This existing relay serves one approved account/fence.
+                if (os.getenv("BUDGET_ACCOUNT", "gift-chat-harness-2026-10-06") != "gift-chat-harness-2026-10-06"
+                        or float(os.getenv("BUDGET_EXPECTED_LIMIT_USD", "5")) != 5):
+                    raise ValueError("Guarded relay requires its existing account and five-dollar limit")
+            from integration.provider_key import ProviderKey
+            source = ProviderKey.from_environment("profiler" if role.startswith("profiler") else "chat")
+            managed_key = source.mode in {"managed", "aws"}
+            key = "" if managed_key else secret("PROFILING_OPENROUTER_API_KEY" if role == "profiler" else "OPENROUTER_API_KEY")
+            if smoke and (managed_key or not key.startswith("synthetic-")):
                 raise ValueError("Smoke image refuses real provider credentials")
             model = model_for(
                 "PROFILING_TAGGER_MODEL" if role.startswith("profiler") else "CHAT_MODEL", mode
@@ -186,10 +208,12 @@ def configure(role):
                 os.environ["STORE_TOKEN"] = token
                 relay = BudgetRelay.from_environment(token, synthetic=smoke)
             if role.startswith("profiler"):
-                os.environ["PROFILING_OPENROUTER_API_KEY"] = key
+                if not managed_key:
+                    os.environ["PROFILING_OPENROUTER_API_KEY"] = key
             else:
-                os.environ["OPENROUTER_API_KEY"] = key
-                os.environ["SEARCH_TOKEN"] = os.environ["AI_SERVICE_TOKEN"]
+                if not managed_key:
+                    os.environ["OPENROUTER_API_KEY"] = key
+                os.environ["SEARCH_TOKEN"] = internal_token
                 for name in [
                     "SESSION_SECRET",
                     "QA_ADMIN_PASSWORD",
@@ -205,12 +229,12 @@ def configure(role):
             relay.start()
         if role in ("profiler", "profiler-smoke"):
             os.environ.update(
-                PROFILING_SERVICE_TOKEN=os.environ["AI_SERVICE_TOKEN"],
+                PROFILING_SERVICE_TOKEN="" if managed_auth else internal_token,
                 # Synthetic and guarded launchers exercise the same catalog API.
                 # Profiler retains policy/profile ownership; Search owns vectors.
                 PROFILING_CATALOG_SOURCE="search_http",
                 PROFILING_SEARCH_BASE_URL="http://127.0.0.1:8000",
-                PROFILING_SEARCH_TOKEN=os.environ["AI_SERVICE_TOKEN"],
+                PROFILING_SEARCH_TOKEN=internal_token,
                 PROFILING_TAG_SPEC="tag3disliked",
                 PROFILING_TAGGER="openrouter",
                 PROFILING_TAGGER_MODEL=model,
@@ -252,8 +276,13 @@ def configure(role):
             import httpx
             import psycopg
 
+            host = os.environ.get("CONSOLE_SERVICE_HOST", "127.0.0.1")
+            if host not in {"127.0.0.1", "mesh"}:
+                raise ValueError("Console service host must be loopback or the private Compose mesh")
+            targets = {name: f"http://{host}:{port}" for name, port in
+                       (("chat", 7860), ("search", 8000), ("profiling", 8001), ("backend", 8002))}
             with httpx.Client(trust_env=False, timeout=4) as http:
-                response = http.get("http://127.0.0.1:8000/v1/catalog/contract",
+                response = http.get(targets["search"] + "/v1/catalog/contract",
                     headers={"Authorization": "Bearer " + os.environ["AI_SERVICE_TOKEN"]})
                 response.raise_for_status()
                 metadata = response.json()
@@ -270,12 +299,7 @@ def configure(role):
                 "expectedModel": "openai/gpt-6-luna",
                 "catalogVersion": version,
                 "searchSnapshotId": metadata["snapshotId"],
-                "targets": {
-                    "chat": "http://127.0.0.1:7860",
-                    "search": "http://127.0.0.1:8000",
-                    "profiling": "http://127.0.0.1:8001",
-                    "backend": "http://127.0.0.1:8002",
-                },
+                "targets": targets,
                 "tokens": {
                     "chat": os.environ["AI_SERVICE_TOKEN"],
                     "profiling": os.environ["AI_SERVICE_TOKEN"],
@@ -283,7 +307,7 @@ def configure(role):
                 },
                 "database": value,
             }
-            # Separate app containers share only the mesh network namespace, preserving loopback-only APIs.
+            # Guarded apps share loopback; smoke Console reaches the private mesh over backend.
             # Do not import console.server here: its module-level app reads the config
             # at import time. Uvicorn must import it only after this file/env exists.
             path = Path("/run/runtime/targets.json")
@@ -295,6 +319,14 @@ def configure(role):
         if relay:
             relay.close()
         raise
+
+
+def console_proxy_ips():
+    values = os.getenv("CONSOLE_TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
+    try:
+        return ",".join(str(ipaddress.ip_address(value.strip())) for value in values if value.strip())
+    except ValueError:
+        raise ValueError("CONSOLE_TRUSTED_PROXY_IPS requires exact proxy IP addresses") from None
 
 
 def main():
@@ -321,6 +353,7 @@ def main():
             port=int(os.environ.get("PORT", "8000")),
             workers=1,
             access_log=False,
+            **({"proxy_headers": True, "forwarded_allow_ips": console_proxy_ips()} if role == "console" else {}),
         )
     finally:
         if relay is not None:

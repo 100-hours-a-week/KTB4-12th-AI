@@ -40,4 +40,5 @@ GRANT USAGE ON SCHEMA ai_chat TO ai_chat_service;
 GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA ai_chat TO ai_chat_service;
 GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA ai_chat TO ai_chat_service;
 REVOKE INSERT,UPDATE,DELETE ON ai_chat.schema_version FROM ai_chat_service;
+REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON ai_chat.turn_reviews FROM ai_chat_service;
 COMMIT;

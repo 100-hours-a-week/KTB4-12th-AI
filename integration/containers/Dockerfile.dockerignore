@@ -2,6 +2,7 @@
 !integration/
 !integration/*.py
 !integration/schema.sql
+!integration/recipient_profile.sql
 !integration/containers/
 !integration/containers/*.py
 !integration/containers/Dockerfile
@@ -49,6 +50,9 @@
 !console/pyproject.toml
 !console/uv.lock
 !console/server.py
+!console/admin_auth.py
+!console/products.py
+!console/provider_usage.py
 !console/static/
 !console/static/**
 **/.env*
@@ -64,3 +68,16 @@
 **/returned/**
 **/data/**
 !chat/app/data/model-capabilities.json
+
+**/*.hash
+**/openrouter-key.json
+**/openrouter-chat-key.json
+**/openrouter-profiler-key.json
+**/be-shared-service-token.json
+**/be-service-token.json
+**/.key-*.tmp
+**/.key-write.lock
+**/.openrouter-*-key.json.saved
+**/.be-shared-service-token.json.saved
+**/be-chat-token.json
+**/be-profiler-token.json

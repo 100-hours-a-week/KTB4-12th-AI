@@ -49,6 +49,10 @@ def _validate_contract(metadata):
             raise ValueError("Product tag vocabulary differs from Profiler policy")
     if metadata.get("modelRevision") not in (None, "ac5d898c8d382b17167c33e5c8af644a3519b47d"):
         raise ValueError("Unapproved shared encoder revision")
+    if metadata.get("sourceKind") == "catalog-snapshot" and metadata.get("documentPreprocessing") != "gift-catalog/1":
+        raise ValueError("Unsupported snapshot document contract")
+    if metadata.get("sourceKind") == "backend-export" and metadata.get("documentPreprocessing") != "backend-export/1":
+        raise ValueError("Unsupported export document contract")
 
 
 class SearchCatalog:
@@ -136,7 +140,8 @@ class SearchCatalog:
             ):
                 raise ValueError("Mixed or incomplete catalog pages")
             products.extend(
-                ProductRecord.model_validate(product) for product in page["products"]
+                ProductRecord.model_validate(product, context={"catalog_source": self.contract.get("sourceKind")})
+                for product in page["products"]
             )
         return products
 

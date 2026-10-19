@@ -1,5 +1,5 @@
 from typing import Literal,Annotated
-from pydantic import Field,UUID4,model_validator
+from pydantic import Field,UUID4,field_validator,model_validator
 from app.models import StrictModel
 Hash=str
 class SyntheticReproduction(StrictModel):
@@ -26,3 +26,15 @@ class ReportReview(StrictModel):
  def resolved_proof(self):
   if self.status=='resolved' and self.evidence is None:raise ValueError('Resolved requires synthetic reproduction and passing regression evidence')
   return self
+
+class TurnReview(StrictModel):
+ note:str=Field(min_length=1,max_length=1500)
+ @field_validator('note',mode='before')
+ @classmethod
+ def plain_note(cls,value):
+  if isinstance(value,str):
+   if '\x00' in value:raise ValueError('NUL characters are not supported')
+   try:value.encode('utf-8')
+   except UnicodeError as e:raise ValueError('Unsupported note text') from e
+   return value.strip()
+  return value
