@@ -1,9 +1,22 @@
 """All application DSNs must name the same prepared PG service/database."""
+import os
+import re
 from urllib.parse import urlsplit, parse_qs
 import psycopg
 
+DEFAULT_HOST = "postgres"
 
-def validate_dsn(value, expected_database, expected_role, *, host="postgres", port=5432):
+
+def configured_host():
+    """The one PostgreSQL host every DSN must name: `postgres` locally, the RDS endpoint on ECS."""
+    host = os.environ.get("AI_DATABASE_HOST", "").strip() or DEFAULT_HOST
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+        raise ValueError("AI_DATABASE_HOST must be a bare hostname")
+    return host
+
+
+def validate_dsn(value, expected_database, expected_role, *, host=None, port=5432):
+    host = host or configured_host()
     parsed = urlsplit(value.replace("postgresql+psycopg://", "postgresql://"))
     query = parse_qs(parsed.query)
     if (parsed.scheme != "postgresql" or parsed.hostname != host or (parsed.port or 5432) != port
