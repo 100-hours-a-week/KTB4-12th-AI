@@ -10,6 +10,8 @@ from profiling import main, llm
 from profiling.settings import get_settings
 from integration.profiler_boundary import (
     BudgetedExtractor,
+    ProviderLimitedExtractor,
+    REQUIRED_GUARDS,
     ExecutionState,
     RequiredStore,
 )
@@ -37,15 +39,25 @@ async def lifespan(app):
         )
     if main.strict_problems(settings):
         raise RuntimeError("Integrated strict startup settings invalid")
-    budget = SharedBudget(
-        os.environ.get("PROFILING_BUDGET_URL", ""), os.environ.get("STORE_TOKEN", "")
-    )
-    budget.call("budget_summary")
+    mode = os.environ.get("AI_BUDGET_MODE", "").strip() or "guarded"
+    budget = None
+    if mode == "guarded":
+        budget = SharedBudget(
+            os.environ.get("PROFILING_BUDGET_URL", ""), os.environ.get("STORE_TOKEN", "")
+        )
+        budget.call("budget_summary")
+        guard = "central-account"
+
+        def guarded_factory(*args, **kwargs):
+            return BudgetedExtractor(*args, **kwargs, budget=budget)
+    elif mode == "provider-key-limits":
+        guard = "provider-key-limits"
+
+        def guarded_factory(*args, **kwargs):
+            return ProviderLimitedExtractor(*args, **kwargs)
+    else:
+        raise RuntimeError("Unsupported AI_BUDGET_MODE")
     original = llm.OpenRouterTagExtractor
-
-    def guarded_factory(*args, **kwargs):
-        return BudgetedExtractor(*args, **kwargs, budget=budget)
-
     llm.OpenRouterTagExtractor = guarded_factory
     context = main.lifespan(app)
     entered = False
@@ -82,7 +94,7 @@ async def lifespan(app):
             )
         app.state.integration = {
             "modelRequired": True,
-            "budgetGuard": "central-account",
+            "budgetGuard": guard,
             "catalogVersionBound": binding.version,
         }
         yield
@@ -93,7 +105,8 @@ async def lifespan(app):
         if entered:
             await context.__aexit__(None, None, None)
         else:
-            budget.close()
+            if budget is not None:
+                budget.close()
             for resource in ('catalog', 'embedding', 'backend', 'tagger'):
                 close = getattr(getattr(app.state, resource, None), 'close', None)
                 if close: close()
@@ -120,7 +133,7 @@ def integrated_health(state):
 def integrated_ready(state):
     checks = _original_ready(state)
     checks["integration_required"] = (
-        getattr(state, "integration", {}).get("budgetGuard") == "central-account"
+        getattr(state, "integration", {}).get("budgetGuard") in REQUIRED_GUARDS
     )
     checks["required_embedding"] = getattr(state, "embedding", None) is not None
     return checks

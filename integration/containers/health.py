@@ -7,6 +7,15 @@ import urllib.request
 from pathlib import Path
 
 
+def service_token():
+    # Same order as the launcher: the configured secret file, else the injected variable.
+    path = os.environ.get("AI_SERVICE_TOKEN_FILE")
+    token = Path(path).read_text().strip() if path else os.environ.get("AI_SERVICE_TOKEN", "").strip()
+    if not token:
+        raise SystemExit("AI service token file or variable missing")
+    return token
+
+
 def main():
     role = sys.argv[1]
     endpoints = {
@@ -18,9 +27,7 @@ def main():
     url, auth = endpoints[role]
     headers = {}
     if auth:
-        headers["Authorization"] = (
-            "Bearer " + Path(os.environ["AI_SERVICE_TOKEN_FILE"]).read_text().strip()
-        )
+        headers["Authorization"] = "Bearer " + service_token()
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
         urllib.request.Request(url, headers=headers), timeout=3
     ) as response:

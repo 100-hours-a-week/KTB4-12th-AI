@@ -18,17 +18,46 @@ ROLES = {
 }
 
 
+# Cost guard modes. `guarded` (default, local) keeps the central $5 ledger fence and fails closed
+# without it. `provider-key-limits` (ECS) skips the ledger; spend is capped by per-key limits set
+# on the provider account. It must be chosen explicitly — a missing ledger never disables it.
+BUDGET_MODES = ("guarded", "provider-key-limits")
+PINNED_MODEL = "openai/gpt-6-luna"
+
+
+def budget_mode(*, smoke=False):
+    mode = os.environ.get("AI_BUDGET_MODE", "").strip() or "guarded"
+    if mode not in BUDGET_MODES:
+        raise ValueError("AI_BUDGET_MODE must be one of: " + ", ".join(BUDGET_MODES))
+    if smoke and mode != "guarded":
+        raise ValueError("Synthetic images keep the guarded budget")
+    return mode
+
+
+def model_for(name, mode):
+    # A configured model is used as is; the guarded ledger fence only approves the pinned model.
+    model = os.environ.get(name, "").strip() or PINNED_MODEL
+    if mode == "guarded" and model != PINNED_MODEL:
+        raise ValueError("The guarded budget fence approves only " + PINNED_MODEL)
+    return model
+
+
 def secret(name, *, required=True):
-    # Values are supplied by existing external secret files, never baked into image/env examples.
+    # Values are supplied by existing external secret files (local Compose) or, when no file is
+    # configured, by the same-named variable the platform injects (ECS Secrets Manager).
+    # Never baked into image/env examples. A configured file always wins.
     path = os.environ.get(name + "_FILE")
-    if not path:
-        if required:
-            raise ValueError("Required secret file missing: " + name)
-        return None
-    value = Path(path).read_text().strip()
-    if not value:
-        raise ValueError("Required secret file empty: " + name)
-    return value
+    if path:
+        value = Path(path).read_text().strip()
+        if not value:
+            raise ValueError("Required secret file empty: " + name)
+        return value
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    if required:
+        raise ValueError("Required secret file or variable missing: " + name)
+    return None
 
 
 def database(value, role):
@@ -36,7 +65,8 @@ def database(value, role):
     expected_database = os.environ.get("AI_DATABASE_NAME", "")
     if not expected_database.startswith("emmet4930_"):
         raise ValueError("AI_DATABASE_NAME must identify the one prepared application database")
-    if parsed.hostname != "postgres" or parsed.path != "/" + expected_database:
+    from integration.database_identity import configured_host
+    if parsed.hostname != configured_host() or parsed.path != "/" + expected_database:
         raise ValueError("Dedicated separate PostgreSQL service/database required")
     expected = {
         "profiler": "ai_profiler_service",
@@ -140,14 +170,21 @@ def configure(role):
     relay = None
     try:
         if role in ("profiler", "profiler-smoke", "chat"):
-            from integration.containers.relay import BudgetRelay
+            mode = budget_mode(smoke=smoke)
+            os.environ["AI_BUDGET_MODE"] = mode
+            if mode == "guarded":
+                from integration.containers.relay import BudgetRelay
 
-            token = secret("STORE_TOKEN")
+                token = secret("STORE_TOKEN")
             key = secret("OPENROUTER_API_KEY")
             if smoke and not key.startswith("synthetic-"):
                 raise ValueError("Smoke image refuses real provider credentials")
-            os.environ["STORE_TOKEN"] = token
-            relay = BudgetRelay.from_environment(token, synthetic=smoke)
+            model = model_for(
+                "PROFILING_TAGGER_MODEL" if role.startswith("profiler") else "CHAT_MODEL", mode
+            )
+            if mode == "guarded":
+                os.environ["STORE_TOKEN"] = token
+                relay = BudgetRelay.from_environment(token, synthetic=smoke)
             if role.startswith("profiler"):
                 os.environ["PROFILING_OPENROUTER_API_KEY"] = key
             else:
@@ -166,29 +203,35 @@ def configure(role):
             prepare_encoder(runtime, os.environ.get("ASSET_ROOT", "/assets"))
         if relay:
             relay.start()
-            if role.startswith("profiler"):
-                os.environ.update(
-                    PROFILING_SERVICE_TOKEN=os.environ["AI_SERVICE_TOKEN"],
-                    # Synthetic and guarded launchers exercise the same catalog API.
-                    # Profiler retains policy/profile ownership; Search owns vectors.
-                    PROFILING_CATALOG_SOURCE="search_http",
-                    PROFILING_SEARCH_BASE_URL="http://127.0.0.1:8000",
-                    PROFILING_SEARCH_TOKEN=os.environ["AI_SERVICE_TOKEN"],
-                    PROFILING_TAG_SPEC="tag3disliked",
-                    PROFILING_TAGGER="openrouter",
-                    PROFILING_TAGGER_MODEL="openai/gpt-6-luna",
-                    PROFILING_BUDGET_URL=relay.url,
-                    PROFILING_EMBEDDING_DIR=os.environ.get(
-                        "SEARCH_RUNTIME_ROOT", "/runtime"
-                    ),
-                )
+        if role in ("profiler", "profiler-smoke"):
+            os.environ.update(
+                PROFILING_SERVICE_TOKEN=os.environ["AI_SERVICE_TOKEN"],
+                # Synthetic and guarded launchers exercise the same catalog API.
+                # Profiler retains policy/profile ownership; Search owns vectors.
+                PROFILING_CATALOG_SOURCE="search_http",
+                PROFILING_SEARCH_BASE_URL="http://127.0.0.1:8000",
+                PROFILING_SEARCH_TOKEN=os.environ["AI_SERVICE_TOKEN"],
+                PROFILING_TAG_SPEC="tag3disliked",
+                PROFILING_TAGGER="openrouter",
+                PROFILING_TAGGER_MODEL=model,
+                PROFILING_EMBEDDING_DIR=os.environ.get(
+                    "SEARCH_RUNTIME_ROOT", "/runtime"
+                ),
+            )
+            if relay:
+                os.environ["PROFILING_BUDGET_URL"] = relay.url
             else:
-                os.environ.update(
-                    STORE_MODE="postgres",
-                    CHAT_RUNTIME_MODE="live",
-                    CHAT_MODEL="openai/gpt-6-luna",
-                    BUDGET_STORE_URL=relay.url,
-                )
+                os.environ.pop("PROFILING_BUDGET_URL", None)
+        elif role == "chat":
+            os.environ.update(
+                STORE_MODE="postgres",
+                CHAT_RUNTIME_MODE="live",
+                CHAT_MODEL=model,
+            )
+            if relay:
+                os.environ["BUDGET_STORE_URL"] = relay.url
+            else:
+                os.environ.pop("BUDGET_STORE_URL", None)
         if role == "chat-smoke":
             if os.environ.get("OPENROUTER_API_KEY") or os.environ.get(
                 "OPENROUTER_API_KEY_FILE"

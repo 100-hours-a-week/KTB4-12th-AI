@@ -11,6 +11,10 @@ from profiling.llm import OpenRouterTagExtractor as UpstreamExtractor
 from profiling.types import RunStatus, ErrorCode
 
 
+# Guards that make the model a required, cost-capped dependency (see profiler_runtime).
+REQUIRED_GUARDS = ("central-account", "provider-key-limits")
+
+
 def official(url):
     p = urlsplit(str(url))
     return (
@@ -122,6 +126,56 @@ class BudgetedExtractor(UpstreamExtractor):
         if not official(base_url) or model != "openai/gpt-6-luna":
             raise ValueError("Only the pinned existing provider/model is supported")
         self.guard_transport = BudgetTransport(budget, transport)
+        super().__init__(
+            base_url,
+            api_key,
+            model,
+            timeout_s=timeout_s,
+            seed=seed,
+            transport=self.guard_transport,
+        )
+
+    def bind_generation(self, check):
+        self.guard_transport.preflight = check
+
+
+class PreflightTransport(httpx.BaseTransport):
+    """provider-key-limits mode: same destination and generation checks, no central reservation."""
+
+    def __init__(self, transport=None):
+        self.upstream = transport or httpx.HTTPTransport(retries=0)
+        self.preflight = None
+
+    def handle_request(self, request):
+        if not official(request.url) or request.url.path != "/api/v1/chat/completions":
+            raise httpx.TransportError("Unapproved provider destination")
+        if self.preflight is not None:
+            try:
+                self.preflight()
+            except Exception:
+                raise httpx.TransportError("Generation validation failed before send") from None
+        response = self.upstream.handle_request(request)
+        response.read()
+        if response.status_code >= 300:
+            status = response.status_code
+            response.close()
+            # Same redaction as the guarded path: provider originals never reach logs.
+            return httpx.Response(
+                status, json={"error": {"code": "PROVIDER_REQUEST_FAILED"}}, request=request
+            )
+        return response
+
+    def close(self):
+        self.upstream.close()
+
+
+class ProviderLimitedExtractor(UpstreamExtractor):
+    """Any configured model; spend is capped by the provider key's own limit."""
+
+    def __init__(self, base_url, api_key, model, *, timeout_s=120, seed=42, transport=None):
+        if not official(base_url) or not str(model or "").strip():
+            raise ValueError("Official provider and an explicit model are required")
+        self.guard_transport = PreflightTransport(transport)
         super().__init__(
             base_url,
             api_key,
