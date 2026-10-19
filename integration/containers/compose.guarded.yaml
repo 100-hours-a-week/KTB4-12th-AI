@@ -1,4 +1,5 @@
-# Dedicated candidate only. Apply explicit migrations and stage an initial PG generation before app startup.
+# Legacy ledger execution; normal team services merge compose.admin.yaml.
+# Apply explicit migrations and stage an initial PG generation before startup.
 name: emmet4930-guarded
 x-app:
   network_mode: service:mesh
@@ -121,22 +122,20 @@ services:
       AI_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
       PROFILING_DATABASE_URL_FILE: /run/secrets/database_url
       PROFILING_APP_DB_ROLE: ai_profiler_service
+      AI_BUDGET_MODE: guarded
       STORE_TOKEN_FILE: /run/secrets/store_token
-      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_key
+      PROFILING_OPENROUTER_API_KEY_FILE: /run/secrets/profiler_openrouter_key
       PROFILING_BACKEND_BASE_URL: ${PROFILING_BACKEND_BASE_URL:?authorized Backend
         callback origin}
-      BUDGET_GUARDED_ORIGIN: ${BUDGET_GUARDED_ORIGIN:?existing approved guarded gateway
-        origin}
-      BUDGET_EXPECTED_MAX_ATTEMPTS: ${BUDGET_EXPECTED_MAX_ATTEMPTS:?existing fence
-        attempts}
-      BUDGET_EXPECTED_MAX_RESERVED_USD: ${BUDGET_EXPECTED_MAX_RESERVED_USD:?existing
-        fence reservations}
+      BUDGET_GUARDED_ORIGIN: ${BUDGET_GUARDED_ORIGIN:-}
+      BUDGET_EXPECTED_MAX_ATTEMPTS: ${BUDGET_EXPECTED_MAX_ATTEMPTS:-}
+      BUDGET_EXPECTED_MAX_RESERVED_USD: ${BUDGET_EXPECTED_MAX_RESERVED_USD:-}
       PORT: '8001'
       AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
     secrets:
     - ai_service_token
     - store_token
-    - openrouter_key
+    - profiler_openrouter_key
     - source: profiler_database_url
       target: database_url
     healthcheck:
@@ -174,8 +173,9 @@ services:
     environment:
       AI_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
       DATABASE_URL_FILE: /run/secrets/database_url
+      AI_BUDGET_MODE: guarded
       STORE_TOKEN_FILE: /run/secrets/store_token
-      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_key
+      OPENROUTER_API_KEY_FILE: /run/secrets/chat_openrouter_key
       SESSION_SECRET_FILE: /run/secrets/session_secret
       QA_ADMIN_PASSWORD_FILE: /run/secrets/qa_admin_password
       DEMO_ACCESS_TOKEN_FILE: /run/secrets/demo_access_token
@@ -184,18 +184,15 @@ services:
       INTERNAL_URL: http://127.0.0.1:7860
       COOKIE_SECURE: 'false'
       CHAT_MEDIA_ROOT: /media
-      BUDGET_GUARDED_ORIGIN: ${BUDGET_GUARDED_ORIGIN:?existing approved guarded gateway
-        origin}
-      BUDGET_EXPECTED_MAX_ATTEMPTS: ${BUDGET_EXPECTED_MAX_ATTEMPTS:?existing fence
-        attempts}
-      BUDGET_EXPECTED_MAX_RESERVED_USD: ${BUDGET_EXPECTED_MAX_RESERVED_USD:?existing
-        fence reservations}
+      BUDGET_GUARDED_ORIGIN: ${BUDGET_GUARDED_ORIGIN:-}
+      BUDGET_EXPECTED_MAX_ATTEMPTS: ${BUDGET_EXPECTED_MAX_ATTEMPTS:-}
+      BUDGET_EXPECTED_MAX_RESERVED_USD: ${BUDGET_EXPECTED_MAX_RESERVED_USD:-}
       PORT: '7860'
       AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
     secrets:
     - ai_service_token
     - store_token
-    - openrouter_key
+    - chat_openrouter_key
     - session_secret
     - qa_admin_password
     - demo_access_token
@@ -247,9 +244,11 @@ secrets:
   ai_service_token:
     file: ${AI_SERVICE_TOKEN_FILE:?existing external secret file}
   store_token:
-    file: ${STORE_TOKEN_FILE:?existing external secret file}
-  openrouter_key:
-    file: ${OPENROUTER_KEY_FILE:?existing external secret file}
+    file: ${STORE_TOKEN_FILE:-/run/unconfigured/store-token}
+  chat_openrouter_key:
+    file: ${CHAT_OPENROUTER_KEY_FILE:-/run/unconfigured/chat-provider-key}
+  profiler_openrouter_key:
+    file: ${PROFILER_OPENROUTER_KEY_FILE:-/run/unconfigured/profiler-provider-key}
   session_secret:
     file: ${SESSION_SECRET_FILE:?existing external secret file}
   qa_admin_password:

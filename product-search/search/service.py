@@ -232,7 +232,7 @@ class SearchService:
         return {'productId':p['id'],'sourceProductId':p['source_product_id'],'name':p['name'],'brand':p['brand'],
                 'categoryId':p['category_id'],'sourceCategoryId':p['source_category_id'],'parentCategoryId':p['parent_category_id'],
                 'category':p['category'],'categoryGroup':p['category_group'],
-                'price':p['price'],'description':p['description'][:300], 'productType':p['product_type'],
+                'price':p['price'],'description':p['description'][:300], 'productType':p['product_type'],'productKind':p.get('kind'),
                 'availability':p['availability'],'image':p['image'],'imageLarge':p['image_large'],'imageFallback':p['image_fallback']}
 
     def _check_snapshot(self, snapshot):

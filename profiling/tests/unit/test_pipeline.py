@@ -302,6 +302,19 @@ def test_rank_products_breakdown_sums_and_matches_build_pool() -> None:
     assert [s.product.productId for s in pipeline.rank_products(rq, FOUR, scores=scores)] == [1, 2]   # 제외 모드는 비선호가 목록에 없음
 
 
+def test_unknown_popularity_is_excluded_from_percentiles_and_preserved() -> None:
+    known = [_product(1,11,"컵",views=0), _product(2,11,"컵",views=100), _product(3,11,"컵",views=200)]
+    unknown = [ProductRecord.model_validate(_product(i,11,"컵").model_dump() |
+                {"updatedAt":None,"viewCount":None,"availability":"unknown"},
+                context={"catalog_source":"catalog-snapshot"}) for i in range(4,14)]
+    ranked = pipeline.rank_products(_rq(), known + unknown)
+    assert {s.product.productId:s.popularity for s in ranked if s.product.productId <= 3} == {1:0.,2:1.,3:2.}
+    assert all(s.popularity == 0. for s in ranked if s.product.productId > 3)
+    assert all(p.updatedAt is None and p.viewCount is None for p in unknown)
+    assert all(s.popularity == 0. for s in pipeline.rank_products(_rq(), unknown))
+    assert pipeline.build_pool(_rq(), list(reversed(unknown)), 30, CV).product_ids == list(range(4,14))
+
+
 def test_pool_low_rating_pushes_back_not_excluded() -> None:
     """스킨케어(11) 1점 2건 → 편향 −4 ÷ 4 = −1.0. 1: 2.0 − 1 = 1.0 · 2: 0 − 1 = −1.0 · 3: 1.33 · 4: 0.67 ⇒ [3, 1, 4, 2]
     — 조회수 1위(1)가 2위로 밀리고 스킨케어 꼴찌(2)는 맨 뒤. 뒤로 갈 뿐 빠지지 않는다(규칙표 §5)."""

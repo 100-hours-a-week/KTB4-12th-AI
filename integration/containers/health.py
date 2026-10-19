@@ -26,7 +26,11 @@ def main():
     }
     url, auth = endpoints[role]
     headers = {}
-    if auth:
+    from integration.service_token import shared_token_configured
+    if auth and role == "chat" and (shared_token_configured() or os.getenv("CHAT_BE_SERVICE_TOKEN_FILE")):
+        from integration.service_token import expected_token
+        headers["Authorization"] = "Bearer " + expected_token("chat")
+    elif auth:
         headers["Authorization"] = "Bearer " + service_token()
     with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
         urllib.request.Request(url, headers=headers), timeout=3

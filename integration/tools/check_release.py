@@ -20,13 +20,13 @@ def source_check():
     forbidden_parts = {".venv", "node_modules", "models", "secrets", "verification",
                        "reports", "__pycache__", "returned"}
     forbidden_suffixes = {".pem", ".key", ".p12", ".jks", ".db", ".dump", ".log",
-                          ".onnx", ".safetensors", ".ckpt", ".pt"}
+                          ".onnx", ".safetensors", ".ckpt", ".pt", ".hash"}
     violations = []
     for name in paths:
         p = Path(name)
         if (forbidden_parts.intersection(p.parts) or p.suffix in forbidden_suffixes
                 or (p.name.startswith(".env") and p.name != ".env.example")
-                or p.name == "이름_대조표.md"):
+                or p.name in {"이름_대조표.md", "openrouter-key.json", "openrouter-chat-key.json", "openrouter-profiler-key.json", "be-shared-service-token.json", "be-service-token.json", "be-chat-token.json", "be-profiler-token.json"}):
             violations.append(name + ": forbidden source path")
             continue
         if p.suffix == ".py":
@@ -50,7 +50,7 @@ def compose_check():
     # config does not start containers, connect to a DB or read provider keys.
     subprocess.run(["docker", "compose", "version"], check=True, cwd=ROOT)
     files = [CONTAINERS / ("compose." + n + ".yaml")
-             for n in ("guarded", "sync", "smoke")]
+             for n in ("guarded", "sync", "smoke", "admin")]
     required = set(re.findall(r"\$\{([A-Z_]+):\?[^}]+\}",
                               "\n".join(p.read_text() for p in files)))
     with tempfile.TemporaryDirectory(prefix="ai-compose-config-") as tmp:
@@ -59,6 +59,7 @@ def compose_check():
         values = {k: str(root / "placeholder") for k in required}
         values.update(
             AI_DATABASE_NAME="emmet4930_config_only",
+            CONSOLE_ADMIN_ORIGIN="https://console.example.invalid", CONSOLE_TRUSTED_PROXY_IPS="127.0.0.1",
             EMMET_POSTGRES_VOLUME="ai-rc-config-not-created",
             EMMET_MODEL_DIR=tmp, EMMET_MEDIA_DIR=tmp,
             PROFILING_BACKEND_BASE_URL="http://127.0.0.1:8002",
@@ -69,12 +70,12 @@ def compose_check():
         )
         env = root / "compose.env"
         env.write_text("".join(f"{k}={v}\n" for k, v in sorted(values.items())))
-        for group in ([files[0]], files[:2], [files[2]]):
+        for group in ([files[0]], files[:2], [files[2]], [files[0], files[3]]):
             command = ["docker", "compose", "--env-file", str(env)]
             for path in group:
                 command += ["-f", str(path)]
             subprocess.run(command + ["config", "--quiet"], cwd=ROOT, check=True)
-    return {"configurations": 3, "containersStarted": 0}
+    return {"configurations": 4, "containersStarted": 0}
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 """Reserve on existing PostgreSQL before any paid request; unknown costs stay reserved."""
-import json,math,uuid
+import json,math,os,re,uuid
 from contextlib import asynccontextmanager
 from app.errors import APIError
 
@@ -9,6 +9,22 @@ MODEL_CAPS={'anthropic/claude-haiku-5.5':{'prompt':0.11,'completion':0.55,'reque
             'openai/gpt-6-luna':{'prompt':0.11,'completion':0.55,'request':0},
             'google/gemini-3.8-flash':{'prompt':1.6,'completion':10,'request':0},
             'anthropic/claude-sonnet-5.5':{'prompt':3,'completion':15,'request':0}}
+
+def budget_settings(account=None,expected_limit=None):
+    account=os.environ.get('BUDGET_ACCOUNT',ACCOUNT) if account is None else account
+    if not isinstance(account,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}',account):
+        raise ValueError('Explicit BUDGET_ACCOUNT required')
+    if expected_limit is None:expected_limit=os.environ.get('BUDGET_EXPECTED_LIMIT_USD','5' if account==ACCOUNT else '')
+    if isinstance(expected_limit,bool):raise ValueError('Explicit positive BUDGET_EXPECTED_LIMIT_USD required')
+    try:expected_limit=float(expected_limit)
+    except (TypeError,ValueError):raise ValueError('Explicit positive BUDGET_EXPECTED_LIMIT_USD required') from None
+    if not math.isfinite(expected_limit) or expected_limit<=0:raise ValueError('Explicit positive BUDGET_EXPECTED_LIMIT_USD required')
+    return account,expected_limit
+
+def validate_limit(result,expected_limit):
+    if (not isinstance(result,dict) or type(result.get('limitUsd')) not in (int,float)
+            or not math.isfinite(result['limitUsd']) or result['limitUsd']!=expected_limit):
+        raise ValueError('Configured cumulative account limit differs from ledger')
 
 def bounded_request(body):
     body=dict(body);cap=dict(MODEL_CAPS.get(body['model'],CAPS))
@@ -22,9 +38,15 @@ def safe_cost(value):
     return value if type(value) in (int,float) and math.isfinite(value) and value>=0 else None
 
 class BudgetHTTP:
-    def __init__(self,http,store,account=ACCOUNT):self.http,self.store,self.account=http,store,account
+    def __init__(self,http,store,account=None,*,expected_limit=None,check_summary=False):
+        self.http,self.store=http,store
+        self.account,self.expected_limit=budget_settings(account,expected_limit)
+        self.check_summary=check_summary
     def __getattr__(self,key):return getattr(self.http,key)
     async def reserve(self,body):
+        if self.check_summary:
+            try:validate_limit(await self.store.call('budget_summary',account=self.account),self.expected_limit)
+            except ValueError:raise APIError(503,'설정한 누적 예산 한도와 원장이 일치하지 않습니다.') from None
         body,amount=bounded_request(body);ident=str(uuid.uuid4())
         # If this acknowledgement is lost, do not send the paid request.
         await self.store.call('budget_reserve',account=self.account,ident=ident,amount=amount,model=body['model'])

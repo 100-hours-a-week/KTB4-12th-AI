@@ -88,10 +88,10 @@ def _require_db_url(settings: Settings) -> str:
     return settings.DATABASE_URL
 
 
-def strict_problems(settings: Settings) -> list[str]:
+def strict_problems(settings: Settings, *, managed_auth=False) -> list[str]:
     """STRICT_STARTUP 에서 기동을 막을 문제 목록(빈 목록이면 통과). 값 자체는 담지 않는다 — 어느 설정이 문제인지만."""
     problems = []
-    if not settings.SERVICE_TOKEN.strip() or settings.SERVICE_TOKEN in _DEFAULT_SECRETS:
+    if not managed_auth and (not settings.SERVICE_TOKEN.strip() or settings.SERVICE_TOKEN in _DEFAULT_SECRETS):
         problems.append("PROFILING_SERVICE_TOKEN 이 비었거나 공개 기본값")
     try:
         db_user = sa.engine.make_url(settings.DATABASE_URL).username
@@ -119,7 +119,7 @@ def strict_problems(settings: Settings) -> list[str]:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     logging.basicConfig(level=settings.LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    if settings.STRICT_STARTUP and (problems := strict_problems(settings)):
+    if settings.STRICT_STARTUP and (problems := strict_problems(settings, managed_auth=callable(getattr(app.state, "be_token_provider", None)))):
         raise RuntimeError("STRICT_STARTUP 기동 거부 — " + " · ".join(problems))
 
     # 저장소 — PostgreSQL 하나뿐. 연결이 안 되면 여기서 앱이 죽는다(기록 없이 콜백만 나가는 상태를 만들지 않으려고).
@@ -167,12 +167,12 @@ async def lifespan(app: FastAPI):
         app.state.tagger.warm_up()
         log.info("태그 추출기 ollama model=%s url=%s", settings.tagger_model, settings.OLLAMA_URL)
     elif settings.TAGGER == "openrouter":
-        if settings.OPENROUTER_API_KEY is None or not settings.OPENROUTER_API_KEY.get_secret_value().strip():
+        if not getattr(app.state, "provider_key", None) and (settings.OPENROUTER_API_KEY is None or not settings.OPENROUTER_API_KEY.get_secret_value().strip()):
             log.error("TAGGER=openrouter 인데 PROFILING_OPENROUTER_API_KEY 가 없음 — 태그 추출기 끈 채로 진행")
             tagger_reason = "no_api_key"
         else:
             from profiling.llm import OpenRouterTagExtractor
-            app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, settings.OPENROUTER_API_KEY.get_secret_value(),
+            app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, settings.OPENROUTER_API_KEY.get_secret_value() if settings.OPENROUTER_API_KEY else "",
                                                       settings.tagger_model, timeout_s=settings.TAGGER_TIMEOUT_S)
             log.info("태그 추출기 openrouter model=%s url=%s", settings.tagger_model, settings.OPENROUTER_URL)   # 키는 남기지 않음
     if settings.CATALOG_SOURCE == "search_http":
@@ -208,7 +208,8 @@ async def lifespan(app: FastAPI):
     app.state.io_limiter = anyio.CapacityLimiter(settings.IO_THREADS)   # 접수 폴링·/health — 기본 스레드풀(토큰 40)과 분리, 실행 대기가 있어도 굶지 않는다
     app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS, queue_max=settings.QUEUE_MAX)   # 3단계 §12.1 시작값 슬롯 1
     app.state.supervisor.start()
-    app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S)
+    app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S,
+                                       token_provider=getattr(app.state, "be_token_provider", None))
     log.info("profiling 시작 backend=%s pool_size=%s dislike_mode=%s pool_strategy=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE,
              settings.DISLIKE_MODE, settings.POOL_STRATEGY)
 

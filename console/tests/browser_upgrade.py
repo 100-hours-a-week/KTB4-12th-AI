@@ -30,6 +30,8 @@ async def main(args):
         page = await context.new_page()
         page.on("pageerror", lambda e: errors.append(str(e)))
         await page.goto(args.url)
+        await page.locator('.chat-options:not(.quick-check) > summary').click()
+        await page.locator('.chat-debug > summary').click()
         await page.locator("#send-chat").click()
         await expect(page.locator("#chat-status")).to_have_text("COMPLETED")
         await expect(page.locator(".eventcard.cards")).to_contain_text("상품 #101")

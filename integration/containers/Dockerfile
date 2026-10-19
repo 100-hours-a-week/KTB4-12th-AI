@@ -15,13 +15,17 @@ WORKDIR /workspace
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libstdc++6 \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 10001 app && useradd -u 10001 -g 10001 -m app \
- && mkdir -p /runtime /run/runtime && chown -R 10001:10001 /runtime /run/runtime
+ && mkdir -p /runtime /run/runtime && chown -R 10001:10001 /runtime /run/runtime \
+ && install -d -m 0700 -o 10001 -g 10001 /run/provider-key \
+ && install -m 0600 -o 10001 -g 10001 /dev/null /run/provider-key/.volume-layout
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=encoder /usr/local/bin/node /usr/local/bin/node
 COPY --from=encoder /opt/encoder /opt/encoder
 # Only runtime/migration adapters; historical launchers and fake BE stay out.
 COPY integration/audit_profile_database.py integration/database_identity.py integration/migrate_single_server.py integration/profile_callback.py integration/profile_contract.py integration/profiler_boundary.py integration/profiler_generation.py integration/profiler_health.py integration/profiler_rebind.py integration/profiler_runtime.py integration/search_sync.py integration/shared_budget.py integration/shared_search_binding.py /workspace/integration/
+COPY integration/provider_key.py integration/service_token.py integration/aws_credentials.py /workspace/integration/
 COPY integration/containers/entrypoint.py integration/containers/relay.py integration/containers/health.py /workspace/integration/containers/
+COPY integration/recipient_data.py integration/recipient_profile.sql /workspace/integration/
 COPY product-search/catalog_db.py /workspace/product-search/
 COPY product-search/search/encoder_contract.py /workspace/product-search/search/
 ENV PYTHONPATH=/workspace:/workspace/profiling/src:/workspace/product-search \
@@ -61,7 +65,7 @@ CMD ["search"]
 FROM base13 AS console
 COPY console/pyproject.toml console/uv.lock /workspace/console/
 RUN uv sync --project console --frozen --no-dev --no-install-project
-COPY console/server.py /workspace/console/
+COPY console/server.py console/admin_auth.py console/products.py console/provider_usage.py /workspace/console/
 COPY console/static /workspace/console/static
 ENV PATH=/workspace/console/.venv/bin:$PATH
 USER 10001:10001
@@ -72,15 +76,20 @@ CMD ["console"]
 FROM python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS chat
 WORKDIR /workspace
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
- PYTHONPATH=/workspace:/workspace/chat PATH=/workspace/chat/.venv/bin:$PATH
+ PYTHONPATH=/workspace:/workspace/chat:/workspace/profiling/src PATH=/workspace/chat/.venv/bin:$PATH
 COPY --from=uv /uv /usr/local/bin/uv
 COPY chat/pyproject.toml chat/uv.lock /workspace/chat/
 RUN uv sync --project chat --frozen --no-dev --no-install-project \
  && groupadd -g 10001 app && useradd -u 10001 -g 10001 -m app \
- && mkdir -p /run/runtime && chown 10001:10001 /run/runtime
+ && mkdir -p /run/runtime && chown 10001:10001 /run/runtime \
+ && install -d -m 0700 -o 10001 -g 10001 /run/provider-key \
+ && install -m 0600 -o 10001 -g 10001 /dev/null /run/provider-key/.volume-layout
 COPY chat/app /workspace/chat/app
+COPY profiling/src/profiling/__init__.py profiling/src/profiling/vocab.py /workspace/profiling/src/profiling/
+COPY profiling/src/profiling/vocab_data /workspace/profiling/src/profiling/vocab_data
 COPY chat/*.md /workspace/chat/
 COPY integration/database_identity.py /workspace/integration/
+COPY integration/provider_key.py integration/service_token.py integration/aws_credentials.py /workspace/integration/
 COPY integration/containers/entrypoint.py integration/containers/relay.py integration/containers/health.py /workspace/integration/containers/
 USER 10001:10001
 ENTRYPOINT ["python","-m","integration.containers.entrypoint"]
@@ -116,6 +125,7 @@ COPY product-search/sql /workspace/product-search/sql
 ENTRYPOINT ["python","-m","integration.migrate_single_server"]
 
 FROM profiler-smoke AS qa-init
+COPY console/admin_auth.py /workspace/console/
 COPY integration/live_backend.py /workspace/integration/
 COPY integration/containers/smoke_init.py /workspace/integration/containers/
 USER root

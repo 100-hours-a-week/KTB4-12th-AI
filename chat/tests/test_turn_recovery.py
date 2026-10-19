@@ -243,6 +243,9 @@ async def test_heartbeat_cannot_erase_recovery_requested_during_lease_response(m
  observed=asyncio.Event()
  class Store:
   async def call(self,method,**args):
+   if method=='budget_summary':
+    assert args['account']=='synthetic-budget'
+    return {'limitUsd':5}
    assert method=='lease'
    if args.get('inspect'):return {'owner':None,'active':False}
    if not args.get('release'):
@@ -270,6 +273,9 @@ async def test_lost_lease_rotation_ack_reuses_same_cas_pair(monkeypatch):
  class Store:
   def __init__(self):self.rotations=[];self.owner=None
   async def call(self,method,**args):
+   if method=='budget_summary':
+    assert args['account']=='synthetic-budget'
+    return {'limitUsd':5}
    assert method=='lease'
    if args.get('inspect'):return {'owner':self.owner,'active':self.owner is not None}
    if args.get('release'):return True

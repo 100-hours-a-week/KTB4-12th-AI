@@ -321,7 +321,8 @@ class Harness:
                         continue
                     if direct_answer is not None:
                         executed.append({'call':call,'arguments':payload,'result':self.answer_result(call['name'],payload,direct_answer,s)})
-                        text=direct_answer;await send('text',{'delta':text})
+                        text=direct_answer
+                        if text.strip():await send('text',{'delta':text})
                         for kind,block in self.answer_blocks(call['name'],payload,s):await send(kind,block)
                         completed=True;break
                     if call['name']=='show_gifts':
@@ -329,7 +330,7 @@ class Harness:
                         # No product prose or cards can be displayed before both
                         # structural and catalog invariants pass.
                         text=args.message if cards else '현재 확인한 후보에서는 추천할 상품을 고르지 못했어요. 원하는 조건을 조정하면 다시 살펴볼 수 있어요.'
-                        await send('text',{'delta':text},useful=not cards)
+                        if text.strip():await send('text',{'delta':text},useful=not cards)
                         if cards:await send('cards',{'products':cards})
                         working_filters=new_filters;completed=True;break
                     working_filters=f

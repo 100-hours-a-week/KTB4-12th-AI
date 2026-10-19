@@ -1,5 +1,6 @@
 """PC v4.12 decisions inside the existing AI-BE v1 transport contract."""
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -71,6 +72,9 @@ class IntegratedHarness(ConversationHarness):
             "실패는 명시적인 오류로 반환되며 비공개 조건의 값은 답변에 노출하지 않는다.",
         ).replace(
             "STATE_JSON\n",
+            "비선호와 충돌하는 요청은 용도나 카테고리를 바꾼 유사 상품으로 채우지 않는다. "
+            "요청한 종류에 적합한 후보가 없으면 후보 부족을 알리거나 다른 종류를 원하는지 묻는다. "
+            "공개 답변에서 비공개 수신자 조건의 내용이나 존재를 설명하지 않는다.\n"
             "개별 상품의 지속 제외와 이번 선택을 구분한다. exclude_product_ids는 사용자가 특정 상품을 "
             "앞으로 계속 제외하라고 명시했을 때만 바꾼다. 다시 고르기·다른 후보·상품 종류 변경은 "
             "이전 상품을 영구 제외하라는 뜻이 아니다. 이번에 다른 후보를 원하면 gift_context로 조회한 뒤 "
@@ -141,7 +145,7 @@ class IntegratedHarness(ConversationHarness):
         return result
 
 
-def protocol_manifest():
+def _build_protocol_manifest():
     """Identify the actual adapter and retrieval code, not only the PC variant."""
     from app.gift_protocol import manifest
 
@@ -212,3 +216,11 @@ def protocol_manifest():
         ).encode()
     ).hexdigest()
     return result
+
+
+# This is the imported process's source snapshot, not a live checkout watcher.
+_PROTOCOL_MANIFEST = _build_protocol_manifest()
+
+
+def protocol_manifest():
+    return copy.deepcopy(_PROTOCOL_MANIFEST)

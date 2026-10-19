@@ -16,6 +16,36 @@ ROLES = {"chat": "ai_chat_service", "profiler": "ai_profiler_service",
          "search": "ai_search_service", "sync": "ai_catalog_sync"}
 
 
+def migration_url():
+    path = os.environ.get("MIGRATION_DATABASE_URL_FILE")
+    value = Path(path).read_text().strip() if path else os.getenv("MIGRATION_DATABASE_URL", "").strip()
+    if not value:
+        raise ValueError("MIGRATION_DATABASE_URL_FILE or MIGRATION_DATABASE_URL is required")
+    return value
+
+
+def migrate_turn_reviews(db):
+    """Add only Chat review notes to a prepared /1 DB; preserve existing rows and roles."""
+    exists = db.execute("SELECT to_regclass('ai_chat.turn_reviews')").fetchone()[0] is not None
+    db.execute("""CREATE TABLE IF NOT EXISTS ai_chat.turn_reviews (
+        id uuid PRIMARY KEY, turn uuid NOT NULL REFERENCES ai_chat.turns(id) ON DELETE CASCADE,
+        note text NOT NULL CHECK(char_length(note) BETWEEN 1 AND 1500),
+        created timestamptz NOT NULL DEFAULT now())""")
+    db.execute("CREATE INDEX IF NOT EXISTS turn_reviews_lookup ON ai_chat.turn_reviews(turn,created,id)")
+    db.execute("GRANT SELECT,INSERT ON ai_chat.turn_reviews TO ai_chat_service")
+    db.execute("REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON ai_chat.turn_reviews FROM ai_chat_service")
+    return not exists
+
+
+def migrate_recipient_data(db):
+    """Explicit additive feature migration; never invoked by an application."""
+    exists = db.execute("SELECT to_regprocedure('ai_profile.chat_recipient_snapshot(uuid)')").fetchone()[0] is not None
+    from integration.recipient_data import migrate as migrate_inputs
+    migrate_inputs(db)
+    db.execute((ROOT / "integration/recipient_profile.sql").read_text())
+    return not exists
+
+
 def migrate(url, expected_database):
     if not expected_database.startswith("emmet4930_"):
         raise ValueError("Explicit dedicated integration database required")
@@ -36,7 +66,9 @@ def migrate(url, expected_database):
         if old:
             if old != (expected_database, VERSION):
                 raise ValueError("Unexpected existing integration migration")
-            return {"database": name, "version": VERSION, "changed": False}
+            changed = migrate_turn_reviews(db)
+            changed = migrate_recipient_data(db) or changed
+            return {"database": name, "version": VERSION, "changed": changed}
         db.execute((ROOT / "product-search/sql/catalog.sql").read_text())
         db.execute("CREATE SCHEMA IF NOT EXISTS ai_search")
         db.execute("CREATE TABLE IF NOT EXISTS ai_search.searches(id text PRIMARY KEY,created_at text,request text,response text)")
@@ -84,6 +116,8 @@ def migrate(url, expected_database):
         db.execute("GRANT INSERT ON ai_catalog.generations,ai_catalog.export_receipts,ai_catalog.product_tombstones TO ai_catalog_sync")
         db.execute("GRANT UPDATE(pending_id,last_error) ON ai_catalog.catalog_state TO ai_catalog_sync")
         db.execute("GRANT UPDATE(active_id,pending_id,revision,last_error,activated_at) ON ai_catalog.catalog_state TO ai_search_service")
+        migrate_turn_reviews(db)
+        migrate_recipient_data(db)
         db.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
         db.execute("INSERT INTO ai_runtime.database_identity VALUES(true,%s,%s)", (name, VERSION))
         return {"database": name, "version": VERSION, "changed": True}
@@ -95,9 +129,7 @@ if __name__ == "__main__":
     parser.add_argument("--emmet", action="store_true", help="Apply upstream Alembic first in this explicitly named candidate DB")
     args = parser.parse_args()
     import json
-    url = os.environ.get("MIGRATION_DATABASE_URL")
-    if not url:
-        url = Path(os.environ["MIGRATION_DATABASE_URL_FILE"]).read_text().strip()
+    url = migration_url()
     if args.emmet:
         from integration.database_identity import validate_dsn
         import subprocess

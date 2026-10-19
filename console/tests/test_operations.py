@@ -5,6 +5,7 @@ import json
 
 import httpx
 import psycopg
+import pytest
 
 from console.server import Backend, http_masked, public_health
 
@@ -51,6 +52,7 @@ def test_db_failure_does_not_erase_independently_collected_central_budget(monkey
         backend = Backend(
             {
                 "liveModel": True,
+                "budgetMode": "guarded",
                 "database": "synthetic-never-connect",
                 "targets": {
                     "chat": "http://127.0.0.1:1",
@@ -123,6 +125,7 @@ def test_live_model_and_catalog_mismatch_is_not_green():
         backend = Backend(
             {
                 "liveModel": True,
+                "budgetMode": "guarded",
                 "expectedModel": "openai/gpt-6-luna",
                 "catalogVersion": "expected-generation",
                 "searchSnapshotId": "expected-snapshot",
@@ -180,4 +183,37 @@ def test_live_model_and_catalog_mismatch_is_not_green():
         finally:
             await backend.http.aclose()
 
+    asyncio.run(case())
+
+
+@pytest.mark.parametrize("mode", [None, "provider-key-limits", "guarded"])
+def test_normal_dashboard_does_not_require_old_ledger_tables(monkeypatch, mode):
+    statements = []
+
+    class DB:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, statement):
+            statements.append(statement)
+            if "task_budget_attempts" in statement:
+                assert mode == "guarded", "Normal dashboard must not query the old ledger"
+            return self
+        def fetchall(self): return []
+        def fetchone(self):
+            return {"n": 0, "actual": None, "reserved": None, "unconfirmed_n": 0}
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: DB())
+    async def case():
+        config = {"database": "synthetic-no-connection"}
+        if mode is not None:
+            config["budgetMode"] = mode
+        backend = Backend(config)
+        try:
+            snapshot = backend.database_snapshot()
+            assert snapshot["activeCounts"] == {"chat": 0, "profiling": 0}
+            assert snapshot["jobs"] == []
+            assert (snapshot["budget"] is not None) is (mode == "guarded")
+            assert any("task_budget_attempts" in s for s in statements) is (mode == "guarded")
+        finally:
+            await backend.http.aclose()
     asyncio.run(case())

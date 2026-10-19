@@ -30,11 +30,16 @@ class ResolvedFilters(Filters):
     category_ids:list[str]=Field(default_factory=list,max_length=100)
     exclude_category_ids:list[str]=Field(default_factory=list,max_length=100)
 
+class ProfileTag(Strict):
+    axis:Literal['브랜드','IP','카테고리']
+    tag:str=Field(min_length=1,max_length=100)
+
 class Profile(Strict):
     recipient_id:str=Field(default='none',min_length=1,max_length=80)
     label:str=Field(default='정보 없음',max_length=80)
     preferences:str=Field(default='',max_length=1200)
     disliked_category_ids:list[str]=Field(default_factory=list,max_length=20)
+    disliked_tags:list[ProfileTag]=Field(default_factory=list,max_length=60)
     candidate_ids:list[str]=Field(default_factory=list,max_length=30)
     candidate_scope:Literal['only','preferred']='only'
 

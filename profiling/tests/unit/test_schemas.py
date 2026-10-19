@@ -97,3 +97,22 @@ def test_product_record_availability_three_values() -> None:
     assert ProductRecord(**{**base, "availability": "unknown"}).availability == "unknown"  # 3값을 그대로 줘도 받는다
     with pytest.raises(ValidationError):
         ProductRecord(**{**base, "availability": "품절"})                                  # 3값 밖은 거부
+
+
+def test_unknown_observations_require_explicit_search_source_context() -> None:
+    product = {"productId":1,"name":"synthetic","brand":"b","description":None,"categoryId":1,
+               "categoryName":"c","price":0,"availability":"unknown","updatedAt":None,"viewCount":None}
+    with pytest.raises(ValidationError):
+        ProductRecord.model_validate(product)
+    export = ProductRecord.model_validate(product, context={"catalog_source":"backend-export"})
+    assert export.updatedAt is None and export.viewCount is None
+    record = ProductRecord.model_validate(product, context={"catalog_source":"catalog-snapshot"})
+    assert record.updatedAt is None and record.viewCount is None
+    for change in ({"viewCount":0},{"updatedAt":"2026-10-18T00:00:00Z"},{"availability":"available"}):
+        with pytest.raises(ValidationError):
+            ProductRecord.model_validate(product | change, context={"catalog_source":"catalog-snapshot"})
+    for missing in ("viewCount", "updatedAt"):
+        for source in ("catalog-snapshot", "backend-export"):
+            with pytest.raises(ValidationError):
+                ProductRecord.model_validate({k:v for k,v in product.items() if k != missing},
+                                             context={"catalog_source":source})

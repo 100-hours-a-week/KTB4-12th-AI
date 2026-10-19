@@ -4,6 +4,7 @@ version = "1.5.2"
 description = "Stored-event chat API and free integration fixtures"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "boto3==1.43.114",
   "fastapi==0.141.1",
   "httpx==0.28.1",
   "itsdangerous==2.2.0",
@@ -17,7 +18,7 @@ test = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["."]
+pythonpath = [".", "../profiling/src"]
 addopts = "-p no:cacheprovider"
 
 [tool.uv]

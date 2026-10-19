@@ -33,3 +33,17 @@ reports/
 *.tar
 *.tar.gz
 *.zip
+
+# Operator credentials and their atomic-write state stay outside source.
+*.hash
+openrouter-key.json
+openrouter-chat-key.json
+openrouter-profiler-key.json
+be-shared-service-token.json
+be-service-token.json
+be-chat-token.json
+be-profiler-token.json
+.key-*.tmp
+.key-write.lock
+.openrouter-*-key.json.saved
+.be-shared-service-token.json.saved

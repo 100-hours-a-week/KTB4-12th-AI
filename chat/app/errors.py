@@ -15,6 +15,22 @@ ERROR_CODES = {
 }
 
 
+class _ASGIExceptionLogFilter(logging.Filter):
+    """Starlette rethrows handled 500s; keep their input out of Uvicorn logs too."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.error" or not isinstance(record.msg, str) or record.msg.rstrip() != "Exception in ASGI application":
+            return True
+        error_type = record.exc_info[0].__name__ if record.exc_info and record.exc_info[0] else "UnknownException"
+        record.msg = "Exception in ASGI application: %s"
+        record.args = (error_type,)
+        record.exc_info = None
+        record.exc_text = None
+        record.stack_info = None
+        record.message = record.getMessage()
+        return True
+
+
 class APIError(Exception):
     def __init__(self, status: int, message: str, headers: dict[str, str] | None = None):
         self.status = status
@@ -30,6 +46,10 @@ def error_body(message: str, status: int) -> dict:
 
 
 def install_error_handlers(app: FastAPI) -> None:
+    asgi_logger = logging.getLogger("uvicorn.error")
+    if not any(isinstance(f, _ASGIExceptionLogFilter) for f in asgi_logger.filters):
+        asgi_logger.addFilter(_ASGIExceptionLogFilter())
+
     @app.exception_handler(APIError)
     async def handle_api_error(request: Request, exc: APIError):
         return JSONResponse(error_body(exc.message, exc.status), status_code=exc.status, headers=exc.headers)
@@ -44,5 +64,6 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception):
-        logging.exception("Unexpected API error", exc_info=exc)
-        return JSONResponse(error_body("요청 처리 중 오류가 발생했습니다.", 500), status_code=500)
+        body = error_body("요청 처리 중 오류가 발생했습니다.", 500)
+        logging.error("Unexpected API error type=%s traceId=%s", type(exc).__name__, body["error"]["traceId"])
+        return JSONResponse(body, status_code=500)

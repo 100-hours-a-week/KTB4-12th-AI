@@ -83,6 +83,8 @@ async def case(browser, url, kind):
 
     await page.route("**/api/chat/**", hold_old)
     await page.goto(url)
+    await page.locator('.chat-options:not(.quick-check) > summary').click()
+    await page.locator('.chat-debug > summary').click()
     if kind != "state":
         await page.select_option("#scenario", "/mock slow")
     await page.locator("#send-chat").click()

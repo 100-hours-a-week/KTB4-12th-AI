@@ -72,6 +72,11 @@ async def get_recipient_store(request: Request) -> RecipientProfileStore:
     return request.app.state.recipient_store
 
 
+async def get_recipient_data(request: Request) -> Any:
+    """Shared integration input store; standalone Emmet keeps its original ports."""
+    return getattr(request.app.state, "recipient_data", None)
+
+
 async def get_backend(request: Request) -> BackendPort:
     return request.app.state.backend
 
@@ -106,6 +111,7 @@ def _error(status: int, code: str, message: str, *, retry_after: int | None = No
 
 
 async def require_service_token(
+    request: Request = None,
     authorization: Annotated[str | None, Header()] = None,
     settings: Annotated[Settings, Depends(settings_dep)] = None,  # type: ignore[assignment]  — FastAPI가 주입
 ) -> None:
@@ -113,7 +119,14 @@ async def require_service_token(
 
     403 FORBIDDEN(접근 권한 없음)은 토큰은 맞지만 권한이 없는 경우인데, 서비스 토큰 하나뿐인 지금은 발생하지 않는다.
     """
-    expected = settings.SERVICE_TOKEN
+    provider = getattr(request.app.state, "be_token_provider", None) if request is not None else None
+    if provider:
+        try:
+            expected = (await anyio.to_thread.run_sync(provider)).value
+        except ValueError:
+            raise _error(503, "SERVICE_TOKEN_UNAVAILABLE", "서비스 인증을 읽을 수 없습니다.") from None
+    else:
+        expected = settings.SERVICE_TOKEN
     if not expected:  # 토큰을 설정하지 않은 로컬 개발 환경에서는 검사하지 않는다. 서버는 기동 검사(STRICT_STARTUP)가 빈 토큰을 거부한다
         return
     if not authorization or not authorization.startswith("Bearer "):
@@ -276,6 +289,7 @@ def dispatch(
     callback_max_attempts: int = 3, callback_backoff_s: float = 0.5, *, dislike_mode: str = pipeline.DislikeMode.EXCLUDE,
     pool_strategy: str = pipeline.PoolStrategy.D,
     tagger: TagExtractor | None = None, embedding: EmbeddingIndex | None = None, tag_spec: Any = None,
+    recipient_data: Any = None,
 ) -> None:
     """**잠금 → 판정 → 실행**을 한 덩어리로. Supervisor 워커 스레드(슬롯) 하나에서 끝까지 돈다.
 
@@ -288,6 +302,14 @@ def dispatch(
     with store.run_lock(rid, sv) as got:
         if not got:
             return
+        if recipient_data is not None:
+            try:
+                if not recipient_data.is_current(rid, sv, pipeline.input_hash(rq)):
+                    log.info("7.6 이전 입력 건너뜀 recipient=%s source_version=%s", rid, sv)
+                    return
+            except Exception as e:  # no analysis without a verified durable input
+                log.error("7.6 입력 버전 확인 실패 recipient=%s source_version=%s: %s", rid, sv, type(e).__name__)
+                return
         existing = _existing_run(store, rq)
         action, why = decide(existing, pipeline.input_hash(rq), stale_after_s=stale_after_s)
         log.info("7.6 중복 판정 recipient=%s source_version=%s → %s (%s)", rid, sv, action, why)
@@ -318,20 +340,52 @@ async def extract_and_pool(
     settings: Annotated[Settings, Depends(settings_dep)],
     io_limiter: Annotated[anyio.CapacityLimiter, Depends(get_io_limiter)],
     model_parts: Annotated[tuple[TagExtractor | None, EmbeddingIndex | None, Any], Depends(get_model_parts)] = (None, None, None),
+    recipient_data: Annotated[Any, Depends(get_recipient_data)] = None,
 ) -> SuccessResponse[ProfileAccepted]:
     """접수만 하고 202를 돌려준다. 분석은 Supervisor 워커 스레드에서.
 
     순서:
       1) body 검증 — FastAPI가 이 함수에 들어오기 전에 ProfileExtractRequest로 검증한다 (위반 → 422 → main.py가 400으로)
       2) 토큰 — dependencies=[require_service_token]
-      3) 활성 카탈로그 — 없으면 지금 503. 백그라운드에서 발견하면 Backend는 영영 모르기 때문에 접수 단계에서 걸러야 한다
-      4) Supervisor 큐에 제출 — 가득이거나 종료 중이면 503 + Retry-After(QUEUE_FULL_RETRY_AFTER_S). 기다리지 않는다
-      5) 202 — 요청 값 그대로 + PENDING
+      3) 통합 경로만 최신 입력 영속 보관 — 분석 상태와 별개. 같은 번호의 다른 본문은 409, 이전 번호는 분석 없이 202
+      4) 활성 카탈로그 — 없으면 지금 503. 이미 받은 최신 입력은 남긴다
+      5) Supervisor 큐에 제출 — 가득이거나 종료 중이면 503 + Retry-After(QUEUE_FULL_RETRY_AFTER_S). 기다리지 않는다
+      6) 202 — 요청 값 그대로 + PENDING
     같은 (수신자, 버전)의 중복 접수: Backend는 PENDING이 maximum-window(⚙6h)를 넘으면 **같은 sourceVersion으로 복구 전송**한다
     (통합 수정점 v0.7 ⑤, 10-08 실측 — 창마다 반복, 틱당 ⚙50. 새 변경이 있으면 복구 대신 새 번호).
-    그 판정(decide)은 워커 스레드의 슬롯 안에서 한다 — dispatch() 참고. 어느 쪽이든 응답은 202 PENDING이다
+    같은 입력의 재실행 판정(decide)은 워커 스레드의 슬롯 안에서 한다 — dispatch() 참고. 정상 접수 응답은 202 PENDING이다
     (Backend 입장에서는 "접수됐다"가 전부이고, 결과는 7.7로 간다).
     """
+    rq = pipeline.to_internal(body)
+    if recipient_data is not None:
+        # The shared store has no model or BE dependency. Preserve the original
+        # preference and explicit dislikes even if catalog, queue or analysis
+        # subsequently fails. Review text stays in the existing Profiler path.
+        from integration.recipient_data import RecipientInputConflict, RecipientInputInvalid
+
+        payload = {"giftPreference": body.giftPreference, "dislikedCategories": [
+            {"categoryId": item.categoryId, "categoryName": item.categoryName}
+            for item in body.dislikedCategories]}
+        try:
+            request_hash = pipeline.input_hash(rq)
+        except (UnicodeError, ValueError) as e:
+            raise _error(400, "INVALID_REQUEST", "프로파일 입력에 지원하지 않는 문자가 있습니다.") from e
+        try:
+            receipt = await anyio.to_thread.run_sync(
+                recipient_data.record, rq.recipient_user_id, rq.source_version,
+                payload, request_hash, limiter=io_limiter)
+        except RecipientInputConflict as e:
+            raise _error(409, "INVALID_REQUEST", "같은 sourceVersion에 다른 입력을 보낼 수 없습니다.") from e
+        except RecipientInputInvalid as e:
+            raise _error(400, "INVALID_REQUEST", "프로파일 입력에 지원하지 않는 문자가 있습니다.") from e
+        except Exception as e:
+            log.error("7.6 입력 보관 실패 recipient=%s source_version=%s: %s",
+                      rq.recipient_user_id, rq.source_version, type(e).__name__)
+            raise _error(503, "SERVICE_UNAVAILABLE", "프로파일 입력을 보관할 수 없습니다.") from e
+        if receipt == "stale":
+            return SuccessResponse(message="더 최신의 프로파일 입력이 이미 접수되었습니다.",
+                data=ProfileAccepted(recipientUserId=body.recipientUserId, sourceVersion=body.sourceVersion))
+
     try:
         await anyio.to_thread.run_sync(catalog.active, limiter=io_limiter)   # TTL 밖이면 DB 1문장 — 기본 스레드풀·이벤트 루프 둘 다 안 잡는다
     except NoActiveCatalog as e:
@@ -342,7 +396,6 @@ async def extract_and_pool(
         log.warning("%s recipient=%s source_version=%s unknown=%s — 무시하고 진행", ErrorCode.CONTRACT_7_6_UNKNOWN_FIELD,
                     body.recipientUserId, body.sourceVersion, unknown)
 
-    rq = pipeline.to_internal(body)
     log.info("7.6 접수 recipient=%s source_version=%s disliked=%d reviews=%d pref=%s",
              body.recipientUserId, body.sourceVersion, len(body.dislikedCategories), len(body.reviews), body.giftPreference is not None)
 
@@ -350,7 +403,7 @@ async def extract_and_pool(
     accepted = supervisor.submit(dispatch, rq, catalog, store, backend, settings.POOL_SIZE, recipient_store, settings.RUNNING_STALE_S,
                                  settings.CALLBACK_MAX_ATTEMPTS, settings.CALLBACK_BACKOFF_S, dislike_mode=settings.DISLIKE_MODE,
                                  pool_strategy=settings.POOL_STRATEGY, tagger=model_parts[0], embedding=model_parts[1],
-                                 tag_spec=model_parts[2])
+                                 tag_spec=model_parts[2], recipient_data=recipient_data)
     if not accepted:   # 큐 가득·종료 중 — 기다리지 않고 거절. Backend 는 Retry-After 를 읽지 않고 503 을 재시도 가능 실패로 본다:
                        # 틱 중단 + 디바운스 재시작 1회, 두 번째면 접음(v0.7 ②③). 그래서 QUEUE_MAX 는 BE 틱당 일반 ⚙100 + 복구 ⚙50 보다 커야 한다
         log.warning("7.6 거절 recipient=%s source_version=%s — 접수 대기열 가득(%d) 또는 종료 중 → 503 Retry-After %ds",

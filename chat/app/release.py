@@ -2,6 +2,8 @@
 import json,os
 from pathlib import Path
 
+_PATH=Path(__file__).with_name('release.json')
+_REVISION=json.loads(_PATH.read_text())['revision'] if _PATH.exists() else os.getenv('APP_REVISION','local')
+
 def revision():
-    path=Path(__file__).with_name('release.json')
-    return json.loads(path.read_text())['revision'] if path.exists() else os.getenv('APP_REVISION','local')
+    return _REVISION

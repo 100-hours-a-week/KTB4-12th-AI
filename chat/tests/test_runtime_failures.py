@@ -59,3 +59,39 @@ async def test_structured_retry_recovers_format(runtime):
   return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':value}}]})
  await r.http.aclose();r.http=httpx.AsyncClient(base_url='https://example.test',transport=httpx.MockTransport(reply))
  value=await r.complete([],[],Plan);assert value['search'] is False;assert n==2
+
+@pytest.mark.parametrize('failures',[0,1,2])
+async def test_trace_retries_are_bounded_and_do_not_prevent_terminal(runtime,failures):
+ r,s=runtime;original=s.call;attempts=[]
+ async def call(method,**args):
+  if method=='context':
+   attempts.append(args['value'])
+   if len(attempts)<=failures:raise httpx.ConnectError('synthetic context outage')
+  return await original(method,**args)
+ async def generate(cid,tid,receipt):receipt['ordinaryNote']='합성 기록'
+ s.call=call;r.generate=generate
+ await r.run('conversation','turn')
+ assert len(attempts)==min(failures+1,2)
+ assert attempts[0]['tracePersistence']=={'version':1,'status':'recorded'}
+ assert all(v==attempts[0] for v in attempts)
+ assert s.events[-1]==('turn.finished',{'status':'COMPLETED'})
+ assert (s.context is None)==(failures==2)
+
+async def test_trace_snapshot_failure_still_finishes_turn(runtime,monkeypatch):
+ r,s=runtime
+ def broken(_):raise ValueError('synthetic snapshot failure')
+ async def generate(cid,tid,receipt):pass
+ monkeypatch.setattr('app.diagnostics.snapshot_receipt',broken);r.generate=generate
+ await r.run('conversation','turn')
+ assert s.context is None
+ assert s.events[-1]==('turn.finished',{'status':'COMPLETED'})
+
+async def test_final_trace_snapshot_masks_configured_secrets(runtime,monkeypatch):
+ r,s=runtime;canary='synthetic-secret-canary-only'
+ monkeypatch.setenv('TRACE_TEST_API_KEY',canary)
+ receipt={'outcome':'INTERRUPTED','note':'ordinary note '+canary,'authorization':'Bearer synthetic'}
+ assert await r.save_context('conversation','turn',receipt)
+ assert s.context['tracePersistence']=={'version':1,'status':'interrupted'}
+ assert s.context['note']=='ordinary note [REDACTED]'
+ assert s.context['authorization']=='[REDACTED]'
+ assert receipt['note']=='ordinary note '+canary

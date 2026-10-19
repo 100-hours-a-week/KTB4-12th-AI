@@ -1,0 +1,95 @@
+# Console manages two provider keys and one common BE token per environment.
+# Normal team execution: merge with compose.guarded.yaml; provider key limits are the default.
+services:
+  chat:
+    environment:
+      OPENROUTER_API_KEY_FILE: ''
+      STORE_TOKEN_FILE: ''
+      AI_SERVICE_TOKEN_FILE: ''
+      AI_INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:?local, develop, or production}
+      AI_BUDGET_MODE: ${AI_BUDGET_MODE:-provider-key-limits}
+      OPENROUTER_MANAGED_KEY_DIR: /run/provider-key
+      BE_SERVICE_TOKEN_DIR: /run/provider-key
+    secrets: !override
+    - ai_service_token
+    - session_secret
+    - qa_admin_password
+    - demo_access_token
+    - source: chat_database_url
+      target: database_url
+    volumes:
+    - type: volume
+      source: admin-settings
+      target: /run/provider-key
+      read_only: true
+  profiler:
+    environment:
+      PROFILING_OPENROUTER_API_KEY_FILE: ''
+      STORE_TOKEN_FILE: ''
+      AI_SERVICE_TOKEN_FILE: ''
+      AI_INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:?local, develop, or production}
+      AI_BUDGET_MODE: ${AI_BUDGET_MODE:-provider-key-limits}
+      OPENROUTER_MANAGED_KEY_DIR: /run/provider-key
+      BE_SERVICE_TOKEN_DIR: /run/provider-key
+    secrets: !override
+    - ai_service_token
+    - source: profiler_database_url
+      target: database_url
+    volumes:
+    - type: volume
+      source: admin-settings
+      target: /run/provider-key
+      read_only: true
+  mesh:
+    ports:
+    - 127.0.0.1:${CONSOLE_PORT:-18811}:18800
+  console:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: console
+    command: [console]
+    depends_on:
+      mesh:
+        condition: service_started
+    environment:
+      PORT: '18800'
+      CONSOLE_TARGET_FILE: /run/secrets/console_target
+      CONSOLE_ADMIN_HASH_FILE: /run/secrets/console_admin_hash
+      CONSOLE_ADMIN_SESSION_FILE: /runtime/admin-session/sessions.sqlite3
+      CONSOLE_ADMIN_ORIGIN: ${CONSOLE_ADMIN_ORIGIN:-}
+      CONSOLE_TRUSTED_PROXY_IPS: ${CONSOLE_TRUSTED_PROXY_IPS:-127.0.0.1,::1}
+      CONSOLE_BE_CHAT_BASE_URL: ${CONSOLE_BE_CHAT_BASE_URL:-}
+      CONSOLE_BE_PROFILER_BASE_URL: ${CONSOLE_BE_PROFILER_BASE_URL:-}
+      APP_REVISION: ${APP_REVISION:-}
+      OPENROUTER_MANAGED_KEY_DIR: /run/provider-key
+      BE_SERVICE_TOKEN_DIR: /run/provider-key
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:?local, develop, or production}
+      AI_BUDGET_MODE: ${AI_BUDGET_MODE:-provider-key-limits}
+    secrets: [console_target, console_admin_hash]
+    volumes:
+    - console-cache:/runtime
+    - type: volume
+      source: admin-settings
+      target: /run/provider-key
+      read_only: false
+volumes:
+  admin-settings: {}
+  console-cache: {}
+secrets:
+  console_target:
+    # A missing operator file prevents Console startup, not an AI-only command.
+    # These paths contain no built-in credentials or default target settings.
+    file: ${CONSOLE_TARGET_FILE:-/run/ai-console/target.json}
+  console_admin_hash:
+    file: ${CONSOLE_ADMIN_HASH_FILE:-/run/ai-console/admin.hash}

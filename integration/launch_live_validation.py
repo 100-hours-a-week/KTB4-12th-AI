@@ -392,6 +392,7 @@ def main():
                 "PROFILING_TAGGER_REQUIRED": "true",
                 "PROFILING_OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"],
                 "PROFILING_BUDGET_URL": urls["budget"],
+                "AI_BUDGET_MODE": "guarded",
                 "STORE_TOKEN": existing["STORE_TOKEN"],
                 "PROFILING_EMBEDDING_DIR": str(runtime),
                 "PROFILING_EMBEDDING_REQUIRED": "true",
@@ -419,6 +420,7 @@ def main():
                 "DATABASE_URL": db.replace("fixture_owner@", "ai_chat_service@")
                 + "?options=-csearch_path%3Dai_chat,public",
                 "BUDGET_STORE_URL": urls["budget"],
+                "AI_BUDGET_MODE": "guarded",
                 "INTERNAL_URL": urls["chat"],
                 "COOKIE_SECURE": "false",
             },
@@ -429,6 +431,7 @@ def main():
         config = {
             "label": "실제 Luna · 4231상품 · 합성 BE 계약 하네스",
             "liveModel": True,
+            "budgetMode": "guarded",
             "expectedModel": "openai/gpt-6-luna",
             "catalogVersion": str(catalog["ai_catalog_version"]),
             "searchSnapshotId": meta["snapshotId"],

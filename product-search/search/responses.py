@@ -28,6 +28,7 @@ class ProductSummary(ResponseModel):
     price: Count
     description: str
     productType: Literal['Shipping', 'Pickup', 'Voucher'] | None
+    productKind: str | None = None
     availability: Literal['available', 'unavailable', 'unknown']
     image: str
     imageLarge: str

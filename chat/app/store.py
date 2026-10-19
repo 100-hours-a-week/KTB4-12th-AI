@@ -8,6 +8,7 @@ import time
 import math
 from decimal import Decimal
 from psycopg.rows import dict_row
+from psycopg.errors import InsufficientPrivilege, UndefinedColumn, UndefinedTable
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from app.errors import APIError
@@ -23,6 +24,11 @@ class Store:
    with self.pool.connection() as db:
     row=db.execute("SELECT version FROM schema_version WHERE singleton").fetchone()
     if not row or row['version']!='single-server/1':raise RuntimeError('Chat migration required')
+    self.profile_lookup=bool(db.execute("SELECT to_regprocedure('ai_profile.chat_recipient_snapshot(uuid)') AS lookup").fetchone()['lookup'])
+    # The review table is an additive /1 migration; validate before admitting work.
+    try:db.execute('SELECT id,turn,note,created FROM turn_reviews LIMIT 0')
+    except (UndefinedTable,UndefinedColumn,InsufficientPrivilege) as exc:
+     raise RuntimeError('Chat review migration required') from exc
   except BaseException:
    self.pool.close()
    raise
@@ -157,7 +163,7 @@ class Store:
    if old is None:return None
    if str(old['conversation'])!=cid or old['state']['message']!=message or old['requested_model']!=model or old['recipient_context']!=recipient_context or old['prepared_context']!=prepared_context:raise APIError(409,'같은 질문 ID에는 같은 질문, 모델, 수신자 정보를 사용해야 합니다.')
    return old['state']
- def start(self,cid,tid,message,owner,model=None,recipient_context=None,prepared_context=None):
+ def start(self,cid,tid,message,owner,model=None,recipient_context=None,prepared_context=None,quick_check=False):
   with self.pool.connection() as db:
    self._guard(db,owner);binding=self._conversation(db,cid,True)
    if prepared_context is not None:
@@ -172,6 +178,15 @@ class Store:
    if old:
     if str(old['conversation'])!=cid or old['state']['message']!=message or old['requested_model']!=model or old['recipient_context']!=recipient_context or old['prepared_context']!=prepared_context:raise APIError(409,'같은 질문 ID에는 같은 질문, 모델, 수신자 정보를 사용해야 합니다.')
     return [old['state'],False]
+   if quick_check:
+    # Check existing current-version consent inside the admission transaction.
+    # Project a boolean in SQL: recipient prose never leaves PostgreSQL here.
+    # The synthetic NONE context below is independent of the granted version.
+    if recipient_context!={'recipientUserId':binding['recipient'],'status':'NONE','sourceVersion':0,'giftPreference':None,'dislikedCategories':[]} or prepared_context is not None:
+     raise APIError(400,'QUICK_CHECK_SYNTHETIC_CONTEXT_REQUIRED')
+    if db.execute('SELECT 1 FROM turns WHERE conversation=%s LIMIT 1',(cid,)).fetchone():
+     raise APIError(409,'QUICK_CHECK_NEW_CONVERSATION_REQUIRED')
+    if not self.profile_lookup:raise APIError(409,'QUICK_CHECK_GRANT_REQUIRED')
    if db.execute("SELECT 1 FROM turns WHERE conversation=%s AND state->>'status'='PROCESSING'",(cid,)).fetchone():raise APIError(409,'이전 답변이 끝난 뒤 질문해 주세요.')
    # Serialize global admission across distinct conversations.
    db.execute('SELECT pg_advisory_xact_lock(908428)')
@@ -179,13 +194,32 @@ class Store:
    if db.execute("SELECT count(*) AS n FROM turns WHERE created>now()-interval '24 hours'").fetchone()['n']>=int(os.getenv('CHAT_DAILY_LIMIT','200')):raise APIError(429,'체험 서버의 일일 사용량을 모두 사용했습니다.')
    if n>=int(os.getenv('CHAT_MAX_ACTIVE','4')):raise APIError(429,'현재 요청이 많습니다. 잠시 후 다시 시도해 주세요.')
    if db.execute('SELECT paused FROM admission_control WHERE id=1 FOR SHARE').fetchone()['paused']:raise APIError(503,'배포를 위해 새 질문 접수를 잠시 중지했습니다. 같은 ID로 다시 시도해 주세요.')
+   if quick_check:
+    # Evaluate after potentially blocking admission locks, immediately before
+    # insertion; the existing function uses statement time for grant expiry.
+    allowed=db.execute("""SELECT COALESCE(
+      snapshot->>'source'='AI_PROFILE_STORE'
+      AND jsonb_typeof(snapshot->'inputSourceVersion')='number'
+      AND (snapshot->>'accessStatus') IS DISTINCT FROM 'NOT_AUTHORIZED', false) AS authorized
+      FROM (SELECT ai_profile.chat_recipient_snapshot(%s) AS snapshot) AS bound""",(cid,)).fetchone()
+    if not allowed or allowed['authorized'] is not True:raise APIError(409,'QUICK_CHECK_GRANT_REQUIRED')
    state={'turnId':tid,'status':'PROCESSING','message':message,'blocks':[],'lastEventId':0}
-   db.execute('INSERT INTO turns(id,conversation,state,requested_model,recipient_context,prepared_context) VALUES(%s,%s,%s,%s,%s,%s)',(tid,cid,Jsonb(state),model,Jsonb(recipient_context) if recipient_context is not None else None,Jsonb(prepared_context) if prepared_context is not None else None))
+   context={'tracePersistence':{'version':1,'status':'pending'}}
+   if self.profile_lookup and recipient_context is None:
+    # Freeze the authorized recipient snapshot with admission; retries reuse it.
+    context['recipientProfile']=db.execute('SELECT ai_profile.chat_recipient_snapshot(%s) AS snapshot',(cid,)).fetchone()['snapshot']
+   db.execute('INSERT INTO turns(id,conversation,state,requested_model,recipient_context,prepared_context,context) VALUES(%s,%s,%s,%s,%s,%s,%s)',(tid,cid,Jsonb(state),model,Jsonb(recipient_context) if recipient_context is not None else None,Jsonb(prepared_context) if prepared_context is not None else None,Jsonb(context)))
    db.execute('UPDATE conversations SET touched=now() WHERE id=%s',(cid,))
    return [state,True]
  def recipient_context(self,cid,tid):
   with self.pool.connection() as db:return self._turn(db,cid,tid)['recipient_context']
  def _event(self,db,tid,state,kind,payload):
+  if kind=='turn.finished':
+   # Commit missing-trace evidence with the public terminal event. A lost
+   # context-write acknowledgement must not overwrite an actually saved trace.
+   db.execute("""UPDATE turns SET context=jsonb_set(context,'{tracePersistence}',
+    '{"version":1,"status":"not_recorded"}'::jsonb)
+    WHERE id=%s AND context->'tracePersistence'->>'status'='pending'""",(tid,))
   state['lastEventId']+=1
   db.execute('UPDATE turns SET state=%s WHERE id=%s',(Jsonb(state),tid))
   db.execute('INSERT INTO events VALUES(%s,%s,%s,%s)',(tid,state['lastEventId'],kind,Jsonb(state if kind=='turn.finished' else payload)))
@@ -219,7 +253,11 @@ class Store:
  def context(self,cid,tid,value=None):
   with self.pool.connection() as db:
    r=self._turn(db,cid,tid)
-   if value is not None:db.execute('UPDATE turns SET context=%s WHERE id=%s',(Jsonb(value),tid));return True
+   if value is not None:
+    value=dict(value)
+    if r['context'].get('recipientProfile',{}).get('source')=='AI_PROFILE_STORE':
+     value['recipientProfile']=r['context']['recipientProfile']
+    db.execute('UPDATE turns SET context=%s WHERE id=%s',(Jsonb(value),tid));return True
    return r['context']
  def session(self,sid,sender=None):
   with self.pool.connection() as db:
@@ -357,6 +395,23 @@ class Store:
    rows=db.execute('SELECT f.*,t.state,t.context,t.conversation FROM feedback f JOIN turns t ON t.id=f.turn ORDER BY f.created DESC LIMIT 200').fetchall()
    return [{**dict(r),'id':str(r['id']),'turn':str(r['turn']),'conversation':str(r['conversation']),'created':r['created'].isoformat()} for r in rows]
 
+ def admin_turn_review(self,cid,tid,review_id,note):
+  from app.diagnostics import clean
+  from app.review_models import TurnReview
+  from pydantic import ValidationError
+  try:note=TurnReview.model_validate({'note':note}).note
+  except ValidationError:raise APIError(400,'평가 메모의 형식이나 길이를 확인해 주세요.') from None
+  with self.pool.connection() as db:
+   self._turn(db,cid,tid)
+   db.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(review_id,))
+   old=db.execute('SELECT turn,note,created FROM turn_reviews WHERE id=%s',(review_id,)).fetchone()
+   if old:
+    if str(old['turn'])!=tid or old['note']!=note:raise APIError(409,'같은 평가 ID에는 같은 턴과 메모를 사용해야 합니다.')
+    created=old['created']
+   else:
+    created=db.execute('INSERT INTO turn_reviews(id,turn,note) VALUES(%s,%s,%s) RETURNING created',(review_id,tid,note)).fetchone()['created']
+  return clean({'conversationId':cid,'turnId':tid,'reviewId':review_id,'note':note,'created':created.isoformat(),'saved':True,'duplicate':old is not None})
+
  def admin_conversations(self,limit=20,cursor=None,status=None,since=None,until=None,q='',feedback_state='all',sort='created'):
   if not 1<=limit<=50:raise APIError(400,'잘못된 페이지 크기입니다.')
   if feedback_state not in {'all','any','pending','reviewed'} or sort not in {'created','feedback'}:raise APIError(400,'잘못된 의견 필터입니다.')
@@ -403,7 +458,8 @@ class Store:
   for r in rows:
    items.append({'id':str(r['id']),'senderUserId':r['sender'],'recipientUserId':r['recipient'],'created':r['created'].isoformat(),'title':r['title'] or '새 대화','turnCount':r['turn_count'],'failedCount':r['failed_count'],'feedbackCount':r['feedback_count'],'pendingFeedbackCount':r['pending_count'],'latestFeedbackAt':r['latest_feedback'].isoformat() if r['latest_feedback'] else None,'focusTurnId':str(r['focus_turn']) if r['focus_turn'] else None})
   next_cursor=base64.urlsafe_b64encode(json.dumps([sort,feedback_state,rows[-1]['sort_stamp'].isoformat(),str(rows[-1]['id'])]).encode()).decode() if more else None
-  return {'items':items,'nextCursor':next_cursor}
+  from app.diagnostics import clean
+  return clean({'items':items,'nextCursor':next_cursor})
  def admin_conversation(self,cid,after=0,limit=20,focus_tid=None):
   if after<0 or not 1<=limit<=50:raise APIError(400,'잘못된 페이지입니다.')
   with self.pool.connection() as db:
@@ -416,5 +472,8 @@ class Store:
    more=len(rows)>limit;rows=rows[:limit];items=[]
    for r in rows:
     feedback=db.execute('SELECT id,payload,reviewed,created FROM feedback WHERE turn=%s ORDER BY created,id',(r['id'],)).fetchall()
-    items.append({'turnId':str(r['id']),'created':r['created'].isoformat(),'state':r['state'],'context':{**r['context'],'recipientContext':r['recipient_context']},'feedback':[{**dict(f),'id':str(f['id']),'created':f['created'].isoformat()} for f in feedback]})
-  return {'conversationId':cid,'senderUserId':c['sender'],'recipientUserId':c['recipient'],'turns':items,'nextCursor':rows[-1]['ordinal'] if more else None,'startCursor':after,'focusTurnId':focus_tid}
+    reviews=db.execute('SELECT id,note,created FROM turn_reviews WHERE turn=%s ORDER BY created,id',(r['id'],)).fetchall()
+    items.append({'turnId':str(r['id']),'created':r['created'].isoformat(),'state':r['state'],'context':{**r['context'],'recipientContext':r['recipient_context']},'feedback':[{**dict(f),'id':str(f['id']),'created':f['created'].isoformat()} for f in feedback],
+                  'reviews':[{'reviewId':str(v['id']),'note':v['note'],'created':v['created'].isoformat()} for v in reviews]})
+  from app.diagnostics import clean
+  return clean({'conversationId':cid,'senderUserId':c['sender'],'recipientUserId':c['recipient'],'turns':items,'nextCursor':rows[-1]['ordinal'] if more else None,'startCursor':after,'focusTurnId':focus_tid})

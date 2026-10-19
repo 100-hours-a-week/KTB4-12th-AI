@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS report_reviews (
  status text NOT NULL, note text NOT NULL, evidence jsonb,
  created timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS report_reviews_lookup ON report_reviews(report_id,created);
+CREATE TABLE IF NOT EXISTS turn_reviews (
+ id uuid PRIMARY KEY, turn uuid NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+ note text NOT NULL CHECK(char_length(note) BETWEEN 1 AND 1500),
+ created timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS turn_reviews_lookup ON turn_reviews(turn,created,id);
 CREATE TABLE IF NOT EXISTS sessions (
  id uuid PRIMARY KEY, sender bigint NOT NULL, created timestamptz NOT NULL DEFAULT now());
 

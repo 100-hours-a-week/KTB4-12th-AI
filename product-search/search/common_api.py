@@ -131,6 +131,7 @@ def contract(service):
         "protocol": "shared-catalog/1",
         "snapshotId": service.snapshot_id,
         "catalogVersion": catalog_version,
+        "sourceKind": service.catalog.get("source"),
         "productCount": len(visible(service.products)),
         "visibilityRevision": __import__('hashlib').sha256(','.join(map(str, sorted(denied_products.get()))).encode()).hexdigest(),
         "productTagsRule": service.catalog.get("product_tags_rule"),
@@ -192,9 +193,17 @@ async def pinned(request, snapshot=None, binding_id=None):
             await owner._release_reader(service)
 
 
-def profile_product(product):
-    # Missing popularity must not silently flatten Emmet's ranking.
-    if "view_count" not in product or "source_updated_at" not in product:
+def profile_product(product, catalog):
+    # Explicit unknowns are allowed only by a validated source contract.
+    snapshot = catalog.get("source") == "catalog-snapshot"
+    if snapshot and (catalog.get("document_contract") != "gift-catalog/1"
+            or product["availability"] != "unknown"
+            or product.get("view_count") is not None or product.get("source_updated_at") is not None):
+        raise HTTPException(503, "CATALOG_SNAPSHOT_FIELDS_INVALID")
+    export = catalog.get("source") == "backend-export" and catalog.get("document_contract") == "backend-export/1"
+    if export and not {"view_count", "source_updated_at"} <= product.keys():
+        raise HTTPException(503, "CATALOG_PROFILE_FIELDS_MISSING_REPUBLISH_REQUIRED")
+    if not (snapshot or export) and (product.get("view_count") is None or product.get("source_updated_at") is None):
         raise HTTPException(503, "CATALOG_PROFILE_FIELDS_MISSING_REPUBLISH_REQUIRED")
     return {
         "productId": product["id"],
@@ -208,8 +217,8 @@ def profile_product(product):
         "productKind": product["kind"] or None,
         "price": product["price"],
         "availability": product["availability"],
-        "updatedAt": product["source_updated_at"],
-        "viewCount": product["view_count"],
+        "updatedAt": product.get("source_updated_at"),
+        "viewCount": product.get("view_count"),
         "tags": [[t["axis"], t["tag"]] for t in product["product_tags"]] if "product_tags" in product else None,
     }
 
@@ -269,7 +278,7 @@ async def catalog(
             **contract(service),
             "offset": offset,
             "products": [
-                profile_product(product)
+                profile_product(product, service.catalog)
                 for product in visible(service.products)[offset : offset + limit]
             ],
         }

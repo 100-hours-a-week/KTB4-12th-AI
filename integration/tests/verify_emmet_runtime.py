@@ -296,6 +296,7 @@ def main():
                     "PROFILING_SERVICE_TOKEN": "synthetic-token",
                     "PROFILING_BACKEND_BASE_URL": backend,
                     "PROFILING_BUDGET_URL": budget,
+                    "AI_BUDGET_MODE": "guarded",
                     "STORE_TOKEN": "synthetic-token",
                     "PROFILING_CALLBACK_MAX_ATTEMPTS": "1",
                 },

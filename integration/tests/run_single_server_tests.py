@@ -62,7 +62,10 @@ def main():
         import pytest
         began=time.monotonic()
         target='live_single_server.py' if args.live else 'test_single_server.py'
-        code=pytest.main(['-q','-p','no:cacheprovider',str(ROOT/'integration/tests'/target),
+        targets=[str(ROOT/'integration/tests'/target)]
+        if not args.live:
+            targets.extend(str(ROOT / 'integration/tests' / name) for name in ('test_admin_review_data.py', 'test_recipient_data.py'))
+        code=pytest.main(['-q','-p','no:cacheprovider',*targets,
                           '--junitxml='+str(args.output/'junit.xml')])
         result={'exitCode':code,'seconds':time.monotonic()-began,'synthetic':True,
                 'mode':'live' if args.live else 'free','existingApplicationDBChanged':False}

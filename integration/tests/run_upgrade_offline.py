@@ -23,7 +23,7 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     env = {k: v for k, v in os.environ.items()
-           if not re.search(r'TOKEN|SECRET|PASSWORD|API_KEY|DATABASE_URL|^PROFILING_|^SEARCH_', k)}
+           if not re.search(r'TOKEN|SECRET|PASSWORD|API_KEY|ADMIN_HASH|DATABASE_URL|^PROFILING_|^SEARCH_', k)}
     env.update(PYTHONDONTWRITEBYTECODE='1', HF_HUB_OFFLINE='1')
     python = {s: str(args.environment_root.resolve() / s / '.venv/bin/python')
               for s in ('chat', 'profiling', 'product-search')}
@@ -43,7 +43,8 @@ def main():
         ('integration', ROOT, [python['profiling'], *common,
          *[str(p.relative_to(ROOT)) for p in sorted((ROOT / 'integration/tests').glob('test_*.py'))], 'console/tests'],
          [ROOT, ROOT / 'profiling/src', ROOT / 'chat', ROOT / 'product-search', sites[0]]),
-        ('javascript', ROOT, ['node', '--test', 'console/tests/core.test.js', 'console/tests/ops.test.js',
+        ('javascript', ROOT, ['node', '--test',
+                             *[str(p.relative_to(ROOT)) for p in sorted((ROOT / 'console/tests').glob('*.test.js'))],
                              'product-search/tests/test_ui.mjs'], []),
     ]
     results = []

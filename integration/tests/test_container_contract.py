@@ -86,8 +86,9 @@ def test_guarded_compose_separate_processes_and_one_external_database():
         assert "extra_hosts" not in service
     for role in ["chat", "profiler"]:
         env = services[role]["environment"]
-        assert env["BUDGET_GUARDED_ORIGIN"].startswith("${BUDGET_GUARDED_ORIGIN:?")
-        assert env["OPENROUTER_API_KEY_FILE"] == "/run/secrets/openrouter_key"
+        assert env["BUDGET_GUARDED_ORIGIN"] == "${BUDGET_GUARDED_ORIGIN:-}"
+        name = "OPENROUTER_API_KEY_FILE" if role == "chat" else "PROFILING_OPENROUTER_API_KEY_FILE"
+        assert env[name] == f"/run/secrets/{role}_openrouter_key"
         assert "OPENROUTER_API_KEY" not in env
     for role in ["search"]:
         mount = next(
@@ -100,10 +101,20 @@ def test_guarded_compose_separate_processes_and_one_external_database():
     assert "POSTGRES_HOST_AUTH_METHOD" not in services["postgres"]["environment"]
 
 
-def test_smoke_has_no_egress_or_external_secrets_and_faults():
+def test_smoke_only_console_has_ingress_and_ai_database_have_no_egress():
     cfg = yaml.safe_load((CONTAINERS / "compose.smoke.yaml").read_text())
-    assert cfg["networks"] == {"backend": {"internal": True}}
+    assert cfg["networks"] == {"backend": {"internal": True}, "console-ingress": {}}
     assert cfg["services"]["mesh"]["networks"] == ["backend"]
+    assert "ports" not in cfg["services"]["mesh"]
+    console = cfg["services"]["console"]
+    assert console["networks"] == ["backend", "console-ingress"]
+    assert console["ports"] == ["127.0.0.1:18811:18800"]
+    assert "network_mode" not in console
+    assert console["environment"]["CONSOLE_SERVICE_HOST"] == "mesh"
+    for name, service in cfg["services"].items():
+        if name != "console":
+            assert not service.get("ports")
+            assert service.get("network_mode") == "service:mesh" or service["networks"] == ["backend"]
     assert "secrets" not in cfg
     assert (
         cfg["services"]["qa-init"]["environment"]["INTEGRATION_SYNTHETIC_ONLY"] == "1"
@@ -233,6 +244,7 @@ def test_sync_preparation_never_rewrites_shared_encoder_code(tmp_path, monkeypat
 
 
 def test_unready_database_propagates_without_starting_relay(monkeypatch):
+    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
     monkeypatch.setenv("AI_DATABASE_NAME", "emmet4930_test")
     from integration import database_identity
     monkeypatch.setattr(database_identity, "audit", lambda *a: None)
@@ -383,8 +395,11 @@ def test_redirect_never_followed():
         relay.close()
 
 
-def test_console_config_written_before_app_module_import(tmp_path, monkeypatch):
+@pytest.mark.parametrize("service_host", ["127.0.0.1", "mesh"])
+def test_console_config_written_before_app_module_import(tmp_path, monkeypatch, service_host):
     monkeypatch.setenv("AI_DATABASE_NAME", "emmet4930_candidate")
+    monkeypatch.setenv("CONSOLE_SERVICE_HOST", service_host)
+    monkeypatch.setenv("CONSOLE_TARGET_FILE", "")
     from integration import database_identity
     monkeypatch.setattr(database_identity, "audit", lambda *a: None)
     import builtins
@@ -415,15 +430,16 @@ def test_console_config_written_before_app_module_import(tmp_path, monkeypatch):
 
     monkeypatch.setattr(psycopg, "connect", lambda *args, **kw: Connection())
     real_client = httpx.Client
+    requested = []
+
+    def respond(request):
+        requested.append(str(request.url))
+        return httpx.Response(200, json={"snapshotId": "synthetic-snapshot", "catalogVersion": "00000000-0000-4000-8000-000000000001"})
 
     def client(**kwargs):
         return real_client(
             **kwargs,
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(
-                    200, json={"snapshotId": "synthetic-snapshot", "catalogVersion": "00000000-0000-4000-8000-000000000001"}
-                )
-            ),
+            transport=httpx.MockTransport(respond),
         )
 
     monkeypatch.setattr(httpx, "Client", client)
@@ -453,6 +469,9 @@ def test_console_config_written_before_app_module_import(tmp_path, monkeypatch):
     )
     assert target.stat().st_mode & 0o777 == 0o600
     assert entrypoint.os.environ["CONSOLE_TARGET_FILE"] == str(target)
+    assert requested == [f"http://{service_host}:8000/v1/catalog/contract"]
+    assert config["targets"] == {name: f"http://{service_host}:{port}" for name, port in
+                                 (("chat", 7860), ("search", 8000), ("profiling", 8001), ("backend", 8002))}
 
 
 def test_chat_role_uses_migrated_schema_without_public_create(monkeypatch):
@@ -571,6 +590,7 @@ def test_smoke_profiler_depends_on_search_and_does_not_own_encoder_assets():
 
 @pytest.mark.parametrize("role", ["profiler", "profiler-smoke"])
 def test_both_profiler_launchers_use_shared_search_without_local_vectors(role, tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
     monkeypatch.setenv("AI_DATABASE_NAME", "emmet4930_test")
     from integration import database_identity
     monkeypatch.setattr(database_identity, "audit", lambda *a: None)

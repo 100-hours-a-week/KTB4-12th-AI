@@ -18,7 +18,7 @@ export class EventLog {
   add(event){if(event.id!==null&&event.id<=this.cursor)return false;if(event.id!==null)this.cursor=Math.max(this.cursor,event.id);this.items.push(event);if(this.items.length>this.limit){this.items.shift();this.dropped++;}return true;}
 }
 export function redact(value,reveal=false,key=''){
-  if(/token|secret|password|authorization|api.?key/i.test(key))return '[토큰 마스킹]';
+  if(/token|secret|password|authorization|api.?key|csrf|cookie|session|credential|hash/i.test(key))return '[토큰 마스킹]';
   if(/prompt|provider.*(response|body)|callback.*url|raw.?response/i.test(key))return '[민감 진단 숨김]';
   if(/^(code|errorcode)$/i.test(key))return diagnosticCode(value);
   if(/^detail$/i.test(key)&&typeof value==='string')return '[오류 상세 숨김]';
@@ -69,13 +69,14 @@ export function eventPreview(event,reveal=false){
   const category=error?'error':event.event==='answer.delta'?'answer':event.event==='cards'?'cards':event.event==='turn.finished'?'status':'other';
   let title=event.event,body='';
   if(event.event==='progress'){title='처리 중';body=reveal?String(value.message??'진행 상태 수신'):'진행 이벤트 수신 · 원문 기본 숨김';}
-  else if(event.event==='answer.delta'){title='답변 조각';body=reveal?String(value.delta??'답변 데이터 없음'):`답변 ${typeof data.delta==='string'?Array.from(data.delta).length:'미수집'}자 수신 · 원문 기본 숨김`;}
+  else if(event.event==='answer.delta'){title='답변 조각';body=typeof event.data?.delta==='string'&&!event.data.delta.trim()?'빈 답변 조각 수신 · 추가 텍스트 없음':reveal?String(value.delta??'답변 데이터 없음'):`답변 ${typeof event.data?.delta==='string'?Array.from(event.data.delta).length:'미수집'}자 수신 · 원문 기본 숨김 · 위의 ‘답변·추천 이유 보기’를 켜세요`;}
   else if(event.event==='cards'){
     title='상품 추천';body=Array.isArray(value.products)?value.products.map(p=>`상품 #${p.productId??'미수집'} · ${p.reason??'추천 이유 없음'}`).join('\n'):'상품 데이터 없음';
   }else if(event.event==='turn.finished'){
     title=({COMPLETED:'답변 완료',FAILED:'생성 실패',CANCELLED:'작업 취소'})[value.status]??'최종 상태';
     const blocks=Array.isArray(value.blocks)?value.blocks:[];
-    body=[value.status,`${Array.isArray(value.blocks)?blocks.length+'개 블록':'블록 미수집'} · 저장 커서 ${value.lastEventId??'미수집'}`,value.error?.code,value.error?.message,reveal?blocks.filter(b=>b.type==='text').map(b=>b.text).join('\n'):null].filter(Boolean).join('\n');
+    const cardCount=blocks.filter(b=>b.type==='cards').reduce((n,b)=>n+(Array.isArray(b.products)?b.products.length:0),0),cardOnly=value.status==='COMPLETED'&&cardCount>0&&!event.data.blocks.some(b=>b.type==='text'&&typeof b.text==='string'&&b.text.trim());
+    body=[value.status,cardOnly?`상품 카드 ${cardCount}개로 응답했습니다.`:null,`${Array.isArray(value.blocks)?blocks.length+'개 블록':'블록 미수집'} · 저장 커서 ${value.lastEventId??'미수집'}`, value.error?.code,value.error?.message,reveal?blocks.filter(b=>b.type==='text').map(b=>b.text).join('\n'):null].filter(Boolean).join('\n');
   }else if(event.event==='console.accepted'){title='요청 접수';body=`HTTP ${value.httpStatus??'미수집'} · 서버 작업은 별도 확인`;}
   else if(event.event==='console.cancellation'){title='취소 응답';body=`HTTP ${value.httpStatus??'미수집'} · ${value.status??'상태 미수집'}`;}
   else if(error){title='연결 / 요청 오류';body=[value.httpStatus?'HTTP '+value.httpStatus:null,value.code??value.error?.code??'오류 데이터 수신'].filter(Boolean).join(' · ');}
@@ -84,6 +85,9 @@ export function eventPreview(event,reveal=false){
 }
 
 export function requestErrorMessage(status,data={}){
+  if(status===409&&['CONSOLE_CONVERSATION_NOT_OWNED','CONSOLE_CONVERSATION_UNCONFIRMED'].includes(data?.detail))return '대화 생성을 확인하지 못했습니다. 이 메시지는 아직 전송되지 않았습니다.';
+  const quickCheckErrors={QUICK_CHECK_REQUEST_UNSUPPORTED:'빠른 점검 요청을 접수하지 못했습니다. 연결된 Chat 서버의 버전과 요청 형식을 확인하세요. 모델 요청은 시작되지 않았습니다.',QUICK_CHECK_COST_CONFIRMATION_REQUIRED:'비용 발생 가능성에 동의한 뒤 빠른 점검을 실행하세요.',QUICK_CHECK_GRANT_REQUIRED:'합성 점검 수신자의 현재 버전에 대한 기존 BE 접근 권한을 준비하세요.',QUICK_CHECK_SYNTHETIC_RECIPIENT_REQUIRED:'빠른 점검용 합성 수신자와 기존 BE 권한을 먼저 준비하세요.',QUICK_CHECK_LIVE_RUNTIME_REQUIRED:'빠른 점검에는 실제 모델 런타임이 필요합니다. 합성 데모 성공과 구분합니다.',QUICK_CHECK_SEARCH_NOT_READY:'빠른 점검용 검색 상품과 상품 버전을 확인하지 못했습니다.',QUICK_CHECK_NEW_CONVERSATION_REQUIRED:'빠른 점검 실행을 다시 누르면 새 대화로 시작합니다.'};
+  if([400,409].includes(status)&&Object.hasOwn(quickCheckErrors,data?.detail))return quickCheckErrors[data.detail];
   const labels={message:'채팅 메시지',recipientUserId:'수신자 ID',sourceVersion:'버전',giftPreference:'취향(최대500자)',dislikedCategories:'비선호 카테고리(최대5개)',categoryId:'카테고리 ID(양의 정수)',categoryName:'카테고리 이름',reviews:'리뷰(최대10개)',productId:'상품 ID(양의 정수)',rating:'별점(1~5 정수)',reviewText:'리뷰 본문'};
   const fields=Array.isArray(data?.detail)?[...new Set(data.detail.flatMap(e=>Array.isArray(e?.loc)?e.loc.filter(k=>typeof k==='string'&&Object.hasOwn(labels,k)).map(k=>labels[k]):[]))]:[];
   if(fields.length)return `HTTP ${status} · 입력 확인: ${fields.join(' / ')}`;
@@ -91,3 +95,41 @@ export function requestErrorMessage(status,data={}){
 }
 
 export function parseProfileJSON(text,label){try{const value=JSON.parse(text);if(!Array.isArray(value))throw new Error();return value;}catch{throw new Error(label+'는 JSON 배열로 입력하세요.');}}
+
+/** The visible summary is rebuilt from observations, never from a raw response. */
+export function safeDiagnostics(value={}){
+  const number=v=>Number.isSafeInteger(v)&&v>=0?v:null;
+  const date=v=>typeof v==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(v)&&Number.isFinite(Date.parse(v))?v:null;
+  const id=v=>typeof v==='string'&&/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(v)?v:null;
+  const identifier=v=>typeof v==='string'&&/^[a-z\d][a-z\d._/:-]{0,159}$/i.test(v)&&!/(?:sk-|hf_|bearer|secret|token|password)/i.test(v)?v:null;
+  const status=(v,allowed)=>allowed.includes(v)?v:null;
+  const profile=value?.profile??{},retrieval=value?.retrieval??{},model=value?.model??{},final=value?.final??{};
+  return {
+    profile:{status:status(profile.status,['AVAILABLE','NONE','UNAVAILABLE','NOT_PROVIDED','TEAM_SESSION','COMPLETED','PENDING','PROCESSING','FAILED']),sourceVersion:number(profile.sourceVersion),receivedAt:date(profile.receivedAt),analysisSourceVersion:number(profile.analysisSourceVersion)},
+    retrieval:{candidateCount:number(retrieval.candidateCount),exclusionReasons:[],catalogSnapshotId:identifier(retrieval.catalogSnapshotId)},
+    model:{name:identifier(model.name),status:status(model.status,['running','completed','cancelled','failed'])},
+    final:{status:status(final.status,['COMPLETED','FAILED','CANCELLED','PROCESSING']),requestId:id(final.requestId),elapsedMs:typeof final.elapsedMs==='number'&&Number.isFinite(final.elapsedMs)&&final.elapsedMs>=0?final.elapsedMs:null},
+  };
+}
+
+export function diagnosticRows(value,images={loaded:0,failed:0}){
+  const d=safeDiagnostics(value),known=v=>v===null?'미수집':String(v);
+  return [
+    ['프로필 상태',known(d.profile.status)],['프로필 버전',known(d.profile.sourceVersion)],['프로필 수신 시점',known(d.profile.receivedAt)],
+    ['분석에 사용한 프로필 버전',known(d.profile.analysisSourceVersion)],['검색 후보 수',d.retrieval.candidateCount===null?'미수집':d.retrieval.candidateCount+'개'],
+    ['기록된 제외 이유','미수집'],['상품 데이터 버전',known(d.retrieval.catalogSnapshotId)],
+    ['관측된 모델',known(d.model.name)],['모델 처리 상태',known(d.model.status)],['저장된 최종 상태',known(d.final.status)],
+    ['요청 ID',known(d.final.requestId)],['서버 관측 소요 시간',d.final.elapsedMs===null?'미수집':(d.final.elapsedMs/1000).toFixed(1)+'초'],
+    ['이 화면의 이미지 표시',images.loaded||images.failed?`표시 성공 ${images.loaded}개 · 표시 실패 ${images.failed}개 · 브라우저 관측`:'미수집'],
+  ];
+}
+
+/** Public answer blocks take precedence over deltas once the saved answer arrives. */
+export function chatResult(items=[]){
+  const final=items.filter(e=>e.event==='turn.finished'&&Array.isArray(e.data?.blocks)).at(-1);
+  const blocks=final?.data.blocks.slice(0,30);
+  const text=blocks?blocks.filter(b=>b?.type==='text'&&typeof b.text==='string').map(b=>b.text).join('\n'):
+    items.filter(e=>e.event==='answer.delta'&&typeof e.data?.delta==='string').map(e=>e.data.delta).join('');
+  const products=blocks?blocks.filter(b=>b?.type==='cards'&&Array.isArray(b.products)).flatMap(b=>b.products):items.filter(e=>e.event==='cards'&&Array.isArray(e.data?.products)).at(-1)?.data.products??[];
+  return {text:String(redact(text,true)).slice(0,30000),products:products.slice(0,3)};
+}

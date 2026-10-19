@@ -8,8 +8,6 @@ services:
       target: mesh
     networks:
     - backend
-    ports:
-    - 127.0.0.1:18811:18800
     environment:
       AI_DATABASE_NAME: emmet4930_smoke
   postgres:
@@ -211,6 +209,7 @@ services:
       AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
       PORT: '8001'
       PROFILING_DATABASE_URL_FILE: /run/fixture/profiler_db
+      AI_BUDGET_MODE: guarded
       STORE_TOKEN_FILE: /run/fixture/store_token
       OPENROUTER_API_KEY_FILE: /run/fixture/openrouter_key
       EMMET_FIXTURE_MODE: /run/fixture/provider-mode.json
@@ -262,6 +261,7 @@ services:
       AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
       PORT: '7860'
       DATABASE_URL_FILE: /run/fixture/chat_db
+      AI_BUDGET_MODE: guarded
       SEARCH_URL: http://127.0.0.1:8000
       INTERNAL_URL: http://127.0.0.1:7860
       COOKIE_SECURE: 'false'
@@ -283,7 +283,12 @@ services:
       start_period: 120s
       retries: 20
   console:
-    network_mode: service:mesh
+    # Only the authenticated Console has host ingress. AI/DB stay on the internal network.
+    networks:
+    - backend
+    - console-ingress
+    ports:
+    - 127.0.0.1:18811:18800
     read_only: true
     init: true
     cap_drop:
@@ -312,10 +317,16 @@ services:
     environment:
       AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
       PORT: '18800'
+      CONSOLE_SERVICE_HOST: mesh
+      AI_BUDGET_MODE: guarded
+      CONSOLE_ADMIN_ORIGIN: http://127.0.0.1:18811
+      CONSOLE_ADMIN_HASH_FILE: /run/fixture/console_admin.hash
+      CONSOLE_ADMIN_SESSION_FILE: /runtime/admin-session/sessions.sqlite3
       DATABASE_URL_FILE: /run/fixture/console_db
       AI_DATABASE_NAME: emmet4930_smoke
     volumes:
     - smoke-data:/run/fixture:ro
+    - console-cache:/runtime
   smoke-check:
     network_mode: service:mesh
     read_only: true
@@ -470,6 +481,8 @@ volumes:
   smoke-data: {}
   smoke-postgres: {}
   search-cache: {}
+  console-cache: {}
 networks:
   backend:
     internal: true
+  console-ingress: {}
