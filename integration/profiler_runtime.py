@@ -34,6 +34,8 @@ async def lifespan(app):
     initial_key = getattr(settings, "OPENROUTER_API_KEY", None)
     if (initial_key is not None and "PROFILING_OPENROUTER_API_KEY" not in credential_env
             and not credential_env.get("PROFILING_OPENROUTER_API_KEY_FILE")
+            and not credential_env.get("OPENROUTER_API_KEY_PROFILER")
+            and not credential_env.get("OPENROUTER_API_KEY_PROFILER_FILE")
             and credential_env.get("AI_CREDENTIAL_BACKEND", "files") == "files"
             and credential_env.get("AI_CREDENTIAL_LAYOUT", "separate") == "separate"):
         credential_env["PROFILING_OPENROUTER_API_KEY"] = initial_key.get_secret_value()
