@@ -244,6 +244,7 @@ def test_sync_preparation_never_rewrites_shared_encoder_code(tmp_path, monkeypat
 
 
 def test_unready_database_propagates_without_starting_relay(monkeypatch):
+    monkeypatch.setenv("PROFILING_OPENROUTER_API_KEY", "synthetic-unit-only")
     monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
     monkeypatch.setenv("AI_DATABASE_NAME", "emmet4930_test")
     from integration import database_identity
@@ -607,6 +608,8 @@ def test_both_profiler_launchers_use_shared_search_without_local_vectors(role, t
     monkeypatch.setattr(entrypoint, "secret", lambda name, **kw:
         "postgresql+psycopg://ai_profiler_service@postgres/emmet4930_test"
         if name == "PROFILING_DATABASE_URL" else "synthetic-launch-test")
+    monkeypatch.setenv("PROFILING_OPENROUTER_API_KEY", "synthetic-launch-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-launch-test")
     audits = []
     monkeypatch.setattr(entrypoint, "profile_database", lambda value: audits.append(value))
     monkeypatch.setattr(entrypoint, "prepare_encoder", lambda *args:

@@ -112,6 +112,8 @@ def launcher(monkeypatch):
     monkeypatch.setattr(entrypoint, "secret", lambda name, **kw: "unit-" + name.lower())
     monkeypatch.setattr(entrypoint, "database", lambda value, role: value)
     monkeypatch.setattr(entrypoint, "profile_database", lambda value: None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "unit-openrouter_api_key")
+    monkeypatch.setenv("PROFILING_OPENROUTER_API_KEY", "unit-profiling_openrouter_api_key")
     saved = dict(os.environ)
     yield monkeypatch
     # configure() writes os.environ directly; put it back for later tests.

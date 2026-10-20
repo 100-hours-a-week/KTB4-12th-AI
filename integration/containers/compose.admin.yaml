@@ -1,6 +1,10 @@
 # Console manages two provider keys and one common BE token per environment.
 # Normal team execution: merge with compose.guarded.yaml; provider key limits are the default.
 services:
+  search:
+    environment:
+      AI_SERVICE_TOKEN_FILE: ''
+      AI_INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
   chat:
     environment:
       OPENROUTER_API_KEY_FILE: ''

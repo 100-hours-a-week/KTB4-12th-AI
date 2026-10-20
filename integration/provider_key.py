@@ -24,7 +24,23 @@ import uuid
 
 ACTIVE_KEY = contextvars.ContextVar("openrouter_request_key", default=None)
 KEY_FILE = "openrouter-chat-key.json"
-KINDS = {"chat": "OPENROUTER_API_KEY", "profiler": "PROFILING_OPENROUTER_API_KEY"}
+KINDS = {"chat": "OPENROUTER_API_KEY_CHAT", "profiler": "OPENROUTER_API_KEY_PROFILER"}
+LEGACY_KINDS = {"chat": "OPENROUTER_API_KEY", "profiler": "PROFILING_OPENROUTER_API_KEY"}
+
+
+def deployment_source(kind, env):
+    """Resolve one service's aliases, retaining file precedence within each name.
+
+    Blank variables are unset placeholders. A configured file remains authoritative:
+    missing/empty files never fall back. Distinct alias families must agree.
+    """
+    def source(name):
+        path = (env.get(name + "_FILE") or "").strip() or None
+        value = (env.get(name) or "").strip() or None
+        return path, None if path else value
+    current, legacy = source(KINDS[kind]), source(LEGACY_KINDS[kind])
+    selected = current if any(current) else legacy
+    return (*selected, legacy if any(current) and any(legacy) else None)
 
 
 def environment(environ=None):
@@ -106,6 +122,7 @@ class ProviderKey:
         self.directory = private_directory(managed_directory) if managed_directory else None
         self.external_file = external_file
         self._value = value
+        self._deployment_alias = None
         self.aws_secret_id, self.aws_client = aws_secret_id, aws_client
         if layout not in {"separate", "legacy-shared"}:
             raise KeyUnavailable("CREDENTIAL_LAYOUT_INVALID")
@@ -131,12 +148,11 @@ class ProviderKey:
         env = os.environ if environ is None else environ
         if kind not in KINDS:
             raise KeyUnavailable("PROVIDER_KEY_KIND_INVALID")
-        name = KINDS[kind]
         directory = env.get("OPENROUTER_MANAGED_KEY_DIR")
         if env.get("AI_CREDENTIAL_LAYOUT") == "legacy-shared" and any(
-                env.get(variable) or env.get(variable + "_FILE") for variable in KINDS.values()):
+                env.get(variable) or env.get(variable + "_FILE") for variable in (*KINDS.values(), *LEGACY_KINDS.values())):
             raise KeyUnavailable("PROVIDER_KEY_SOURCE_CONFLICT")
-        path, value = env.get(name + "_FILE"), env.get(name)
+        path, value, alias = deployment_source(kind, env)
         backend = env.get("AI_CREDENTIAL_BACKEND", "files")
         if backend not in {"files", "aws-secrets-manager"}:
             raise KeyUnavailable("CREDENTIAL_BACKEND_INVALID")
@@ -146,9 +162,11 @@ class ProviderKey:
         if (aws_id and (directory or path or value) or
                 (directory or aws_id) and env.get("OPENROUTER_EXTERNAL_KEY_CONFIGURED")):
             raise KeyUnavailable("PROVIDER_KEY_SOURCE_CONFLICT")
-        return cls(kind=kind, env=environment(env), managed_directory=directory,
+        source = cls(kind=kind, env=environment(env), managed_directory=directory,
                    external_file=path, value=None if path else value, aws_secret_id=aws_id,
                    layout=env.get("AI_CREDENTIAL_LAYOUT", "separate"))
+        source._deployment_alias = alias
+        return source
 
     def legacy_managed_present(self):
         return bool(self.directory and any((self.directory / name).exists()
@@ -160,6 +178,13 @@ class ProviderKey:
 
     def external_value(self):
         value = read_file(self.external_file) if self.external_file else self._value
+        # Check aliases only if deployment is the active source. A saved
+        # dashboard record and deliberate repair never read stale seed files.
+        if self._deployment_alias is not None:
+            path, alias = self._deployment_alias
+            other = read_file(path) if path else alias
+            if value != other:
+                raise KeyUnavailable("PROVIDER_KEY_SOURCE_CONFLICT")
         if not isinstance(value, str) or not value.strip():
             raise KeyUnavailable("PROVIDER_KEY_MISSING")
         if len(value) > 1024 or not value.isascii() or any(c.isspace() for c in value):

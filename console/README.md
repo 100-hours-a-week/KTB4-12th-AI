@@ -43,7 +43,7 @@ Chat·Profiler·Console의 기본 비용 정책은 `provider-key-limits`이며 �
 
 ## Develop 설정 등록
 
-서울 `ap-northeast-2`의 **기존 단일 Secret `/seonjalal/develop/teams/ai`**에 `OPENROUTER_API_KEY`(Chat), `PROFILING_OPENROUTER_API_KEY`(Profiler), `BE_SERVICE_TOKEN`을 필드별로 등록합니다. 앞의 두 키는 서로 다르며, 공통 토큰은 BE의 `AI_CHAT_SERVICE_TOKEN`·`PROFILING_SERVICE_TOKEN`에도 같은 값으로 연결합니다. 팀에 수정 시점을 공유하고 기존 필드는 보존하며, 등록 후에는 값 없이 이름만 전달하세요. Secret을 새로 만들거나 전체 JSON을 교체하지 않습니다.
+서울 `ap-northeast-2`의 **기존 단일 Secret `/seonjalal/develop/teams/ai`**에 `OPENROUTER_API_KEY_CHAT`(Chat), `OPENROUTER_API_KEY_PROFILER`(Profiler), `BE_SERVICE_TOKEN`을 필드별로 등록합니다. 앞의 두 키는 서로 다르며, 공통 토큰은 BE의 `AI_CHAT_SERVICE_TOKEN`·`PROFILING_SERVICE_TOKEN`에도 같은 값으로 연결합니다. 팀에 수정 시점을 공유하고 기존 필드는 보존하며, 등록 후에는 값 없이 이름만 전달하세요. Secret을 새로 만들거나 전체 JSON을 교체하지 않습니다.
 
 비밀 아닌 값은 기존 배포 정의의 일반 환경변수로 넣습니다. SSM 등록은 필요하지 않습니다. Chat·Profiler·Console에 `AI_ENVIRONMENT=develop`을 같은 값으로 지정하세요. 이 값은 저장된 키·BE 토큰의 환경 일치 검사에 쓰이며 환경별 볼륨을 대신하지 않습니다.
 
@@ -54,7 +54,7 @@ Chat·Profiler·Console의 기본 비용 정책은 `provider-key-limits`이며 �
 | `CHAT_MODEL`, `PROFILING_TAGGER_MODEL` | 선택. 통합 컨테이너 기본값은 각각 `openai/gpt-6-luna`; 변경할 때 OpenRouter 모델 ID 사용 |
 | `PROFILING_BACKEND_BASE_URL` | 실제 BE 내부 origin. 로컬 기본값을 Develop 주소로 사용하지 않음 |
 
-배포가 Secret 필드는 비밀 환경변수로, 위 값은 일반 환경변수로 주입합니다. 이미 SSM을 쓰는 배포라면 그대로 공급해도 되지만 앱이 직접 조회하지는 않습니다. `AI_CREDENTIAL_BACKEND`는 기본 `files`를 유지하고, 이전 Compose의 `_FILE`이 새 주입값을 가리지 않는지 확인합니다. 기존 DB·JWT는 변경하지 않습니다. AI 내부 토큰은 Chat·Profiler의 `AI_INTERNAL_SERVICE_TOKEN`, Search의 `AI_SERVICE_TOKEN`으로 같은 기존 값을 연결하며 BE 공통 토큰과 분리합니다. 기존 Chat의 `SESSION_SECRET`·`QA_ADMIN_PASSWORD`·`DEMO_ACCESS_TOKEN`도 필요합니다.
+배포가 Secret 필드는 비밀 환경변수로, 위 값은 일반 환경변수로 주입합니다. 이미 SSM을 쓰는 배포라면 그대로 공급해도 되지만 앱이 직접 조회하지는 않습니다. `AI_CREDENTIAL_BACKEND`는 기본 `files`를 유지하고, 이전 Compose의 `_FILE`이 새 주입값을 가리지 않는지 확인합니다. 기존 DB·JWT는 변경하지 않습니다. AI 내부 토큰은 Chat·Profiler·Search 모두 `AI_INTERNAL_SERVICE_TOKEN` 또는 `_FILE`로 같은 기존 값을 연결하며 BE 공통 토큰과 분리합니다. 기존 Chat의 `SESSION_SECRET`·`QA_ADMIN_PASSWORD`·`DEMO_ACCESS_TOKEN`도 필요합니다.
 
 관리자는 위 CLI로 해시를 먼저 만듭니다. 파일 연결 대신 같은 팀 Secret의 `CONSOLE_ADMIN_HASH` 필드에 **생성한 scrypt 해시만** 직접 등록해 Console 환경변수로 주입할 수도 있습니다. 이때 `CONSOLE_ADMIN_HASH_FILE`은 해제하고 `CONSOLE_ADMIN_SESSION_FILE`에는 영속 비공개 절대 경로를 지정해야 합니다. 해시 파일을 함께 설정하면 파일이 우선하며, 파일 읽기 실패 때 환경변수로 우회하지 않습니다. 원격 화면의 `CONSOLE_ADMIN_ORIGIN`·`CONSOLE_TRUSTED_PROXY_IPS`, 서비스 주소가 담긴 `CONSOLE_TARGET_FILE`, 관리자 세션과 키 저장 폴더의 영속 마운트는 배포 담당자가 연결합니다. 대시보드에서 BE 토큰을 바꾸면 BE에도 같은 값의 적용이 필요합니다.
 
@@ -122,3 +122,11 @@ node --test console/tests/*.test.js
 ```
 
 브라우저 검사 환경은 [자산 안내](ASSET_SETUP.md#브라우저-검사)에 있습니다. `console/tests/browser_check.py`와 `browser_http.py`를 실행할 때는 현재 URL과 새 합성 recipient 번호, 별도 결과 경로를 지정합니다. CLI·브라우저 검사는 비밀번호를 터미널에서 묻습니다.
+
+### 기존 환경변수에서 이전
+
+- 통합 런타임은 기존 Chat `OPENROUTER_API_KEY`와 Profiler `PROFILING_OPENROUTER_API_KEY` 및 각각의 `_FILE`도 읽습니다. 새 이름과 기존 이름을 함께 공급하면 배포 초기값이 실제 사용되는 시점에 값이 같아야 하며, 다르면 `PROVIDER_KEY_SOURCE_CONFLICT`로 거부합니다. 빈 환경변수는 미설정으로 취급하고, 이름별 `_FILE`은 같은 이름의 환경변수보다 우선합니다. 명시한 파일의 누락·공백을 다른 이름으로 우회하지 않습니다.
+- 관리 폴더의 대시보드 저장값이 있으면 그것이 우선합니다. 예전 배포 파일이 사라져도 저장값 사용·교체는 가능하며, 저장 후 파일 손상·삭제 시 배포 초기값으로 돌아가지 않습니다.
+- 관리형 Compose Search는 `AI_INTERNAL_SERVICE_TOKEN_FILE`로 연결합니다. Search의 기존 `AI_SERVICE_TOKEN` 또는 `_FILE`도 호환하며 두 이름을 함께 공급할 때 다른 값은 거부합니다. 기존 비관리형 guarded/smoke 구성의 공용 토큰 계약은 유지합니다. Chat·Profiler에는 공통 `BE_SERVICE_TOKEN`과 레거시 BE 이름 `AI_SERVICE_TOKEN`·`PROFILING_SERVICE_TOKEN`을 중복 주입하지 않습니다.
+- 기존 서비스별 선별 주입 구성도 정상 동작합니다. 이번 이름 정리는 필수 장애 수정이 아니라 연결 계약을 일관되게 만드는 호환 변경입니다. Secret 전체를 모든 컨테이너에 주입하기보다 필요한 필드만 서비스별로 연결하세요.
+- 현재 Cloud 저장소의 배포 스크립트에 AI 서비스 연결은 구현되어 있지 않습니다. Secret/Parameter Store에 이름을 등록하는 것만으로 AI 컨테이너에 전달되지 않습니다. 배포 담당자가 환경별 allowlist와 Compose 환경변수 연결을 별도로 준비해야 하며, 앱에 SSM 직접 조회를 추가하지 않습니다.

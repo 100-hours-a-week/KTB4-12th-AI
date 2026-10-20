@@ -153,13 +153,26 @@ def configure(role):
         raise ValueError("Synthetic provider is absent from guarded release image")
     from integration.service_token import shared_token_configured
     managed_auth = role in {"chat", "profiler"} and shared_token_configured()
-    internal_token = secret("AI_INTERNAL_SERVICE_TOKEN" if managed_auth else "AI_SERVICE_TOKEN")
+    # Managed Chat/Profiler use only the explicit internal source. Search accepts
+    # its old name for existing deployments; it never substitutes the BE token.
+    if role == "search":
+        canonical = secret("AI_INTERNAL_SERVICE_TOKEN", required=False)
+        legacy = secret("AI_SERVICE_TOKEN", required=False)
+        if canonical and legacy and canonical != legacy:
+            raise ValueError("INTERNAL_TOKEN_SOURCE_CONFLICT")
+        internal_token = canonical or legacy
+        if not internal_token:
+            raise ValueError("Required secret file or variable missing: AI_INTERNAL_SERVICE_TOKEN")
+    else:
+        internal_token = secret("AI_INTERNAL_SERVICE_TOKEN" if managed_auth else "AI_SERVICE_TOKEN")
     if managed_auth:
         from integration.service_token import ServiceToken
         os.environ["AI_INTERNAL_SERVICE_TOKEN"] = internal_token
         # The independent healthcheck sees the same explicit source, without
         # relying on mutations made only in this launcher's child environment.
         ServiceToken.from_environment(role)
+    elif role == "search":
+        os.environ["AI_INTERNAL_SERVICE_TOKEN"] = internal_token
     else:
         os.environ["AI_SERVICE_TOKEN"] = internal_token
     if role == "backend":
@@ -195,10 +208,14 @@ def configure(role):
                 if (os.getenv("BUDGET_ACCOUNT", "gift-chat-harness-2026-10-06") != "gift-chat-harness-2026-10-06"
                         or float(os.getenv("BUDGET_EXPECTED_LIMIT_USD", "5")) != 5):
                     raise ValueError("Guarded relay requires its existing account and five-dollar limit")
-            from integration.provider_key import ProviderKey
-            source = ProviderKey.from_environment("profiler" if role.startswith("profiler") else "chat")
+            from integration.provider_key import ProviderKey, KINDS, LEGACY_KINDS
+            # Synthetic profiler-smoke retains its explicit common synthetic key.
+            source = ProviderKey.from_environment("profiler" if role == "profiler" else "chat")
             managed_key = source.mode in {"managed", "aws"}
-            key = "" if managed_key else secret("PROFILING_OPENROUTER_API_KEY" if role == "profiler" else "OPENROUTER_API_KEY")
+            key_name = KINDS[source.kind]
+            if not any(os.environ.get(name, "").strip() for name in (key_name, key_name + "_FILE")):
+                key_name = LEGACY_KINDS[source.kind]
+            key = "" if managed_key else source.snapshot().value
             if smoke and (managed_key or not key.startswith("synthetic-")):
                 raise ValueError("Smoke image refuses real provider credentials")
             model = model_for(
@@ -209,10 +226,10 @@ def configure(role):
                 relay = BudgetRelay.from_environment(token, synthetic=smoke)
             if role.startswith("profiler"):
                 if not managed_key:
-                    os.environ["PROFILING_OPENROUTER_API_KEY"] = key
+                    os.environ["PROFILING_OPENROUTER_API_KEY" if smoke else key_name] = key
             else:
                 if not managed_key:
-                    os.environ["OPENROUTER_API_KEY"] = key
+                    os.environ[key_name] = key
                 os.environ["SEARCH_TOKEN"] = internal_token
                 for name in [
                     "SESSION_SECRET",
@@ -257,9 +274,10 @@ def configure(role):
             else:
                 os.environ.pop("BUDGET_STORE_URL", None)
         if role == "chat-smoke":
-            if os.environ.get("OPENROUTER_API_KEY") or os.environ.get(
-                "OPENROUTER_API_KEY_FILE"
-            ):
+            if any(os.environ.get(name) for name in (
+                "OPENROUTER_API_KEY", "OPENROUTER_API_KEY_FILE",
+                "OPENROUTER_API_KEY_CHAT", "OPENROUTER_API_KEY_CHAT_FILE",
+            )):
                 raise ValueError("Free Chat refuses provider credentials")
             os.environ.update(
                 STORE_MODE="postgres",
@@ -271,7 +289,7 @@ def configure(role):
         if role == "search":
             os.environ["SEARCH_QA_DATABASE_URL"] = value
             os.environ["SEARCH_CATALOG_DATABASE_URL"] = value
-            os.environ["SEARCH_SERVICE_TOKEN"] = os.environ["AI_SERVICE_TOKEN"]
+            os.environ["SEARCH_SERVICE_TOKEN"] = internal_token
         if role == "console":
             import httpx
             import psycopg

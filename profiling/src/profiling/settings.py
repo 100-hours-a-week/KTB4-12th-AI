@@ -1,7 +1,9 @@
 """설정 — 환경변수 → 객체 하나. 실험 config.json의 값 중 서비스에 필요한 것만 옮긴다.
 
-읽는 순서(pydantic-settings): 환경변수 > .env 파일 > 아래 기본값. 접두사 PROFILING_ 을 붙인 이름만 읽는다
-(예: PROFILING_BACKEND_BASE_URL). 팀원 골격은 아직 없다(09-18 초기 골격은 되돌려짐) — 합칠 때 접두사·이름을 맞추더라도
+읽는 순서(pydantic-settings): 환경변수 > .env 파일 > 아래 기본값. 기본적으로 PROFILING_ 접두사를 붙인다
+(예: PROFILING_BACKEND_BASE_URL). 모델 키는 OPENROUTER_API_KEY_PROFILER 와 기존 PROFILING_OPENROUTER_API_KEY 를 읽는다.
+같은 출처에 둘 다 있으면 새 이름이 우선한다(빈 값도 명시값). _FILE 및 통합 자격 증명 충돌 검사는 integration 이 맡는다.
+팀원 골격은 아직 없다(09-18 초기 골격은 되돌려짐) — 합칠 때 접두사·이름을 맞추더라도
 여기 한 파일만 바꾼다. 코드는 settings.BACKEND_BASE_URL 처럼 속성으로만 쓴다.
 
 값의 출처
@@ -29,6 +31,7 @@ class Settings(BaseSettings):
         env_file=".env",            # 실행 위치(profiling/) 기준. 없어도 된다
         env_file_encoding="utf-8",
         extra="ignore",             # .env에 다른 서비스 변수가 섞여 있어도 무시
+        populate_by_name=True,       # 별칭 추가 후에도 Settings(OPENROUTER_API_KEY=...) 호출 호환
     )
 
     # ---- 바깥 연결
@@ -114,7 +117,9 @@ class Settings(BaseSettings):
     )
     OPENROUTER_API_KEY: SecretStr | None = Field(
         default=None,
-        description="TAGGER=openrouter 일 때 API 키 — profiling/.env(gitignore)에만 둔다. 로그 · 응답에 찍히지 않게 SecretStr",
+        validation_alias=AliasChoices("OPENROUTER_API_KEY_PROFILER", "PROFILING_OPENROUTER_API_KEY"),
+        description="TAGGER=openrouter 일 때 API 키 — OPENROUTER_API_KEY_PROFILER(기존 PROFILING_OPENROUTER_API_KEY 호환). "
+                    "같은 출처에서는 새 이름 우선. 로그 · 응답에 찍히지 않게 SecretStr",
     )
     TAG_PROMPT_FILE: str | None = Field(
         default=None,
