@@ -9,10 +9,10 @@ SHA = "a" * 40
 DIGEST = "sha256:" + "b" * 64
 
 
-def receipts():
+def receipts(environment="staging"):
     return [
         {"target": target, "source_sha": SHA, "tag": "main-" + SHA,
-         "digest": DIGEST, "image": f"{REGISTRY}/seonjalal/staging/ai-{target}@{DIGEST}"}
+         "digest": DIGEST, "image": f"{REGISTRY}/seonjalal/{environment}/ai-{target}@{DIGEST}"}
         for target in ["search", "profiler", "chat", "migrate"]
     ]
 
@@ -63,6 +63,17 @@ class StagingImageManifestTests(unittest.TestCase):
     def test_short_sha_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "full"):
             build_manifest(receipts(), SHA[:7])
+
+    def test_production_manifest_uses_only_production_digests(self):
+        result = build_manifest(receipts("production"), SHA, "production")
+        self.assertEqual(result["environment"], "production")
+        self.assertEqual(list(result["images"]), ["chat", "migrate", "profiler", "search"])
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            build_manifest(receipts(), SHA, "production")
+
+    def test_unknown_environment_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Only staging or production"):
+            build_manifest(receipts(), SHA, "develop")
 
 
 if __name__ == "__main__":
