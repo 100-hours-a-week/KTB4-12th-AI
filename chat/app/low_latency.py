@@ -139,6 +139,8 @@ class LowLatencyRuntime(AgentRuntime):
    if prepared['snapshotId']!=catalog.snapshot:raise APIError(409,'준비된 후보의 상품 snapshot이 변경됐습니다. 새 질문 ID로 후보를 다시 준비해 주세요.')
    profile=profile.model_copy(update={'candidate_ids':[str(x) for x in prepared['productIds']]})
   session=Session(cid,profile,prior_filters);session.public_exclusions=list(prior_filters.exclude_category_ids)
+  from app.profile import recipient_model_context
+  session.recipient_preferences=recipient_model_context(snapshot)
   session.filter_sources=copy.deepcopy(prior_state.get('filterSources',{})) if same else {}
   session.product_exclusion_sources=copy.deepcopy(prior_state.get('productExclusionSources',{})) if same else {}
   session.last_queries=copy.deepcopy(prior_state.get('lastQueries',[])) if same else []

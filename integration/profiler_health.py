@@ -8,8 +8,7 @@ def model_state(health):
         return {
             "enabled": value.get("enabled") is True,
             "model": value.get("model"),
-            "required": guard.get("modelRequired") is True
-            and guard.get("budgetGuard") in ("central-account", "provider-key-limits"),
+            "required": guard.get("modelRequired") is True,
             "state": value.get("state"),
         }
     return health.get("tagger", {})

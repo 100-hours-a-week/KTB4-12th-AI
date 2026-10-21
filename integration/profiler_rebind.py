@@ -111,6 +111,17 @@ class ManagedSearch:
         with self.condition:
             return self._selected().catalog_version
 
+    def tag_taxonomy(self, profile):
+        # Analysis runs on a retained thread binding; never stamp old analyses
+        # with the taxonomy of a later generation.
+        with self._borrow() as catalog:
+            contract = catalog.contract
+            if str(profile.catalog_version_id) != contract['catalogVersion']:
+                raise ValueError('Analysis taxonomy generation mismatch')
+            return {'productTagsRule': contract['productTagsRule'],
+                    'productTagsSha256': contract['productTagsSha256'],
+                    'validatorVersion': profile.validator_version}
+
     @property
     def version(self):
         with self.condition:

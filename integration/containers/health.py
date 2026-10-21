@@ -8,12 +8,11 @@ from pathlib import Path
 
 
 def service_token():
-    # Same order as the launcher: the configured secret file, else the injected variable.
-    path = os.environ.get("AI_SERVICE_TOKEN_FILE")
-    token = Path(path).read_text().strip() if path else os.environ.get("AI_SERVICE_TOKEN", "").strip()
-    if not token:
-        raise SystemExit("AI service token file or variable missing")
-    return token
+    from integration.containers.entrypoint import secret
+    try:
+        return secret("AI_SERVICE_TOKEN")
+    except (OSError, ValueError):
+        raise SystemExit("AI service token file or variable missing") from None
 
 
 def main():

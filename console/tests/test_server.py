@@ -14,39 +14,6 @@ def run(function):
     return asyncio.run(function())
 
 
-@pytest.mark.parametrize("fault", [None, "status", "mode", "account", "limit", "halted", "missing"])
-def test_managed_console_keeps_actual_cumulative_budget_gate_without_launcher(fault, monkeypatch):
-    from fastapi import HTTPException
-    from console.server import Backend
-    monkeypatch.setattr("console.server.os.kill", lambda *args:
-                        pytest.fail("Managed containers do not share launcher process IDs"))
-    async def case():
-        backend = Backend({"managedDeployment": True, "liveModel": True,
-                           "budgetMode": "guarded",
-                           "budgetAccount": "gift-chat-harness-2026-10-06", "budgetExpectedLimitUsd": 5})
-        ready = {"ready": True, "database": "postgresql", "model": "synthetic-model", "mode": "live", "budgetAccount": "gift-chat-harness-2026-10-06",
-                 "sharedBudget": {"limitUsd": 5, "halted": None, "remainingUsd": 4}}
-        if fault == "mode": ready["mode"] = "mock"
-        if fault == "account": ready["budgetAccount"] = "different-budget"
-        if fault == "limit": ready["sharedBudget"]["limitUsd"] = 10
-        if fault == "halted": ready["sharedBudget"]["halted"] = "exhausted"
-        if fault == "missing": ready.pop("sharedBudget")
-        calls = []
-        async def request(*args):
-            calls.append(args)
-            return (503 if fault == "status" else 200), ready
-        backend.request = request
-        try:
-            if fault:
-                with pytest.raises(HTTPException) as error:
-                    await backend.check_live_budget()
-                assert error.value.status_code == 409
-            else:
-                assert await backend.check_live_budget() == ready
-            assert calls == [("chat", "GET", "/readyz")]
-        finally:
-            await backend.http.aclose()
-    run(case)
 
 
 def test_static_build_is_an_immutable_startup_snapshot(tmp_path, monkeypatch):
@@ -75,37 +42,6 @@ def test_static_build_is_an_immutable_startup_snapshot(tmp_path, monkeypatch):
     run(case)
 
 
-@pytest.mark.parametrize("mode", [None, "guarded", "provider-key-limits", "unknown", ""])
-@pytest.mark.parametrize("ready_ok", [True, False])
-@pytest.mark.parametrize("old_ledger", [None, {"limitUsd": 5, "remainingUsd": 0, "halted": "exhausted"}])
-def test_default_provider_limits_requires_healthy_matching_live_runtime(mode, ready_ok, old_ledger):
-    from fastapi import HTTPException
-    from console.server import Backend
-
-    async def case():
-        config = {"managedDeployment": True, "liveModel": True}
-        if mode is not None:
-            config["budgetMode"] = mode
-        backend = Backend(config)
-        ready = {"ready": ready_ok, "database": "postgresql", "mode": "live", "model": "synthetic-model", "budgetMode": "provider-key-limits"}
-        if old_ledger is not None:
-            ready["sharedBudget"] = old_ledger
-
-        async def request(*args):
-            assert args == ("chat", "GET", "/readyz")
-            return 200, ready
-
-        backend.request = request
-        try:
-            if mode in (None, "provider-key-limits") and ready_ok:
-                assert await backend.check_live_budget() == ready
-            else:
-                with pytest.raises(HTTPException) as error:
-                    await backend.check_live_budget()
-                assert error.value.status_code == 409
-        finally:
-            await backend.http.aclose()
-    run(case)
 
 
 def test_catalog_import_is_excluded_and_operations_snapshot_remains():
@@ -125,40 +61,6 @@ def test_catalog_import_is_excluded_and_operations_snapshot_remains():
     run(case)
 
 
-@pytest.mark.parametrize("mode", [None, "guarded", "provider-key-limits"])
-@pytest.mark.parametrize("reported", ["absent", "guarded", "provider-key-limits", None, "unknown", []])
-def test_runtime_budget_policy_must_match_before_send_or_verified_display(mode, reported, monkeypatch):
-    monkeypatch.delenv("AI_BUDGET_MODE", raising=False)
-    async def case():
-        config = {"liveModel": True, "targets": {"chat": "http://127.0.0.1:1"}}
-        if mode is not None:
-            config["budgetMode"] = mode
-        app = create_app(config)
-        backend = app.state.backend
-        ready = {"ready": True, "database": "postgresql", "mode": "live", "model": "synthetic-chat",
-                 "budgetAccount": "gift-chat-harness-2026-10-06",
-                 "sharedBudget": {"limitUsd": 5, "remainingUsd": 4, "halted": None}}
-        if reported != "absent":
-            ready["budgetMode"] = reported
-
-        async def request(service, method, path, body=None):
-            assert method == "GET"
-            return (200, ready) if service == "chat" else (503, {})
-
-        backend.request = request
-        expected = reported == (mode or "provider-key-limits") or mode == "guarded" and reported == "absent"
-        try:
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://127.0.0.1:9000") as http:
-                await login(http)
-                policy = (await http.get("/api/config")).json()
-                assert policy["chatSendAllowed"] is expected
-                assert policy["budgetPolicyVerified"] is expected
-                snapshot = (await http.get("/api/snapshot")).json()
-                assert snapshot["budgetPolicyVerified"] is expected
-                assert (snapshot["services"]["chat"]["status"] == "ready") is expected
-        finally:
-            await backend.http.aclose()
-    run(case)
 
 
 def test_target_restriction_and_credentials_never_exposed():
@@ -577,7 +479,7 @@ def test_live_retry_freezes_enriched_body_before_first_put(lost_ack):
         async def budget():
             return {"mode": "live"}
 
-        backend.check_live_budget = budget
+        backend.check_chat_ready = budget
 
         def remote(request):
             path = request.url.path
@@ -880,7 +782,7 @@ def test_live_profile_input_is_bound_before_provider_admission(monkeypatch, bind
             if path == '/health': return 200, {'tagger': {'enabled': True, 'required': True, 'model': 'synthetic-profiler'}, 'integration': {'budgetGuard': 'provider-key-limits'}, 'embedding': {'enabled': True}, 'store': {'connected': True}, 'catalog': {'active': True}}
             if service == 'backend': return binding_status, {'synthetic': True, 'inputBound': binding_status == 200}
             return 202, {'data': {'profileStatus': 'PENDING'}}
-        backend.check_live_budget = budget
+        backend.check_chat_ready = budget
         backend.request = request
         body = server.ProfileInput(recipientUserId=42, sourceVersion=2, giftPreference='SYNTHETIC')
         try:

@@ -9,9 +9,7 @@ from integration.shared_search_binding import SharedSearchBinding
 from profiling import main, llm
 from profiling.settings import get_settings
 from integration.profiler_boundary import (
-    BudgetedExtractor,
     ProviderLimitedExtractor,
-    REQUIRED_GUARDS,
     ExecutionState,
     RequiredStore,
 )
@@ -20,7 +18,6 @@ from integration.profiler_generation import (
     GuardedCatalog,
     GuardedEmbedding,
 )
-from integration.shared_budget import SharedBudget
 from integration.provider_key import ProviderKey, KeyUnavailable
 from integration.service_token import ServiceToken, shared_token_configured
 
@@ -55,26 +52,10 @@ async def lifespan(app):
         )
     if main.strict_problems(settings, managed_auth=shared_auth):
         raise RuntimeError("Integrated strict startup settings invalid")
-    mode = os.environ.get("AI_BUDGET_MODE", "").strip() or "provider-key-limits"
-    budget = None
-    if mode == "guarded":
-        budget = SharedBudget(
-            os.environ.get("PROFILING_BUDGET_URL", ""), os.environ.get("STORE_TOKEN", "")
-        )
-        budget.call("budget_summary")
-        guard = "central-account"
-
-        def guarded_factory(*args, **kwargs):
-            return BudgetedExtractor(*args, **kwargs, budget=budget, credential_source=source)
-    elif mode == "provider-key-limits":
-        guard = "provider-key-limits"
-
-        def guarded_factory(*args, **kwargs):
-            return ProviderLimitedExtractor(*args, **kwargs, credential_source=source)
-    else:
-        raise RuntimeError("Unsupported AI_BUDGET_MODE")
+    def provider_factory(*args, **kwargs):
+        return ProviderLimitedExtractor(*args, **kwargs, credential_source=source)
     original = llm.OpenRouterTagExtractor
-    llm.OpenRouterTagExtractor = guarded_factory
+    llm.OpenRouterTagExtractor = provider_factory
     context = main.lifespan(app)
     entered = False
     heartbeat = None
@@ -87,6 +68,7 @@ async def lifespan(app):
         if settings.CATALOG_SOURCE == "search_http":
             from integration.profiler_rebind import install, keep_binding_alive
             manager = await asyncio.to_thread(install, app, settings)
+            app.state.recipient_store.taxonomy = manager.tag_taxonomy
             heartbeat = asyncio.create_task(keep_binding_alive(manager))
         binding = (SharedSearchBinding(app.state.catalog) if settings.CATALOG_SOURCE == "search_http"
                    else BoundGeneration(Path(settings.EMBEDDING_DIR), app.state.engine))
@@ -113,7 +95,7 @@ async def lifespan(app):
             )
         app.state.integration = {
             "modelRequired": True,
-            "budgetGuard": guard,
+            "budgetGuard": "provider-key-limits",
             "catalogVersionBound": binding.version,
         }
         yield
@@ -124,8 +106,6 @@ async def lifespan(app):
         if entered:
             await context.__aexit__(None, None, None)
         else:
-            if budget is not None:
-                budget.close()
             for resource in ('catalog', 'embedding', 'backend', 'tagger'):
                 close = getattr(getattr(app.state, resource, None), 'close', None)
                 if close: close()
@@ -167,7 +147,7 @@ def integrated_health(state):
 def integrated_ready(state):
     checks = _original_ready(state)
     checks["integration_required"] = (
-        getattr(state, "integration", {}).get("budgetGuard") in REQUIRED_GUARDS
+        getattr(state, "integration", {}).get("modelRequired") is True
     )
     checks["required_embedding"] = getattr(state, "embedding", None) is not None
     if getattr(state, "provider_key", None):

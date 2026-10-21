@@ -72,8 +72,16 @@ class PreparedContext(StrictModel):
         return self
 
 
+class ProfileAccess(StrictModel):
+    grant_id: UUID4
+    caller_user_id: SafeIntegerId
+    recipient_user_id: SafeIntegerId
+    source_version: SafeIntegerId
+
+
 class PutTurn(StrictModel):
     message: Annotated[str, Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)]
+    profile_access: ProfileAccess | None = None
     # Older servers forbid unknown body fields, so they reject this diagnostic
     # request instead of silently treating its header as an ordinary chat.
     quick_check: bool = Field(default=False, alias='quickCheck', strict=True)

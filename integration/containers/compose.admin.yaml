@@ -1,51 +1,5 @@
-# Console manages two provider keys and one common BE token per environment.
-# Normal team execution: merge with compose.guarded.yaml; provider key limits are the default.
+# Optional Console only; AI services run from compose.yaml alone.
 services:
-  search:
-    environment:
-      AI_SERVICE_TOKEN_FILE: ''
-      AI_INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
-  chat:
-    environment:
-      OPENROUTER_API_KEY_FILE: ''
-      STORE_TOKEN_FILE: ''
-      AI_SERVICE_TOKEN_FILE: ''
-      AI_INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
-      AI_ENVIRONMENT: ${AI_ENVIRONMENT:?local, develop, or production}
-      AI_BUDGET_MODE: ${AI_BUDGET_MODE:-provider-key-limits}
-      OPENROUTER_MANAGED_KEY_DIR: /run/provider-key
-      BE_SERVICE_TOKEN_DIR: /run/provider-key
-    secrets: !override
-    - ai_service_token
-    - session_secret
-    - qa_admin_password
-    - demo_access_token
-    - source: chat_database_url
-      target: database_url
-    volumes:
-    - type: volume
-      source: admin-settings
-      target: /run/provider-key
-      read_only: true
-  profiler:
-    environment:
-      PROFILING_OPENROUTER_API_KEY_FILE: ''
-      STORE_TOKEN_FILE: ''
-      AI_SERVICE_TOKEN_FILE: ''
-      AI_INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
-      AI_ENVIRONMENT: ${AI_ENVIRONMENT:?local, develop, or production}
-      AI_BUDGET_MODE: ${AI_BUDGET_MODE:-provider-key-limits}
-      OPENROUTER_MANAGED_KEY_DIR: /run/provider-key
-      BE_SERVICE_TOKEN_DIR: /run/provider-key
-    secrets: !override
-    - ai_service_token
-    - source: profiler_database_url
-      target: database_url
-    volumes:
-    - type: volume
-      source: admin-settings
-      target: /run/provider-key
-      read_only: true
   mesh:
     ports:
     - 127.0.0.1:${CONSOLE_PORT:-18811}:18800
@@ -79,7 +33,6 @@ services:
       OPENROUTER_MANAGED_KEY_DIR: /run/provider-key
       BE_SERVICE_TOKEN_DIR: /run/provider-key
       AI_ENVIRONMENT: ${AI_ENVIRONMENT:?local, develop, or production}
-      AI_BUDGET_MODE: ${AI_BUDGET_MODE:-provider-key-limits}
     secrets: [console_target, console_admin_hash]
     volumes:
     - console-cache:/runtime

@@ -17,6 +17,23 @@ class RecipientProfile(BaseModel):
   if self.profileStatus=='NONE' and self.sourceVersion!=0:raise ValueError('NONE profile must use version 0')
   return self
 
+def recipient_model_context(snapshot):
+ """Only the selected, authorized current profile's recommendation data.
+
+ Identity, grant, review bodies and unrelated user fields stay on the server.
+ Natural-language preferences are data the model should read, not instructions.
+ """
+ if (snapshot.get('source')!='AI_PROFILE_STORE' or snapshot.get('status')!='AVAILABLE'
+     or not snapshot.get('analysisCurrent') or snapshot.get('profileRead',{}).get('tagCompatibility')!='verified'):
+  return None
+ data=snapshot.get('data',{})
+ return {'giftPreference':data.get('giftPreference'),
+  'dislikedCategories':[{'categoryName':c['categoryName']} for c in data.get('dislikedCategories',[])],
+  'preferredTags':[{'axis':t['axis'],'tag':t['tag']} for t in data.get('preferredTags',[])],
+  'dislikedTags':[{'axis':t['axis'],'tag':t['tag']} for t in data.get('dislikedTags',[])],
+  'sourceVersion':data.get('sourceVersion')}
+
+
 def profile_context(snapshot):
  if snapshot.get('source')=='BACKEND_REQUEST':
   status=snapshot['status']

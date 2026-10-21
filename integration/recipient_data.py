@@ -183,7 +183,7 @@ class RecipientInputStore:
                 (recipient_user_id,)).fetchone()
         return row == (source_version, input_hash)
 
-    def record_analysis(self, profile) -> bool:
+    def record_analysis(self, profile, tag_taxonomy=None) -> bool:
         """Retain the last successful analysis without upgrading its source version.
 
         Emmet's latest profile row also records failed/disabled tag extraction.
@@ -194,6 +194,7 @@ class RecipientInputStore:
         if profile.tag_status not in {"ok", "skip", "skip_no_signal"}:
             return False
         analysis = {
+            "tagTaxonomy": tag_taxonomy,
             "sourceVersion": profile.source_version,
             "preferredTags": [tag.model_dump(mode="json") for tag in profile.preferred_tags],
             "dislikedTags": [tag.model_dump(mode="json") for tag in profile.disliked_tags],
@@ -220,13 +221,14 @@ class RecipientInputStore:
 class RecordingRecipientStore:
     """Keep Emmet's profile writes and add the integration success receipt."""
 
-    def __init__(self, store, recipient_data: RecipientInputStore):
+    def __init__(self, store, recipient_data: RecipientInputStore, taxonomy=None):
         self.store = store
         self.recipient_data = recipient_data
+        self.taxonomy = taxonomy
 
     def get(self, recipient_user_id: int):
         return self.store.get(recipient_user_id)
 
     def upsert(self, profile) -> None:
         self.store.upsert(profile)
-        self.recipient_data.record_analysis(profile)
+        self.recipient_data.record_analysis(profile, self.taxonomy(profile) if self.taxonomy else None)

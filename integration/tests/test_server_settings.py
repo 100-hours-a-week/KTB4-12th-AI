@@ -47,6 +47,7 @@ def test_host_setting_must_be_a_bare_hostname(monkeypatch, bad):
 
 
 def test_app_launcher_uses_the_configured_host(monkeypatch):
+    monkeypatch.setenv("INTEGRATION_SYNTHETIC_ONLY", "1")
     host = "ai-db.abc123.ap-northeast-2.rds.amazonaws.com"
     monkeypatch.setenv("AI_DATABASE_HOST", host)
     monkeypatch.setenv("AI_DATABASE_NAME", DB)
@@ -127,37 +128,10 @@ def launcher(monkeypatch):
     os.environ.update(saved)
 
 
-def test_budget_mode_defaults_to_provider_limits_and_requires_explicit_guarded(monkeypatch):
-    monkeypatch.delenv("AI_BUDGET_MODE", raising=False)
-    for value in (None, "", "  ", "provider-key-limits"):
-        if value is not None:
-            monkeypatch.setenv("AI_BUDGET_MODE", value)
-        assert entrypoint.budget_mode() == "provider-key-limits"
-        with pytest.raises(ValueError):
-            entrypoint.budget_mode(smoke=True)
-    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
-    assert entrypoint.budget_mode() == entrypoint.budget_mode(smoke=True) == "guarded"
-    for value in ("off", "GUARDED", "auto"):
-        monkeypatch.setenv("AI_BUDGET_MODE", value)
-        with pytest.raises(ValueError):
-            entrypoint.budget_mode()
 
 
-def test_guarded_fence_only_approves_the_pinned_model(monkeypatch):
-    monkeypatch.delenv("PROFILING_TAGGER_MODEL", raising=False)
-    assert entrypoint.model_for("PROFILING_TAGGER_MODEL", "guarded") == "openai/gpt-6-luna"
-    monkeypatch.setenv("PROFILING_TAGGER_MODEL", "google/gemini-3.5-flash-lite")
-    with pytest.raises(ValueError):
-        entrypoint.model_for("PROFILING_TAGGER_MODEL", "guarded")
-    assert (entrypoint.model_for("PROFILING_TAGGER_MODEL", "provider-key-limits")
-            == "google/gemini-3.5-flash-lite")
 
 
-@pytest.mark.parametrize("role", ["chat", "profiler"])
-def test_explicit_guarded_without_ledger_still_blocks(launcher, role):
-    launcher.setenv("AI_BUDGET_MODE", "guarded")
-    with pytest.raises((KeyError, ValueError)):
-        entrypoint.configure(role)
 
 
 @pytest.mark.parametrize("mode", [None, "provider-key-limits"])
@@ -201,13 +175,6 @@ def test_native_profiler_selects_policy_before_database_or_model(monkeypatch, mo
     monkeypatch.setattr(runtime, "shared_token_configured", lambda: False)
     monkeypatch.setattr(runtime.main, "strict_problems", lambda *a, **kw: [])
 
-    class Budget:
-        def __init__(self, *args): calls.append("ledger")
-        def call(self, method): calls.append(method)
-        def close(self): calls.append("close")
-
-    monkeypatch.setattr(runtime, "SharedBudget", Budget)
-    monkeypatch.setattr(runtime, "BudgetedExtractor", lambda *a, **kw: calls.append("guarded"))
     monkeypatch.setattr(runtime, "ProviderLimitedExtractor", lambda *a, **kw: calls.append("provider-key-limits"))
     original = runtime.llm.OpenRouterTagExtractor
 
@@ -221,12 +188,11 @@ def test_native_profiler_selects_policy_before_database_or_model(monkeypatch, mo
 
     monkeypatch.setattr(runtime.main, "lifespan", database_boundary)
     async def case():
-        with pytest.raises(RuntimeError if mode == "off" else BeforeDatabase):
+        with pytest.raises(BeforeDatabase):
             async with runtime.lifespan(SimpleNamespace(state=SimpleNamespace())):
                 pytest.fail("Synthetic check must stop before the DB boundary")
     asyncio.run(case())
-    assert calls == ([] if mode == "off" else ["ledger", "budget_summary", "guarded", "close"]
-                     if mode == "guarded" else ["provider-key-limits"])
+    assert calls == ["provider-key-limits"]
     assert runtime.llm.OpenRouterTagExtractor is original
 
 
@@ -260,7 +226,9 @@ def test_provider_mode_counts_as_a_required_model_guard():
     health = {"llm": {"enabled": True, "model": "google/gemini-3.5-flash-lite", "state": "ok"},
               "integration": {"modelRequired": True, "budgetGuard": "provider-key-limits"}}
     assert model_state(health)["required"] is True
-    health["integration"]["budgetGuard"] = "unverified"
+    health["integration"].pop("budgetGuard")
+    assert model_state(health)["required"] is True
+    health["integration"]["modelRequired"] = False
     assert model_state(health)["required"] is False
 
 
@@ -329,3 +297,32 @@ def test_native_profiler_dotenv_key_preserves_explicit_and_managed_sources(tmp_p
         with pytest.raises(BeforeDatabase):
             async with runtime.lifespan(SimpleNamespace(state=SimpleNamespace())): pass
     asyncio.run(case())
+
+
+@pytest.mark.parametrize("name", ["AI_INTERNAL_SERVICE_TOKEN", "DATABASE_URL", "SESSION_SECRET"])
+def test_ecs_injected_value_overrides_absent_local_mount(monkeypatch, tmp_path, name):
+    monkeypatch.setenv(name, "synthetic-ecs-value")
+    monkeypatch.setenv(name + "_FILE", str(tmp_path / "absent"))
+    assert entrypoint.secret(name) == "synthetic-ecs-value"
+
+
+def test_ecs_key_and_be_token_with_absent_local_mount(monkeypatch, tmp_path):
+    from integration.provider_key import ProviderKey
+    from integration.service_token import ServiceToken
+    monkeypatch.delenv("OPENROUTER_MANAGED_KEY_DIR", raising=False)
+    monkeypatch.delenv("BE_SERVICE_TOKEN_DIR", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY_CHAT", "synthetic-ecs-provider")
+    monkeypatch.setenv("OPENROUTER_API_KEY_CHAT_FILE", str(tmp_path / "absent-key"))
+    monkeypatch.delenv("AI_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("PROFILING_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("BE_SERVICE_TOKEN", "synthetic-ecs-be-token")
+    monkeypatch.setenv("BE_SERVICE_TOKEN_FILE", str(tmp_path / "absent-token"))
+    assert ProviderKey.from_environment("chat").snapshot().value == "synthetic-ecs-provider"
+    assert ServiceToken.from_environment("chat").snapshot().value == "synthetic-ecs-be-token"
+
+
+def test_health_uses_ecs_value_when_local_file_mount_is_absent(monkeypatch, tmp_path):
+    from integration.containers.health import service_token
+    monkeypatch.setenv("AI_SERVICE_TOKEN", "synthetic-ecs-health")
+    monkeypatch.setenv("AI_SERVICE_TOKEN_FILE", str(tmp_path / "absent"))
+    assert service_token() == "synthetic-ecs-health"

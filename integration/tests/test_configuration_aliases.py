@@ -156,12 +156,12 @@ def test_search_auth_uses_internal_and_rejects_be_token(monkeypatch):
 
 def test_managed_compose_internal_file_names_are_consistent():
     import yaml
-    path=Path(__file__).resolve().parents[1]/'containers/compose.admin.yaml'
-    config=yaml.load(path.read_text(),Loader=yaml.BaseLoader)
+    path=Path(__file__).resolve().parents[1]/'containers/compose.yaml'
+    config=yaml.safe_load(path.read_text())
     for role in ('chat','profiler','search'):
         env=config['services'][role]['environment']
-        assert env['AI_INTERNAL_SERVICE_TOKEN_FILE']=='/run/secrets/ai_service_token'
-        assert env['AI_SERVICE_TOKEN_FILE']==''
+        assert 'AI_INTERNAL_SERVICE_TOKEN' in env and 'AI_SERVICE_TOKEN_FILE' not in env
+
 
 
 @pytest.mark.parametrize('role',['chat','profiler','search'])

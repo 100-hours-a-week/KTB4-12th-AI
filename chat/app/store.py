@@ -43,46 +43,6 @@ class Store:
    # for zero work before closing this gate races with every new admission.
    db.execute('UPDATE admission_control SET paused=%s WHERE id=1',(paused,))
   return {'paused':paused}
- def budget_import(self,account,committed,source_hash):
-  # Operator-only migration; deliberately absent from authenticated RPC methods.
-  amount=Decimal(str(committed))
-  if not amount.is_finite() or not 0<=amount<=5 or len(source_hash)!=64:raise ValueError('Invalid ledger import')
-  with self.pool.connection() as db:
-   db.execute('INSERT INTO task_budget_accounts(id,limit_usd,imported_usd,import_hash) VALUES(%s,5,%s,%s) ON CONFLICT DO NOTHING',(account,amount,source_hash))
-   row=db.execute('SELECT * FROM task_budget_accounts WHERE id=%s FOR UPDATE',(account,)).fetchone()
-   if row['imported_usd']!=amount or row['import_hash']!=source_hash:raise ValueError('Existing ledger migration differs; no reset allowed')
-  return self.budget_summary(account)
- def budget_summary(self,account):
-  with self.pool.connection() as db:
-   row=db.execute('SELECT * FROM task_budget_accounts WHERE id=%s',(account,)).fetchone()
-   if row is None:raise APIError(503,'유료 테스트 예산 이관을 확인하고 있습니다.')
-   extra=db.execute('SELECT coalesce(sum(coalesce(actual_usd,reserved_usd)),0) charged,count(*) attempts FROM task_budget_attempts WHERE account=%s',(account,)).fetchone()
-   charged=row['imported_usd']+extra['charged']
-   return {'limitUsd':float(row['limit_usd']),'committedUsd':float(charged),'remainingUsd':float(max(Decimal(0),row['limit_usd']-charged)),'attempts':extra['attempts'],'halted':row['halted']}
- def budget_reserve(self,account,ident,amount,model):
-  value=Decimal(str(amount))
-  if not value.is_finite() or not 0<value<=5:raise APIError(429,'이 요청은 남은 테스트 예산을 초과합니다.')
-  with self.pool.connection() as db:
-   row=db.execute('SELECT * FROM task_budget_accounts WHERE id=%s FOR UPDATE',(account,)).fetchone()
-   if row is None:raise APIError(503,'유료 테스트 예산 이관을 확인하고 있습니다.')
-   old=db.execute('SELECT * FROM task_budget_attempts WHERE id=%s',(ident,)).fetchone()
-   if old:
-    if old['account']!=account or old['reserved_usd']!=value or old['model']!=model:raise APIError(409,'예산 예약 요청이 다릅니다.')
-    return True
-   extra=db.execute('SELECT coalesce(sum(coalesce(actual_usd,reserved_usd)),0) charged FROM task_budget_attempts WHERE account=%s',(account,)).fetchone()['charged']
-   if row['halted'] or row['imported_usd']+extra+value>row['limit_usd']:raise APIError(429,'누적 유료 테스트 예산이 부족합니다. 무료 연동 테스트를 이용해 주세요.')
-   db.execute('INSERT INTO task_budget_attempts(id,account,reserved_usd,model) VALUES(%s,%s,%s,%s)',(ident,account,value,model))
-  return True
- def budget_finish(self,account,ident,cost,status):
-  value=Decimal(str(cost)) if type(cost) in (int,float) and math.isfinite(cost) and cost>=0 else None
-  with self.pool.connection() as db:
-   row=db.execute('SELECT * FROM task_budget_accounts WHERE id=%s FOR UPDATE',(account,)).fetchone()
-   attempt=db.execute('SELECT * FROM task_budget_attempts WHERE id=%s AND account=%s FOR UPDATE',(ident,account)).fetchone()
-   if row is None or attempt is None:raise APIError(404,'예산 예약이 없습니다.')
-   if attempt['finished'] is not None:return True
-   db.execute('UPDATE task_budget_attempts SET actual_usd=%s,status=%s,finished=now() WHERE id=%s',(value,'received' if status=='received' else 'unknown',ident))
-   if value is not None and value>attempt['reserved_usd']:db.execute("UPDATE task_budget_accounts SET halted='cost_exceeded_reservation' WHERE id=%s",(account,))
-  return True
  def lease(self,owner,release=False,recover=False,next_owner=None,claim=False,inspect=False):
   # Cancelling asyncio.to_thread does not stop its DB call. Bound the synchronous
   # release itself so an unavailable pool cannot consume the shutdown grace.
@@ -148,7 +108,7 @@ class Store:
  def read(self,cid):
   with self.pool.connection() as db:
    self._conversation(db,cid);return self._snapshot(db,cid)
- def existing_turn(self,cid,tid,message,model=None,recipient_context=None,prepared_context=None):
+ def existing_turn(self,cid,tid,message,model=None,recipient_context=None,prepared_context=None,profile_access=None):
   """Read immutable request identity without requiring a live generation lease."""
   with self.pool.connection() as db:
    binding=self._conversation(db,cid)
@@ -161,9 +121,10 @@ class Store:
     if recipient_context['recipientUserId']!=binding['recipient']:raise APIError(409,'대화에 연결된 수신자와 취향의 수신자가 다릅니다.')
    old=db.execute('SELECT * FROM turns WHERE id=%s',(tid,)).fetchone()
    if old is None:return None
+   if (old.get('context') or {}).get('profileAccess')!=profile_access:raise APIError(409,'같은 질문 ID의 프로필 조회 권한은 변경할 수 없습니다.')
    if str(old['conversation'])!=cid or old['state']['message']!=message or old['requested_model']!=model or old['recipient_context']!=recipient_context or old['prepared_context']!=prepared_context:raise APIError(409,'같은 질문 ID에는 같은 질문, 모델, 수신자 정보를 사용해야 합니다.')
    return old['state']
- def start(self,cid,tid,message,owner,model=None,recipient_context=None,prepared_context=None,quick_check=False):
+ def start(self,cid,tid,message,owner,model=None,recipient_context=None,prepared_context=None,quick_check=False,profile_access=None,profile_snapshot=None):
   with self.pool.connection() as db:
    self._guard(db,owner);binding=self._conversation(db,cid,True)
    if prepared_context is not None:
@@ -176,6 +137,7 @@ class Store:
    db.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(tid,))
    old=db.execute('SELECT * FROM turns WHERE id=%s',(tid,)).fetchone()
    if old:
+    if (old.get('context') or {}).get('profileAccess')!=profile_access:raise APIError(409,'같은 질문 ID의 프로필 조회 권한은 변경할 수 없습니다.')
     if str(old['conversation'])!=cid or old['state']['message']!=message or old['requested_model']!=model or old['recipient_context']!=recipient_context or old['prepared_context']!=prepared_context:raise APIError(409,'같은 질문 ID에는 같은 질문, 모델, 수신자 정보를 사용해야 합니다.')
     return [old['state'],False]
    if quick_check:
@@ -205,7 +167,11 @@ class Store:
     if not allowed or allowed['authorized'] is not True:raise APIError(409,'QUICK_CHECK_GRANT_REQUIRED')
    state={'turnId':tid,'status':'PROCESSING','message':message,'blocks':[],'lastEventId':0}
    context={'tracePersistence':{'version':1,'status':'pending'}}
-   if self.profile_lookup and recipient_context is None:
+   if profile_access is not None:
+    if profile_snapshot is None or profile_snapshot.get('status')!='AVAILABLE' or profile_access['callerUserId']!=binding['sender'] or profile_access['recipientUserId']!=binding['recipient']:
+     raise APIError(403,'검증된 프로필 조회 권한이 필요합니다.')
+    context.update(profileAccess=profile_access,recipientProfile=profile_snapshot)
+   elif self.profile_lookup and recipient_context is None:
     # Freeze the authorized recipient snapshot with admission; retries reuse it.
     context['recipientProfile']=db.execute('SELECT ai_profile.chat_recipient_snapshot(%s) AS snapshot',(cid,)).fetchone()['snapshot']
    db.execute('INSERT INTO turns(id,conversation,state,requested_model,recipient_context,prepared_context,context) VALUES(%s,%s,%s,%s,%s,%s,%s)',(tid,cid,Jsonb(state),model,Jsonb(recipient_context) if recipient_context is not None else None,Jsonb(prepared_context) if prepared_context is not None else None,Jsonb(context)))
@@ -255,6 +221,7 @@ class Store:
    r=self._turn(db,cid,tid)
    if value is not None:
     value=dict(value)
+    if 'profileAccess' in r['context']:value['profileAccess']=r['context']['profileAccess']
     if r['context'].get('recipientProfile',{}).get('source')=='AI_PROFILE_STORE':
      value['recipientProfile']=r['context']['recipientProfile']
     db.execute('UPDATE turns SET context=%s WHERE id=%s',(Jsonb(value),tid));return True

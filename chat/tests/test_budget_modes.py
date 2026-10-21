@@ -8,7 +8,6 @@ import pytest
 from app import main
 from app.errors import APIError
 from app.model_trace import TRACE
-from app.task_budget import ACCOUNT, BudgetHTTP
 from starlette.datastructures import State
 
 BODY = {"model": "openai/gpt-6-luna", "messages": [], "max_tokens": 32}
@@ -91,26 +90,6 @@ def budget_calls(state):
     return [(method, args) for method, args in state.calls if method.startswith("budget_")]
 
 
-async def test_explicit_guarded_reserves_before_send(deployment, monkeypatch):
-    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
-    monkeypatch.delenv("BUDGET_ACCOUNT", raising=False)
-    monkeypatch.delenv("BUDGET_EXPECTED_LIMIT_USD", raising=False)
-    async with main.lifespan(main.app):
-        await wait_healthy()
-        runtime = main.app.state.runtime
-        assert isinstance(runtime.http, BudgetHTTP)
-        assert (await main.ready())["budgetMode"] == "guarded"
-        trace = []
-        token = TRACE.set(trace)
-        try:
-            await runtime.http.post("/chat/completions", json=BODY)
-        finally:
-            TRACE.reset(token)
-        assert [method for method, _ in budget_calls(deployment)] == [
-            "budget_summary", "budget_reserve", "budget_finish"]
-        assert all(args["account"] == ACCOUNT for _, args in budget_calls(deployment))
-        assert len(deployment.sent) == 1 and trace[0]["reservationId"]
-        assert json.loads(deployment.sent[0].content)["provider"]["max_price"]
 
 
 @pytest.mark.parametrize("managed", [False, True])
@@ -166,37 +145,10 @@ async def test_provider_limits_has_no_ledger_and_preserves_auth_trace(
     assert budget_calls(deployment) == []
 
 
-@pytest.mark.parametrize("mode", ["disabled", "GUARDED", "auto"])
-async def test_invalid_mode_rejected_before_clients(deployment, monkeypatch, mode):
-    monkeypatch.setenv("AI_BUDGET_MODE", mode)
-    with pytest.raises(ValueError, match="AI_BUDGET_MODE"):
-        async with main.lifespan(main.app):
-            pytest.fail("Invalid mode started")
-    assert deployment.stores == [] and deployment.sent == []
 
 
-@pytest.mark.parametrize("fault", ["unavailable", "wrong-limit"])
-async def test_guarded_startup_does_not_fall_back(deployment, monkeypatch, fault):
-    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
-    if fault == "unavailable":
-        deployment.summary_error = APIError(503, "synthetic ledger unavailable")
-    else:
-        deployment.limit = 4
-    with pytest.raises((APIError, ValueError)):
-        async with main.lifespan(main.app):
-            pytest.fail("Unverified guarded ledger started")
-    assert [method for method, _ in budget_calls(deployment)] == ["budget_summary"]
-    assert deployment.sent == []
 
 
-async def test_guarded_reservation_failure_prevents_send(deployment, monkeypatch):
-    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
-    deployment.reserve_error = APIError(503, "synthetic reservation unavailable")
-    async with main.lifespan(main.app):
-        with pytest.raises(APIError):
-            await main.app.state.runtime.http.post("/chat/completions", json=BODY)
-        assert deployment.sent == []
-        assert [method for method, _ in budget_calls(deployment)] == ["budget_summary", "budget_reserve"]
 
 
 @pytest.mark.parametrize("url", [
@@ -237,3 +189,14 @@ async def test_provider_mode_missing_managed_key_is_unready(deployment, monkeypa
         with pytest.raises(KeyUnavailable):
             await main.app.state.runtime.http.post("/chat/completions", json=BODY)
         assert deployment.sent == [] and budget_calls(deployment) == []
+
+
+async def test_stale_gateway_settings_do_not_create_a_startup_or_send_dependency(deployment, monkeypatch):
+    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
+    monkeypatch.setenv("BUDGET_STORE_URL", "http://unreachable.invalid")
+    monkeypatch.setenv("PROFILING_BUDGET_URL", "http://unreachable.invalid")
+    async with main.lifespan(main.app):
+        await wait_healthy()
+        await main.app.state.runtime.http.post("/chat/completions", json=BODY)
+        assert not budget_calls(deployment)
+        assert deployment.sent[-1].url.host == "openrouter.ai"

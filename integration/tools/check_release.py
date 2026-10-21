@@ -49,8 +49,8 @@ def source_check():
 def compose_check():
     # config does not start containers, connect to a DB or read provider keys.
     subprocess.run(["docker", "compose", "version"], check=True, cwd=ROOT)
-    files = [CONTAINERS / ("compose." + n + ".yaml")
-             for n in ("guarded", "sync", "smoke", "admin")]
+    files = [CONTAINERS / "compose.yaml"] + [CONTAINERS / ("compose." + n + ".yaml")
+             for n in ("sync", "smoke", "admin")]
     required = set(re.findall(r"\$\{([A-Z_]+):\?[^}]+\}",
                               "\n".join(p.read_text() for p in files)))
     with tempfile.TemporaryDirectory(prefix="ai-compose-config-") as tmp:
@@ -63,8 +63,6 @@ def compose_check():
             EMMET_POSTGRES_VOLUME="ai-rc-config-not-created",
             EMMET_MODEL_DIR=tmp, EMMET_MEDIA_DIR=tmp,
             PROFILING_BACKEND_BASE_URL="http://127.0.0.1:8002",
-            BUDGET_GUARDED_ORIGIN="http://host.docker.internal:18942",
-            BUDGET_EXPECTED_MAX_ATTEMPTS="6", BUDGET_EXPECTED_MAX_RESERVED_USD="0.2",
             BACKEND_EXPORT_URL="https://example.invalid/products",
             BACKEND_CATEGORIES_URL="https://example.invalid/categories",
         )

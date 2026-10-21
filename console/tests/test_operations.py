@@ -47,77 +47,6 @@ def test_health_allowlist_strips_unexpected_fields_at_every_level():
     assert "PRIVATE_" not in json.dumps(http_masked(raw))
 
 
-def test_db_failure_does_not_erase_independently_collected_central_budget(monkeypatch):
-    async def case():
-        backend = Backend(
-            {
-                "liveModel": True,
-                "budgetMode": "guarded",
-                "database": "synthetic-never-connect",
-                "targets": {
-                    "chat": "http://127.0.0.1:1",
-                    "search": "http://127.0.0.1:2",
-                    "profiling": "http://127.0.0.1:3",
-                },
-            }
-        )
-        await backend.http.aclose()
-
-        def remote(request):
-            if request.url.port == 1:
-                return httpx.Response(
-                    200,
-                    json={
-                        "ready": True,
-                        "mode": "live",
-                        "model": "openai/gpt-6-luna",
-                        "sharedBudget": BUDGET,
-                        "providerResponse": "PRIVATE_RESPONSE",
-                    },
-                )
-            if request.url.path == "/v1/metadata":
-                return httpx.Response(
-                    200,
-                    json={"model": "jina-synthetic", "giftPreference": "PRIVATE_TASTE"},
-                )
-            if request.url.port == 2:
-                return httpx.Response(
-                    200,
-                    json={
-                        "status": "ready",
-                        "products": 4231,
-                        "snapshotId": "synthetic",
-                    },
-                )
-            return httpx.Response(
-                503,
-                json={
-                    "error": {"message": "PRIVATE_ERROR"},
-                    "callbackUrl": "http://private.invalid?token=PRIVATE_QUERY",
-                },
-            )
-
-        backend.http = httpx.AsyncClient(transport=httpx.MockTransport(remote))
-
-        def failed_db():
-            raise psycopg.OperationalError("synthetic unavailable")
-
-        monkeypatch.setattr(backend, "database_snapshot", failed_db)
-        try:
-            result = await backend.snapshot()
-            assert result["sharedBudget"] == BUDGET
-            assert result["jobs"] is None and result["activeCounts"] is None
-            assert result["collectionStatus"] == "partial"
-            assert result["services"]["chat"]["status"] == "ready"
-            assert result["services"]["profiling"]["status"] == "unready"
-            assert len(result["services"]) == 4
-            assert "PRIVATE_" not in json.dumps(result)
-            assert result["budgetSeparation"]["actualUsd"] is None
-            assert result["budgetSeparation"]["unconfirmedUsd"] is None
-        finally:
-            await backend.http.aclose()
-
-    asyncio.run(case())
 
 
 def test_live_model_and_catalog_mismatch_is_not_green():
@@ -212,8 +141,8 @@ def test_normal_dashboard_does_not_require_old_ledger_tables(monkeypatch, mode):
             snapshot = backend.database_snapshot()
             assert snapshot["activeCounts"] == {"chat": 0, "profiling": 0}
             assert snapshot["jobs"] == []
-            assert (snapshot["budget"] is not None) is (mode == "guarded")
-            assert any("task_budget_attempts" in s for s in statements) is (mode == "guarded")
+            assert snapshot["budget"] is None
+            assert not any("task_budget_attempts" in s for s in statements)
         finally:
             await backend.http.aclose()
     asyncio.run(case())
