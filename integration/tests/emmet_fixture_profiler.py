@@ -6,7 +6,7 @@ import httpx
 import integration.profiler_runtime as runtime
 
 MODE = Path(os.environ["EMMET_FIXTURE_MODE"])
-Real = runtime.BudgetedExtractor
+Real = runtime.ProviderLimitedExtractor
 
 
 def provider(request):
@@ -18,7 +18,8 @@ def provider(request):
     if mode == "bad_json":
         return httpx.Response(200, text="PRIVATE_SYNTHETIC_PROVIDER_RESPONSE")
     body = json.loads(request.content)
-    assert body["max_tokens"] == 1200 and body["provider"]["allow_fallbacks"] is False
+    assert isinstance(body["messages"], list) and body["messages"]
+    assert body["response_format"]["type"] == "json_schema"
     return httpx.Response(
         200,
         json={
@@ -36,7 +37,7 @@ def factory(*args, **kwargs):
     return Real(*args, **kwargs, transport=httpx.MockTransport(provider))
 
 
-runtime.BudgetedExtractor = factory
+runtime.ProviderLimitedExtractor = factory
 app = runtime.app
 
 

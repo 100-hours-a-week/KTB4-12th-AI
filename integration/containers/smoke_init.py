@@ -38,7 +38,10 @@ def stage_catalog(runtime, url, fixture_path):
 def main():
     if os.environ.get("INTEGRATION_SYNTHETIC_ONLY") != "1":
         raise ValueError("Synthetic-only initialization required")
-    url = "postgresql://fixture_owner@postgres:5432/emmet4930_smoke"
+    database = os.environ["AI_DATABASE_NAME"]
+    from integration.database_identity import validate_database_name
+    validate_database_name(database)
+    url = "postgresql://fixture_owner@postgres:5432/" + database
     with psycopg.connect(url) as db:
         if db.execute(
             "SELECT count(*) FROM information_schema.tables WHERE table_schema IN ('ai_catalog','ai_profile','ai_chat')"
@@ -53,12 +56,12 @@ def main():
         "PROFILING_TAGGER": "none", "PROFILING_APP_DB_ROLE": ROLES['profiler'],
     }
     subprocess.run(["python", "-m", "alembic", "upgrade", "0011"], cwd="/workspace/profiling", env=env, check=True)
-    migrate(url, 'emmet4930_smoke')
+    migrate(url, database)
     with psycopg.connect(url) as db:
         db.execute('CREATE TABLE ai_catalog.integration_marker(id boolean PRIMARY KEY CHECK(id))')
         db.execute('INSERT INTO ai_catalog.integration_marker VALUES(true)')
         db.execute('GRANT USAGE ON SCHEMA ai_runtime,ai_catalog,ai_chat,ai_profile TO ai_console_service')
-        db.execute('GRANT SELECT ON ai_runtime.database_identity,ai_catalog.integration_marker,ai_chat.turns,ai_chat.events,ai_chat.task_budget_attempts,ai_profile.profile_runs,ai_catalog.generation_products,ai_catalog.catalog_state TO ai_console_service')
+        db.execute('GRANT SELECT ON ai_runtime.database_identity,ai_catalog.integration_marker,ai_chat.turns,ai_chat.events,ai_profile.profile_runs,ai_catalog.generation_products,ai_catalog.catalog_state TO ai_console_service')
     shared = Path("/shared")
     shared.mkdir(exist_ok=True)
     runtime = shared / "catalog"
@@ -77,7 +80,6 @@ def main():
     fake = "synthetic-container-fixture-only"
     for name in [
         "ai_service_token",
-        "store_token",
         "openrouter_key",
         "session_secret",
         "qa_admin_password",

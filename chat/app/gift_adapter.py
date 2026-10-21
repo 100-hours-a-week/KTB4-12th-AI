@@ -1,4 +1,4 @@
-"""Typed HF search adapter. Raw recipient data never enters responder messages."""
+"""Typed HF search adapter. Authorized recipient context is supplied separately by the harness."""
 import asyncio,hashlib,json
 from types import SimpleNamespace
 from app.gift_core.contracts import Filters,ResolvedFilters,Profile
@@ -92,8 +92,8 @@ class ContextAdapter:
    rows=[p for p in rows if self.catalog.allowed_private(p,filters)] if raw_pool else [p for p in rows if self.catalog.allowed(p,filters)];source='saved_pool'
   else:
    if profile.candidate_ids and profile.candidate_scope=='only' and expand:raise ValueError('prepared_scope_forbids_expansion')
-   # Private profile text is an independent retrieval input, never responder input.
-   effective=list(dict.fromkeys(([profile.preferences.strip()[:500]] if filters.recipient_scope=='current' and profile.preferences.strip() else [])+list(queries)))
+   # Derived preferences are retrieval input; authorized natural-language context is supplied separately to the model.
+   effective=list(dict.fromkeys(([profile.preferences.strip()[:500]] if filters.recipient_scope=='current' and profile.preferences.strip() else [])+[q.strip() for q in queries if q.strip()]))
    if not effective:return {'products':[],'source':'no_pool','snapshot':self.catalog.snapshot},False
    self.catalog.receipt['searchBranches']=len(effective)
    branches=await asyncio.gather(*(self.catalog.search(q,filters) for q in effective));rows=[];seen=set()

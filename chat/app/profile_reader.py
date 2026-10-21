@@ -1,7 +1,7 @@
 """Opt-in profile enrichment adapter; no inferred recipient IDs or demo fallback.
 
-Not enabled by the existing external Turn API. Its caller must supply an exact
-BE-authorized grant and the immutable conversation owner/recipient binding.
+Its caller must supply an exact BE-authorized grant and the immutable
+conversation owner/recipient binding. Scoped reads additionally bind the turn.
 """
 import copy
 import re
@@ -28,7 +28,8 @@ class ProfileReader:
     async def close(self):
         await self.http.aclose()
 
-    async def supplement(self, explicit, *, binding, access, catalog_contract=None, now=None):
+    async def supplement(self, explicit, *, binding, access, catalog_contract=None, now=None,
+                         conversation_id=None, turn_id=None):
         # Absence of authority means no network request, not a best-effort lookup.
         if (not isinstance(access, dict) or set(access) != {"grantId", "callerUserId", "recipientUserId", "sourceVersion"}
                 or access["callerUserId"] != binding.get("senderUserId")
@@ -45,7 +46,10 @@ class ProfileReader:
                 or explicit.get("sourceVersion") != access["sourceVersion"]):
             raise APIError(409, "명시된 수신자 문맥과 프로필 버전이 다릅니다.")
         try:
-            response = await self.http.post("/internal/v1/profiles/read", json=access)
+            payload = dict(access)
+            if conversation_id is not None or turn_id is not None:
+                payload.update(conversationId=conversation_id, turnId=turn_id)
+            response = await self.http.post("/internal/v1/profiles/read", json=payload)
         except httpx.HTTPError:
             return self._unavailable(explicit, "unavailable")
         if response.status_code in (401, 403):
@@ -87,8 +91,28 @@ class ProfileReader:
             if field not in result:
                 result[field] = copy.deepcopy(data[field])
         result.update(recipientUserId=access["recipientUserId"], sourceVersion=access["sourceVersion"])
+        if conversation_id is not None:
+            preference=data.get('giftPreference')
+            if preference is not None and (not isinstance(preference,str) or len(preference)>500 or '\x00' in preference):
+                raise APIError(503,'저장 취향 문장 형식을 확인할 수 없습니다.')
+            result['giftPreference']=preference
         return {"data": result, "profileRead": {"source": "profiler", "sourceVersion": data["sourceVersion"], "asOf": data["asOf"],
+                **({'grantExpiresAt':data.get('grantExpiresAt')} if conversation_id else {}),
                 "tagCompatibility": "verified" if compatible else "unverified_inference_omitted"}}
+
+    async def snapshot(self, *, binding, access, catalog_contract, conversation_id, turn_id):
+        result = await self.supplement(None, binding=binding, access=access, catalog_contract=catalog_contract,
+            conversation_id=conversation_id, turn_id=turn_id)
+        if result['profileRead']['tagCompatibility'] != 'verified':
+            raise APIError(503, '저장된 취향과 현재 상품 분류의 호환성을 확인할 수 없습니다.')
+        try:
+            expiry=datetime.fromisoformat(result['profileRead']['grantExpiresAt'].replace('Z','+00:00'))
+            if not 0 < (expiry-datetime.now(timezone.utc)).total_seconds() <= 121: raise ValueError()
+        except (KeyError,TypeError,ValueError,AttributeError):
+            raise APIError(403, '프로필 조회 권한이 만료되었습니다.') from None
+        return {'source':'AI_PROFILE_STORE','status':'AVAILABLE','inputSourceVersion':access['sourceVersion'],
+            'analysisSourceVersion':access['sourceVersion'],'analysisCurrent':True,'analysisStatus':'COMPLETED',
+            'data':result['data'],'profileRead':result['profileRead']}
 
     @staticmethod
     def _compatible_taxonomy(data, catalog):

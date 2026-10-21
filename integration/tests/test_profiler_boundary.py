@@ -7,107 +7,15 @@ import httpx
 import pytest
 
 from integration.profiler_boundary import (
-    BudgetedExtractor,
+    ProviderLimitedExtractor,
     RequiredStore,
     ExecutionState,
 )
 from profiling.ports import TagExtractError
 
 
-class Budget:
-    def __init__(self, fail=False):
-        self.events = []
-        self.fail = fail
-
-    def reserve(self, body):
-        self.events.append(("reserve", body))
-        if self.fail:
-            raise RuntimeError("synthetic failed acknowledgment")
-        return body | {
-            "max_tokens": 1200,
-            "provider": {
-                "max_price": {"prompt": 0.11, "completion": 0.55, "request": 0},
-                "allow_fallbacks": False,
-            },
-        }, "synthetic-attempt"
-
-    def finish(self, ident, cost):
-        self.events.append(("finish", ident, cost))
-
-    def close(self):
-        pass
 
 
-@pytest.mark.parametrize(
-    "mode",
-    [
-        "success",
-        "missing_usage",
-        "invalid_cost",
-        "timeout",
-        "error",
-        "redirect",
-        "bad_json",
-        "reservation_denied",
-    ],
-)
-def test_reserve_before_wire_and_unknown_retention(mode):
-    budget = Budget(fail=mode == "reservation_denied")
-    wire = []
-
-    def provider(request):
-        assert budget.events[0][0] == "reserve"
-        wire.append(json.loads(request.content))
-        if mode == "timeout":
-            raise httpx.ReadTimeout("synthetic")
-        if mode == "error":
-            return httpx.Response(429, text="PRIVATE_PROVIDER_PROMPT")
-        if mode == "redirect":
-            return httpx.Response(
-                302, headers={"location": "https://unapproved.invalid/"}
-            )
-        if mode == "bad_json":
-            return httpx.Response(200, text="PRIVATE_PROVIDER_PROMPT")
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {"message": {"content": '{"tags":[]}'}, "finish_reason": "stop"}
-                ],
-                "usage": {}
-                if mode == "missing_usage"
-                else {"cost": "0.001" if mode == "invalid_cost" else 0.001},
-            },
-        )
-
-    extractor = BudgetedExtractor(
-        "https://openrouter.ai/api/v1",
-        "synthetic-not-a-key",
-        "openai/gpt-6-luna",
-        budget=budget,
-        transport=httpx.MockTransport(provider),
-    )
-    try:
-        if mode in ["success", "missing_usage", "invalid_cost"]:
-            extractor.extract("SYNTHETIC", "SYNTHETIC", {})
-        else:
-            with pytest.raises(TagExtractError) as error:
-                extractor.extract("SYNTHETIC", "SYNTHETIC", {})
-            assert "PRIVATE_PROVIDER_PROMPT" not in str(error.value)
-        assert len(wire) == (0 if mode == "reservation_denied" else 1)
-        if wire:
-            assert (
-                wire[0]["max_tokens"] == 1200
-                and wire[0]["reasoning"]["effort"] == "low"
-                and "temperature" not in wire[0]
-            )
-            assert budget.events[-1] == (
-                "finish",
-                "synthetic-attempt",
-                0.001 if mode == "success" else None,
-            )
-    finally:
-        extractor.close()
 
 
 @pytest.mark.parametrize("tag_status", ["fail:timeout", "bad_json", "off"])
@@ -206,13 +114,11 @@ def test_embedding_failure_is_not_lost_when_algorithm_degrades():
 
 
 def test_generation_failure_at_wire_boundary_prevents_reservation_and_send():
-    budget = Budget()
     wire = []
-    extractor = BudgetedExtractor(
+    extractor = ProviderLimitedExtractor(
         "https://openrouter.ai/api/v1",
         "synthetic-key",
         "openai/gpt-6-luna",
-        budget=budget,
         transport=httpx.MockTransport(lambda r: wire.append(r)),
     )
 
@@ -223,13 +129,12 @@ def test_generation_failure_at_wire_boundary_prevents_reservation_and_send():
     try:
         with pytest.raises(TagExtractError):
             extractor.extract("SYNTHETIC", "SYNTHETIC", {})
-        assert not budget.events and not wire
+        assert not wire
     finally:
         extractor.close()
 
 
 def test_forwarded_request_preserves_all_timeout_and_custom_extensions():
-    budget = Budget()
     seen = []
 
     def provider(request):
@@ -243,11 +148,10 @@ def test_forwarded_request_preserves_all_timeout_and_custom_extensions():
             },
         )
 
-    extractor = BudgetedExtractor(
+    extractor = ProviderLimitedExtractor(
         "https://openrouter.ai/api/v1",
         "synthetic-key",
         "openai/gpt-6-luna",
-        budget=budget,
         timeout_s=0.123,
         transport=httpx.MockTransport(provider),
     )

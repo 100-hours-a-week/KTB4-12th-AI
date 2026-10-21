@@ -19,14 +19,14 @@ def main():
     parser.add_argument('--dependency-path',action='append',default=[])
     parser.add_argument('--environment-root',type=Path)
     parser.add_argument('--encoder-assets',type=Path)
-    parser.add_argument('--live', action='store_true', help='Explicit paid synthetic scenario; existing injected key, token and verified cumulative budget required')
+    parser.add_argument('--live', action='store_true', help='Explicit paid synthetic scenario; existing injected key and explicit synthetic test approval required')
     parser.add_argument('--live-case', choices=['baseline', 'exclusion'], default='baseline')
     args=parser.parse_args()
     if args.live_case != 'baseline' and not args.live:
         raise ValueError('Live case selection requires explicit --live')
     os.environ['SINGLE_SERVER_LIVE_CASE'] = args.live_case
     if args.live and (os.getenv('SINGLE_SERVER_LIVE_APPROVED') != '1'
-                     or not os.getenv('OPENROUTER_API_KEY') or not os.getenv('STORE_TOKEN')
+                     or not os.getenv('OPENROUTER_API_KEY')
                      or not args.environment_root or not args.encoder_assets):
         raise ValueError('Explicit live selection and existing in-memory connection required')
     args.output.mkdir(parents=True,exist_ok=False)
@@ -43,6 +43,10 @@ def main():
         command([str(args.pg_bin/'initdb'),'-D',str(cluster),'-U','fixture_owner','--auth-local=trust','--auth-host=trust','--no-locale','-E','UTF8'])
         command([str(args.pg_bin/'pg_ctl'),'-D',str(cluster),'-l',str(args.output/'postgres.log'),'-o',f'-h 127.0.0.1 -k {sockets.name} -p {port}','-w','start'])
         started=True
+        if args.environment_root:
+            for service in ('product-search', 'chat'):
+                for site in (args.environment_root / service / '.venv/lib').glob('python*/site-packages'):
+                    sys.path.append(str(site))
         for path in args.dependency_path:sys.path.append(path)
         sys.path[:0]=[str(ROOT/'chat'),str(ROOT/'profiling/src'),str(ROOT/'product-search'),str(ROOT)]
         import psycopg

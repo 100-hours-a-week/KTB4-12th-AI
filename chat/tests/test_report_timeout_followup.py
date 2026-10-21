@@ -5,7 +5,6 @@ import httpx,pytest
 from app import low_latency
 from app.low_latency import LowLatencyRuntime
 from app.model_config import ModelCatalog
-from app.task_budget import BudgetHTTP
 from app.store import Store as PersistentStore
 from app.errors import APIError
 from app.turn_report import report
@@ -26,8 +25,8 @@ async def delayed_turn(delays,timeout=.15,error=None,cancel=False):
   index=len(sent);sent.append(json.loads(req.content))
   packet=tool('gift_context',context()) if len(delays)>1 and index==0 else text('합성 답변입니다.')
   return httpx.Response(200,stream=DelayedStream(delays[index],packet,started,error if index==len(delays)-1 else None))
- async with httpx.AsyncClient(base_url='https://synthetic.invalid',transport=httpx.MockTransport(reply)) as http:
-  runtime=object.__new__(LowLatencyRuntime);runtime.init_state(store,search,'owner');runtime.model='openai/gpt-6-luna';runtime.catalog=ModelCatalog(http);runtime.http=BudgetHTTP(http,store);runtime.admissions[tid]={};runtime.TURN_TIMEOUT_SECONDS=timeout
+ async with httpx.AsyncClient(base_url='https://openrouter.ai/api/v1',transport=httpx.MockTransport(reply),event_hooks={"request":[__import__("app.main",fromlist=["provider_key_request"]).provider_key_request]}) as http:
+  runtime=object.__new__(LowLatencyRuntime);runtime.init_state(store,search,'owner');runtime.model='openai/gpt-6-luna';runtime.catalog=ModelCatalog(http);runtime.http=http;runtime.admissions[tid]={};runtime.TURN_TIMEOUT_SECONDS=timeout
   task=asyncio.create_task(runtime.run(cid,tid))
   if cancel:await started.wait();task.cancel()
   await task
@@ -40,18 +39,16 @@ async def test_legacy_loop_deadline_reproduces_early_abort_and_unknown_budget(mo
  store,receipt,sent,cid,tid=await delayed_turn([.04])
  assert store.states[tid]['status']=='FAILED' and receipt['agentFailureCode']=='TimeoutError'
  assert receipt['agentFailureStage']=='model_1' and receipt['stages']['model_1_ms']>=15
- assert len(sent)==1 and store.budget[-1][1]['cost'] is None and store.budget[-1][1]['status']=='unknown'
+ assert len(sent)==1
 
 async def test_production_outer_deadline_accepts_packet_after_legacy_deadline():
  store,receipt,sent,cid,tid=await delayed_turn([.04])
  assert store.states[tid]['status']=='COMPLETED' and len(sent)==1
- assert receipt['stages']['model_1_ms']>=35 and store.budget[-1][1]['cost']==.001
 
 async def test_outer_turn_deadline_still_bounds_generation_and_keeps_unknown():
  store,receipt,sent,cid,tid=await delayed_turn([.06],timeout=.025)
  assert store.states[tid]['status']=='FAILED' and receipt['failure']=='TimeoutError'
  assert receipt['agentFailureStage']=='model_1' and len(sent)==1
- assert store.budget[-1][1]['cost'] is None and store.budget[-1][1]['status']=='unknown'
  out=report(cid,store.public(store.states[tid]),receipt)
  assert out['diagnosticCode']=='turn_deadline_exceeded' and out['failureStage']=='model_1' and out['metrics']['stages']['model_1_ms']>=20 and out['metrics']['costUsd'] is None
 
@@ -59,7 +56,6 @@ async def test_provider_read_timeout_remains_failure_without_repair():
  store,receipt,sent,cid,tid=await delayed_turn([.01],error=httpx.ReadTimeout('synthetic transport stall'))
  assert store.states[tid]['status']=='FAILED' and receipt['agentFailureCode']=='ReadTimeout'
  assert receipt['agentFailureStage']=='model_1' and len(sent)==1 and not search_calls(receipt)
- assert store.budget[-1][1]['cost'] is None
 
 def search_calls(receipt):return receipt.get('searchBranches',0)
 
@@ -67,15 +63,13 @@ async def test_second_round_deadline_keeps_first_usage_and_second_unknown():
  store,receipt,sent,cid,tid=await delayed_turn([.001,.06],timeout=.03)
  assert store.states[tid]['status']=='FAILED' and len(sent)==2
  assert receipt['agentFailureStage']=='model_2' and set(('model_1_ms','model_2_ms'))<=set(receipt['stages'])
- finishes=[args for method,args in store.budget if method=='budget_finish']
- assert len(finishes)==2 and finishes[0]['cost']==.001 and finishes[1]['cost'] is None
  out=report(cid,store.public(store.states[tid]),receipt)
  assert out['metrics']['usage'][0]['cost']==.001 and out['metrics']['costUsd'] is None
 
 async def test_user_cancel_preserves_unknown_and_cannot_commit_completed():
  store,receipt,sent,cid,tid=await delayed_turn([.06],cancel=True)
  assert receipt['outcome']=='INTERRUPTED' and store.states[tid]['status']!='COMPLETED'
- assert len(sent)==1 and store.budget[-1][1]['cost'] is None
+ assert len(sent)==1
 
 class Result:
  def __init__(self,row=None,rows=()):self.row,self.rows=row,rows

@@ -296,43 +296,6 @@ def test_real_cpu_http_and_service_restart(database,source):
     assert run(database,source)['passed']
 
 
-@pytest.mark.skipif(not os.getenv('SINGLE_SERVER_TEST_ENVIRONMENTS'),reason='Explicit Chat environment required')
-def test_synthetic_cost_reservations_survive_reopen_and_are_not_refunded(database):
-    # Test Store with its own Python package, avoiding Search's unrelated app.py.
-    # This account exists only inside our new temporary DB, never in the real ledger.
-    code='''import json,os
-from app.store import Store
-from app.errors import APIError
-url=os.environ['SYNTHETIC_STORE_DSN']
-account='synthetic-isolated-budget-only'
-s=Store(url)
-s.budget_import(account,3.1,'0'*64)
-a='aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa';b='bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb'
-assert s.budget_reserve(account,a,.1,'synthetic')
-assert s.budget_reserve(account,a,.1,'synthetic')
-s.budget_finish(account,a,None,'unknown')
-assert s.budget_reserve(account,b,.2,'synthetic')
-s.budget_finish(account,b,.03,'received')
-before=s.budget_summary(account)
-assert before['attempts']==2 and before['committedUsd']==3.23
-s.close();s=Store(url)
-assert s.budget_summary(account)==before
-try:s.budget_reserve(account,'cccccccc-cccc-4ccc-cccc-cccccccccccc',2,'synthetic')
-except APIError:pass
-else:raise AssertionError('budget ceiling bypass')
-try:s.budget_import(account,0,'1'*64)
-except ValueError:pass
-else:raise AssertionError('ledger reset accepted')
-assert s.budget_summary(account)==before
-s.close();print(json.dumps({'passed':True,'synthetic':True,'realLedgerChanged':False}))
-'''
-    python=Path(os.environ['SINGLE_SERVER_TEST_ENVIRONMENTS'])/'chat/.venv/bin/python'
-    env={k:v for k,v in os.environ.items() if not any(t in k for t in ('TOKEN','PASSWORD','SECRET','API_KEY','DATABASE_URL'))}
-    env.update(PYTHONPATH=str(ROOT/'chat'),PYTHONDONTWRITEBYTECODE='1',
-               SYNTHETIC_STORE_DSN=database['chat']+'?options=-csearch_path%3Dai_chat,public')
-    completed=subprocess.run([str(python),'-B','-c',code],env=env,capture_output=True,text=True,timeout=20)
-    assert completed.returncode==0,completed.stderr
-    assert json.loads(completed.stdout)['passed']
 
 
 def test_profiler_durable_transition_guard_includes_failed_and_unsent_runs(database):
@@ -425,10 +388,6 @@ async def test_backup_restore_preserves_data_grants_and_unknown_cost(database, s
             status=RunStatus.RUNNING, input_hash='0' * 64))
     finally:
         engine.dispose()
-    with psycopg.connect(database['owner']) as db:
-        db.execute("INSERT INTO ai_chat.task_budget_accounts(id,limit_usd,imported_usd,import_hash) VALUES('synthetic-restore',5,3.1,%s)", ('0' * 64,))
-        db.execute("INSERT INTO ai_chat.task_budget_attempts(id,account,reserved_usd,model,status) VALUES(%s,'synthetic-restore',.1,'synthetic','unknown')", (uuid4(),))
-
     def snapshot(url):
         with psycopg.connect(url) as db:
             tables = db.execute("SELECT schemaname,tablename FROM pg_tables WHERE schemaname IN ('ai_runtime','ai_catalog','ai_search','ai_chat','ai_profile') OR (schemaname='public' AND tablename='alembic_version') ORDER BY 1,2").fetchall()
@@ -449,7 +408,6 @@ async def test_backup_restore_preserves_data_grants_and_unknown_cost(database, s
     assert dump.returncode == 0, dump.stderr
     listing = subprocess.run([str(pg/'pg_restore'), '--list', str(backup)],
                              capture_output=True, text=True, timeout=10)
-    assert listing.returncode == 0 and 'task_budget_attempts' in listing.stdout
     base = os.environ['SINGLE_SERVER_TEST_CLUSTER_URL']
     name = 'emmet4930_restore_' + uuid4().hex[:12]
     with psycopg.connect(base, autocommit=True) as db:
@@ -463,7 +421,6 @@ async def test_backup_restore_preserves_data_grants_and_unknown_cost(database, s
     assert snapshot(database['owner']) == before
     with psycopg.connect(restored) as db:
         assert db.execute('SELECT product_id FROM ai_catalog.product_tombstones').fetchall() == [(103,)]
-        assert db.execute("SELECT imported_usd+(SELECT sum(coalesce(actual_usd,reserved_usd)) FROM ai_chat.task_budget_attempts) FROM ai_chat.task_budget_accounts").fetchone()[0] == __import__('decimal').Decimal('3.2')
     # A differently named restore must not silently become a serving database.
     with pytest.raises(ValueError, match='Unexpected existing integration migration'):
         migrate(restored, name)

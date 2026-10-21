@@ -1,4 +1,4 @@
-"""Future image smoke client: synthetic input only, fake provider/ledger, no real API key."""
+"""Synthetic image smoke client with a mock provider, no ledger or real API key."""
 
 import json
 import time
@@ -105,8 +105,6 @@ def main():
             ]["status"]
             == "COMPLETED"
         )
-        count = http.get("http://127.0.0.1:18942/fixture/count").json()
-        assert count["synthetic"] and count["providerReservations"] == 1
         assert (
             http.get(origin + "/api/snapshot", headers=console_headers).json()["services"][
                 "profiling"
@@ -121,7 +119,7 @@ def main():
                 "realLedgerWrites": 0,
                 "profileCallbackAndPreparedContext": True,
                 "mockChatSseReplayRetryAndTerminalCancellation": True,
-                "modelReservationsInFakeLedger": 1,
+                "budgetGatewayProcesses": 0,
                 "passed": True,
             }
         )

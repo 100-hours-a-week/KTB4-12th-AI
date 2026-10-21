@@ -312,7 +312,6 @@ async def test_ordinary_chat_without_grant_admits_without_private_profile(databa
     """General chat remains usable; a stored private profile is never authority."""
     from app.low_latency import LowLatencyRuntime
     from app.model_config import ModelCatalog
-    from app.task_budget import BudgetHTTP
     store = chat_store(database)
     cid, tid, owner = str(uuid4()), str(uuid4()), str(uuid4())
     canary, account = 'SYNTHETIC_UNAUTHORIZED_PROFILE_CANARY', 'synthetic-public-chat-only'
@@ -340,7 +339,6 @@ async def test_ordinary_chat_without_grant_admits_without_private_profile(databa
         record(database, 8799, 8, payload(canary))
         store.conversation(cid, 9799, 8799)
         assert store.lease(owner)
-        store.budget_import(account, 0, '0' * 64)
         empty = {'recipientUserId': 8799, 'status': 'NONE', 'sourceVersion': 0,
                  'giftPreference': None, 'dislikedCategories': []}
         state, made = store.start(cid, tid, '안녕', owner,
@@ -359,7 +357,7 @@ async def test_ordinary_chat_without_grant_admits_without_private_profile(databa
             runtime.init_state(adapter, Search(), owner)
             runtime.model = 'openai/gpt-6-luna'
             runtime.catalog = ModelCatalog(http)
-            runtime.http = BudgetHTTP(http, adapter, account, expected_limit=5)
+            runtime.http = http
             receipt = {'startedMonotonic': time.monotonic(), 'usage': []}
             await runtime.generate(cid, tid, receipt)
         assert len(sent) == 1 and canary not in json.dumps(sent)
@@ -542,12 +540,10 @@ def test_bound_id_requires_exact_authority_and_revocation_blocks_new_turn(databa
 async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_input(database, input_mode):
     from app.low_latency import LowLatencyRuntime
     from app.model_config import ModelCatalog
-    from app.task_budget import BudgetHTTP
     from app.turn_report import report
     store = chat_store(database)
     owner, account = str(uuid4()), "synthetic-recipient-test-only"
     store.lease(owner)
-    store.budget_import(account, 0, "0" * 64)
     friends = [(301, "PRIVATE_COFFEE_CANARY", 20), (302, "PRIVATE_BOOKS_CANARY", 30),
                (303, "PRIVATE_CAMPING_CANARY", 40)]
     product = {"productId": 101, "name": "합성 선물", "brand": "합성", "price": 10000,
@@ -673,7 +669,7 @@ async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_i
                 runtime.init_state(adapter, search, owner)
                 runtime.model = "openai/gpt-6-luna"
                 runtime.catalog = ModelCatalog(http)
-                runtime.http = BudgetHTTP(http, adapter, account, expected_limit=5)
+                runtime.http = http
                 receipt = {"startedMonotonic": time.monotonic(), "usage": []}
                 await runtime.generate(cid, tid, receipt)
             assert len(sent) == 2 and not packets
@@ -715,11 +711,8 @@ async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_i
                 if canary != private:
                     assert canary not in json.dumps(search.queries)
                     assert canary not in json.dumps(store.context(cid, tid))
-        before = store.budget_summary(account)
-        assert before["attempts"] == 6 and before["committedUsd"] == 0
         store.close()
         store = chat_store(database)
-        assert store.budget_summary(account) == before
         assert store.context(cid, tid)["recipientProfile"]["data"]["recipientUserId"] == 303
     finally:
         store.close()

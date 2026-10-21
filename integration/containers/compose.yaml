@@ -1,6 +1,5 @@
-# Legacy ledger execution; normal team services merge compose.admin.yaml.
-# Apply explicit migrations and stage an initial PG generation before startup.
-name: emmet4930-guarded
+# Default AI services. Existing env/Secrets injection; no budget gateway.
+name: seonjalal-ai
 x-app:
   network_mode: service:mesh
   read_only: true
@@ -22,8 +21,6 @@ services:
     networks:
     - backend
     - egress
-    extra_hosts:
-    - host.docker.internal:host-gateway
     ports:
     - 127.0.0.1:${INTEGRATION_CHAT_PORT:-18860}:7860
     - 127.0.0.1:${INTEGRATION_PROFILER_PORT:-18861}:8001
@@ -63,15 +60,13 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      AI_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
-      SEARCH_CATALOG_DATABASE_URL_FILE: /run/secrets/database_url
+      AI_INTERNAL_SERVICE_TOKEN: ${AI_INTERNAL_SERVICE_TOKEN:?existing internal service token}
+      SEARCH_CATALOG_DATABASE_URL: ${SEARCH_CATALOG_DATABASE_URL:?existing Search role DSN}
       SEARCH_MEDIA_ROOT: /media
       PORT: '8000'
       AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
-    secrets:
-    - ai_service_token
-    - source: search_database_url
-      target: database_url
+      AI_DATABASE_HOST: ${AI_DATABASE_HOST:-postgres}
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:-develop}
     volumes:
     - search-cache:/runtime
     - type: bind
@@ -119,25 +114,18 @@ services:
       search:
         condition: service_healthy
     environment:
-      AI_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
-      PROFILING_DATABASE_URL_FILE: /run/secrets/database_url
+      AI_INTERNAL_SERVICE_TOKEN: ${AI_INTERNAL_SERVICE_TOKEN:?existing internal service token}
+      PROFILING_DATABASE_URL: ${PROFILING_DATABASE_URL:?existing Profiler role DSN}
       PROFILING_APP_DB_ROLE: ai_profiler_service
-      AI_BUDGET_MODE: guarded
-      STORE_TOKEN_FILE: /run/secrets/store_token
-      PROFILING_OPENROUTER_API_KEY_FILE: /run/secrets/profiler_openrouter_key
+      OPENROUTER_API_KEY_PROFILER: ${OPENROUTER_API_KEY_PROFILER:?existing Profiler provider key}
+      BE_SERVICE_TOKEN: ${BE_SERVICE_TOKEN:?existing common BE service token}
       PROFILING_BACKEND_BASE_URL: ${PROFILING_BACKEND_BASE_URL:?authorized Backend
         callback origin}
-      BUDGET_GUARDED_ORIGIN: ${BUDGET_GUARDED_ORIGIN:-}
-      BUDGET_EXPECTED_MAX_ATTEMPTS: ${BUDGET_EXPECTED_MAX_ATTEMPTS:-}
-      BUDGET_EXPECTED_MAX_RESERVED_USD: ${BUDGET_EXPECTED_MAX_RESERVED_USD:-}
+      PROFILING_BE_GRANTS_ENABLED: 'true'
       PORT: '8001'
       AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
-    secrets:
-    - ai_service_token
-    - store_token
-    - profiler_openrouter_key
-    - source: profiler_database_url
-      target: database_url
+      AI_DATABASE_HOST: ${AI_DATABASE_HOST:-postgres}
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:-develop}
     healthcheck:
       test:
       - CMD
@@ -171,33 +159,23 @@ services:
       search:
         condition: service_healthy
     environment:
-      AI_SERVICE_TOKEN_FILE: /run/secrets/ai_service_token
-      DATABASE_URL_FILE: /run/secrets/database_url
-      AI_BUDGET_MODE: guarded
-      STORE_TOKEN_FILE: /run/secrets/store_token
-      OPENROUTER_API_KEY_FILE: /run/secrets/chat_openrouter_key
-      SESSION_SECRET_FILE: /run/secrets/session_secret
-      QA_ADMIN_PASSWORD_FILE: /run/secrets/qa_admin_password
-      DEMO_ACCESS_TOKEN_FILE: /run/secrets/demo_access_token
+      AI_INTERNAL_SERVICE_TOKEN: ${AI_INTERNAL_SERVICE_TOKEN:?existing internal service token}
+      DATABASE_URL: ${DATABASE_URL:?existing Chat role DSN}
+      OPENROUTER_API_KEY_CHAT: ${OPENROUTER_API_KEY_CHAT:?existing Chat provider key}
+      BE_SERVICE_TOKEN: ${BE_SERVICE_TOKEN:?existing common BE service token}
+      CHAT_PROFILE_READER_URL: http://127.0.0.1:8001
+      SESSION_SECRET: ${SESSION_SECRET:?existing session secret}
+      QA_ADMIN_PASSWORD: ${QA_ADMIN_PASSWORD:?existing admin password}
+      DEMO_ACCESS_TOKEN: ${DEMO_ACCESS_TOKEN:?existing demo token}
       SEARCH_URL: http://127.0.0.1:8000
       SEARCH_TOKEN: ''
       INTERNAL_URL: http://127.0.0.1:7860
       COOKIE_SECURE: 'false'
       CHAT_MEDIA_ROOT: /media
-      BUDGET_GUARDED_ORIGIN: ${BUDGET_GUARDED_ORIGIN:-}
-      BUDGET_EXPECTED_MAX_ATTEMPTS: ${BUDGET_EXPECTED_MAX_ATTEMPTS:-}
-      BUDGET_EXPECTED_MAX_RESERVED_USD: ${BUDGET_EXPECTED_MAX_RESERVED_USD:-}
       PORT: '7860'
       AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
-    secrets:
-    - ai_service_token
-    - store_token
-    - chat_openrouter_key
-    - session_secret
-    - qa_admin_password
-    - demo_access_token
-    - source: chat_database_url
-      target: database_url
+      AI_DATABASE_HOST: ${AI_DATABASE_HOST:-postgres}
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:-develop}
     volumes:
     - type: bind
       source: ${EMMET_MEDIA_DIR:?existing catalog media directory}
@@ -236,33 +214,9 @@ services:
     tmpfs:
     - /tmp:uid=10001,gid=10001,mode=0700
     environment:
-      MIGRATION_DATABASE_URL_FILE: /run/secrets/migration_database_url
-    secrets:
-    - migration_database_url
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?existing migration role DSN}
+      AI_DATABASE_HOST: ${AI_DATABASE_HOST:-postgres}
     restart: 'no'
-secrets:
-  ai_service_token:
-    file: ${AI_SERVICE_TOKEN_FILE:?existing external secret file}
-  store_token:
-    file: ${STORE_TOKEN_FILE:-/run/unconfigured/store-token}
-  chat_openrouter_key:
-    file: ${CHAT_OPENROUTER_KEY_FILE:-/run/unconfigured/chat-provider-key}
-  profiler_openrouter_key:
-    file: ${PROFILER_OPENROUTER_KEY_FILE:-/run/unconfigured/profiler-provider-key}
-  session_secret:
-    file: ${SESSION_SECRET_FILE:?existing external secret file}
-  qa_admin_password:
-    file: ${QA_ADMIN_PASSWORD_FILE:?existing external secret file}
-  demo_access_token:
-    file: ${DEMO_ACCESS_TOKEN_FILE:?existing external secret file}
-  profiler_database_url:
-    file: ${PROFILER_DATABASE_URL_FILE:?existing external database URL file}
-  chat_database_url:
-    file: ${CHAT_DATABASE_URL_FILE:?existing external database URL file}
-  search_database_url:
-    file: ${SEARCH_DATABASE_URL_FILE:?existing external database URL file}
-  migration_database_url:
-    file: ${MIGRATION_DATABASE_URL_FILE:?existing candidate migration-role DSN file}
 volumes:
   postgres-data:
     external: true

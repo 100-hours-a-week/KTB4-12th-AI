@@ -81,6 +81,9 @@ class SearchClient:
         response = await self._http.get('/v1/metadata')
         return _result(response)
 
+    async def catalog_contract(self) -> dict[str, Any]:
+        return _result(await self._http.get('/v1/catalog/contract'))
+
     async def search(
         self, request: dict[str, Any], *, snapshot_id: str | None = None,
     ) -> dict[str, Any]:

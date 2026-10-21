@@ -12,7 +12,6 @@ import httpx
 
 from app.low_latency import LowLatencyRuntime
 from app.model_config import ModelCatalog
-from app.task_budget import BudgetHTTP
 from test_low_latency import PRODUCT, Search, Store, context, show, text, tool
 
 
@@ -78,7 +77,7 @@ async def test_revoked_profile_stops_private_retrieval_and_keeps_public_conversa
         runtime.init_state(store, search, "owner")
         runtime.model = "openai/gpt-6-luna"
         runtime.catalog = ModelCatalog(http)
-        runtime.http = BudgetHTTP(http, store)
+        runtime.http = http
         for snapshot, message, replies in turns:
             tid = str(uuid4())
             await store.call("start", cid=cid, tid=tid, message=message)

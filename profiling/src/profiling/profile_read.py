@@ -6,6 +6,8 @@ this scope; production auto-enrichment remains disabled until that contract exis
 from datetime import datetime, timezone
 import secrets
 from uuid import UUID
+import os
+import httpx
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -23,6 +25,49 @@ class ProfileReadRequest(BaseModel):
     callerUserId: int = Field(strict=True, ge=1, le=2**53 - 1)
     recipientUserId: int = Field(strict=True, ge=1, le=2**53 - 1)
     sourceVersion: int = Field(strict=True, ge=1, le=2**53 - 1)
+    conversationId: UUID | None = None
+    turnId: UUID | None = None
+
+
+def read_scoped_profile(engine, body, token):
+    """BE owns mint/revoke; existing service identity proves introspection origin.
+
+    No app role gains grant-table write permission, and no fallback to a
+    different grant authority is allowed when scoped verification fails.
+    """
+    if os.getenv('PROFILING_BE_GRANTS_ENABLED') != 'true' or not body.conversationId or not body.turnId:
+        raise HTTPException(403, 'PROFILE_SCOPE_DENIED')
+    with httpx.Client(base_url=get_settings().BACKEND_BASE_URL.rstrip('/'), timeout=5,
+                      trust_env=False, follow_redirects=False) as http:
+        reply = http.post('/api/internal/v1/profile-grants/verify',
+            headers={'Authorization': 'Bearer '+token}, json=body.model_dump(mode='json'))
+    if reply.status_code in (400, 401, 403, 404, 409):
+        raise HTTPException(403, 'PROFILE_SCOPE_DENIED')
+    if reply.status_code != 200:
+        raise HTTPException(503, 'PROFILE_AUTHORITY_UNAVAILABLE')
+    expires = reply.json()['data']['expiresAt']
+    stamp = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+    remaining = (stamp-datetime.now(timezone.utc)).total_seconds()
+    if not 0 < remaining <= 121:
+        raise HTTPException(403, 'PROFILE_SCOPE_DENIED')
+    with engine.connect() as connection:
+        row = connection.execute(sa.text('''SELECT source_version,guarded_input,successful_analysis
+            FROM ai_profile.recipient_inputs WHERE recipient_user_id=:recipient'''),
+            {'recipient':body.recipientUserId}).mappings().first()
+    if not row: raise HTTPException(404, 'PROFILE_NOT_FOUND')
+    analysis = row['successful_analysis']
+    if (row['source_version'] != body.sourceVersion or not analysis
+            or analysis['sourceVersion'] != body.sourceVersion):
+        raise HTTPException(409, 'PROFILE_VERSION_MISMATCH')
+    if analysis['tagStatus'] not in ('ok','skip','skip_no_signal'):
+        raise HTTPException(503, 'PROFILE_ANALYSIS_UNAVAILABLE')
+    return {'source':'profiler','recipientUserId':body.recipientUserId,'sourceVersion':body.sourceVersion,
+        'giftPreference':row['guarded_input']['giftPreference'],
+        'asOf':analysis['analyzedAt'],'preferredTags':analysis['preferredTags'],
+        'dislikedTags':analysis['dislikedTags'],'dislikedCategories':row['guarded_input']['dislikedCategories'],
+        'tagStatus':analysis['tagStatus'],'validatorVersion':analysis['validatorVersion'],
+        'catalogVersion':analysis['catalogVersion'],'tagTaxonomy':analysis.get('tagTaxonomy'),
+        'grantExpiresAt':expires}
 
 
 def read_profile(engine, request):
@@ -66,6 +111,8 @@ async def profile_read(body: ProfileReadRequest, request: Request, response: Res
         raise HTTPException(401, "UNAUTHORIZED")
     response.headers["Cache-Control"] = "no-store"
     try:
+        if body.conversationId is not None or body.turnId is not None:
+            return await anyio.to_thread.run_sync(read_scoped_profile, request.app.state.engine, body, token)
         return await anyio.to_thread.run_sync(read_profile, request.app.state.engine, body)
     except HTTPException:
         raise

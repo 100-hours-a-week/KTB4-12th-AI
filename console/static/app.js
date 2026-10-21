@@ -262,7 +262,7 @@ async function refreshConfig(){
   try{
     const r=await api('/api/config');if(epoch!==configEpoch)return;
     $('target').textContent=r.targetLabel;
-    $('mode').textContent=r.paidCallsEnabled?(r.budgetPolicyVerified!==true?'LIVE · 비용 정책 미확인':r.budgetMode==='provider-key-limits'?'LIVE · 키별 한도':'LIVE · 비용 예약'):r.mode==='DEMO'?'FREE · 합성':'LOCAL TARGET';
+    $('mode').textContent=r.paidCallsEnabled?'LIVE · OpenRouter':r.mode==='DEMO'?'FREE · 합성':'LOCAL TARGET';
     if(state.liveRecipient===undefined){state.liveRecipient=r.defaultRecipientUserId??42;state.liveSender=r.defaultSenderUserId??7;}
     let restore=null;if(!state.restoreChecked){state.restoreChecked=true;restore=savedChat(r);if(restore){state.liveRecipient=restore.recipientUserId;state.liveSender=restore.senderUserId;}}
     if(r.paidCallsEnabled){
@@ -283,7 +283,7 @@ async function refreshConfig(){
     if(!state.plan?.quickCheck)$('quick-check-note').textContent=state.quickCheckConfigured?'연결 설정이 있습니다. 클릭할 때 준비 상태와 권한을 확인합니다.':'실제 모델·상품 빠른 점검용 합성 수신자와 기존 BE 권한을 준비하세요.';
     chatControls();
     $('send-profile').disabled=state.profileSending||!state.profileSendAllowed;
-    if(!state.plan)$('chat-note').textContent=!state.chatSendAllowed?'Chat 키·서버·비용 정책 확인 필요 · 운영 대시보드에서 설정 저장 후 다시 확인합니다.':r.paidCallsEnabled?(r.budgetMode==='provider-key-limits'?'실제 LLM · OpenRouter 키별 한도 정책 · 합성 입력만 사용':'실제 LLM · 중앙 누적 예산 선예약 · 합성 입력만 사용'):'합성 입력으로 요청·저장 상태를 확인합니다.';
+    if(!state.plan)$('chat-note').textContent=!state.chatSendAllowed?'Chat 키·서버 준비 상태 확인 필요 · 운영 대시보드에서 설정 저장 후 다시 확인합니다.':r.paidCallsEnabled?'실제 LLM · OpenRouter 키 사용 · 합성 입력만 사용':'합성 입력으로 요청·저장 상태를 확인합니다.';
     if(!state.profile&&!state.profileSending)$('profile-note').textContent=!state.profileSendAllowed?'모델 비용 정책 미확인 · 전송 차단':r.paidCallsEnabled?'실제 태깅/임베딩 · 콜백 수락과 실제 BE 저장은 별도 확인':'합성 입력으로 접수·콜백 상태를 확인합니다.';
     if(restore)await restoreChat(restore);
   }catch(e){if(epoch===configEpoch)toast(e.message);}
