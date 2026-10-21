@@ -1,5 +1,5 @@
 # AI PR 제목 검사 — 노션 「AI ECS · CI/CD 요구사항」 §3 · §5 (초안 · 10-18)
-# Squash 머지 때 PR 제목이 최종 커밋이 되므로 Conventional Commits 형식을 검사한다.
+# 제목 형식은 안내만 한다. 제품 변경의 머지를 막지 않는다.
 # pr-checks.yml 과 나눈 이유: 제목 · 본문을 고칠 때(edited) 이 검사만 다시 돌고 무거운 검사는 그대로 둔다.
 # 릴리스 PR(Release Please)은 release-please.yml 이 workflow_dispatch 로 실행 — 그때는 브랜치의 열린 PR 제목을 찾아 검사한다.
 name: AI PR title
@@ -38,6 +38,5 @@ jobs:
           echo "PR 제목: $TITLE"
           re='^(feat|fix|perf|refactor|test|docs|build|ci|chore|style|revert)(\([A-Za-z0-9#._/-]+\))?!?: .+'
           if [[ ! "$TITLE" =~ $re ]]; then
-            echo "::error::PR 제목은 '<type>(<선택 scope>): <설명>' 꼴이어야 합니다. type = feat fix perf refactor test docs build ci chore style revert"
-            exit 1
+            echo "::warning::권장 PR 제목은 '<type>(<선택 scope>): <설명>' 꼴이어야 합니다. type = feat fix perf refactor test docs build ci chore style revert"
           fi
