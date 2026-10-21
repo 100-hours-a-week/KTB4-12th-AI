@@ -1,9 +1,8 @@
 -- Standalone Chat schema preparation in an already provisioned candidate DB.
 -- psql service=<existing migration service> -X -v ON_ERROR_STOP=1
---   -v expected_database=emmet4930_<name> -f sql/migrate.sql
+--   -v expected_database=ai_db_<environment> -f sql/migrate.sql
 \set ON_ERROR_STOP on
 SELECT current_database() = :'expected_database'
-   AND current_database() LIKE 'emmet4930\_%' ESCAPE '\'
    AND current_user = 'ai_migrator' AS target_ok \gset
 \if :target_ok
 \else

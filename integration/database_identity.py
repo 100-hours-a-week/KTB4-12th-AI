@@ -8,6 +8,18 @@ DEFAULT_HOST = "postgres"
 
 
 VERSION = "single-server/1"
+DEPLOYMENT_DATABASES = frozenset({"ai_db_develop", "ai_db_staging", "ai_db_production"})
+
+
+def validate_database_name(name):
+    """Allow explicit environment DBs; retain legacy names only for synthetic tests."""
+    if name in DEPLOYMENT_DATABASES:
+        return name
+    if os.environ.get("INTEGRATION_SYNTHETIC_ONLY") == "1" and re.fullmatch(
+        r"emmet4930_[a-z0-9_]+", name
+    ):
+        return name
+    raise ValueError("AI_DATABASE_NAME must identify an approved environment database")
 
 
 def configured_host():

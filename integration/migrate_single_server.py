@@ -47,8 +47,8 @@ def migrate_recipient_data(db):
 
 
 def migrate(url, expected_database):
-    if not expected_database.startswith("emmet4930_"):
-        raise ValueError("Explicit dedicated integration database required")
+    from integration.database_identity import validate_database_name
+    validate_database_name(expected_database)
     with psycopg.connect(url) as db:
         name, owner = db.execute("SELECT current_database(),current_user").fetchone()
         if name != expected_database or (owner != "ai_migrator" and not (owner == "fixture_owner" and os.getenv("INTEGRATION_SYNTHETIC_ONLY") == "1")):

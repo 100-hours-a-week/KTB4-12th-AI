@@ -1,6 +1,7 @@
 """Migration targets follow the same explicit-file precedence as app secrets."""
 import pytest
 
+from integration.database_identity import validate_database_name
 from integration.migrate_single_server import migration_url
 
 
@@ -30,3 +31,21 @@ def test_migration_environment_fallback(monkeypatch):
     monkeypatch.delenv('MIGRATION_DATABASE_URL')
     with pytest.raises(ValueError):
         migration_url()
+
+
+@pytest.mark.parametrize('name', ['ai_db_develop', 'ai_db_staging', 'ai_db_production'])
+def test_deployment_database_names(name, monkeypatch):
+    monkeypatch.delenv('INTEGRATION_SYNTHETIC_ONLY', raising=False)
+    assert validate_database_name(name) == name
+
+
+@pytest.mark.parametrize('name', ['', 'ai_db_stage', 'emmet4930_staging', 'AI_DB_STAGING'])
+def test_unapproved_database_names_fail_closed(name, monkeypatch):
+    monkeypatch.delenv('INTEGRATION_SYNTHETIC_ONLY', raising=False)
+    with pytest.raises(ValueError, match='approved environment database'):
+        validate_database_name(name)
+
+
+def test_legacy_database_name_is_synthetic_only(monkeypatch):
+    monkeypatch.setenv('INTEGRATION_SYNTHETIC_ONLY', '1')
+    assert validate_database_name('emmet4930_smoke') == 'emmet4930_smoke'
