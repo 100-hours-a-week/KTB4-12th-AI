@@ -17,6 +17,12 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTAINERS = ROOT / "integration/containers"
 
 
+@pytest.fixture(autouse=True)
+def synthetic_database_names(monkeypatch):
+    """These contract tests use legacy emmet4930_* DB names, allowed only for synthetic runs."""
+    monkeypatch.setenv("INTEGRATION_SYNTHETIC_ONLY", "1")
+
+
 def summary():
     return {
         "limitUsd": 5,

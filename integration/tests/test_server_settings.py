@@ -10,6 +10,12 @@ from integration.containers import entrypoint
 DB = "emmet4930_test"
 
 
+@pytest.fixture(autouse=True)
+def synthetic_database_names(monkeypatch):
+    """These contract tests use legacy emmet4930_* DB names, allowed only for synthetic runs."""
+    monkeypatch.setenv("INTEGRATION_SYNTHETIC_ONLY", "1")
+
+
 def dsn(host, role="ai_profiler_service", db=DB):
     return f"postgresql+psycopg://{role}@{host}:5432/{db}"
 

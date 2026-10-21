@@ -78,7 +78,7 @@ jobs:
     timeout-minutes: 20
     env:
       PG_IMAGE: pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
-      DB: emmet4930_ci
+      DB: ai_db_develop
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
