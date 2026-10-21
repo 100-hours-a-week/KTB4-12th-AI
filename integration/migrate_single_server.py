@@ -130,6 +130,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     import json
     url = migration_url()
+    from integration.database_identity import validate_database_name
+    validate_database_name(args.database)  # before Alembic touches anything
     if args.emmet:
         from integration.database_identity import validate_dsn
         import subprocess
