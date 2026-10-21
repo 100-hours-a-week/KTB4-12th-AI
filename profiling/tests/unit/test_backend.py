@@ -6,11 +6,9 @@ from uuid import UUID
 import httpx
 import pytest
 
-from profiling import backend as backend_mod
 from profiling.backend import HttpBackendPort, to_callback
 from profiling.ports import BackendPort
 from profiling.types import ErrorCode, ProfileOutcome, RunStatus, SearchResult
-from tools.fake_backend import app as fake
 
 CV = UUID(int=1)   # 시험용 카탈로그 버전 ID
 
@@ -48,10 +46,6 @@ def test_to_callback_rejects_non_ready_or_no_search() -> None:
         to_callback(_outcome(status=RunStatus.RUNNING))
     with pytest.raises(ValueError):
         to_callback(ProfileOutcome(recipient_user_id=1, source_version=0, status=RunStatus.RESULT_READY))
-
-
-def test_callback_path_matches_fake_backend() -> None:
-    assert backend_mod.CALLBACK_PATH == fake.CALLBACK_PATH
 
 
 # ---------------------------------------------------------------- HttpBackendPort

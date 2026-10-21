@@ -26,7 +26,7 @@ from profiling.types import CallbackResult, ErrorCode, ProfileOutcome, RunStatus
 
 log = logging.getLogger(__name__)
 
-# 문서 1 §7.7 경로. tools/fake_backend/app.py의 CALLBACK_PATH와 같아야 한다 (테스트에서 대조).
+# 문서 1 §7.7 경로.
 CALLBACK_PATH = "/api/internal/v1/recipients/{recipientUserId}/profile"
 
 
@@ -94,10 +94,11 @@ class HttpBackendPort:
     transport는 테스트 전용 — httpx.MockTransport를 넣으면 네트워크 없이 응답을 흉내 낼 수 있다. 운영에서는 넘기지 않는다.
     """
 
-    def __init__(self, base_url: str, token: str, timeout_s: float, *, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(self, base_url: str, token: str, timeout_s: float, *, transport: httpx.BaseTransport | None = None, token_provider=None) -> None:
         self.base_url = base_url.rstrip("/")
         headers = {"Content-Type": "application/json"}
-        if token:
+        self._token_provider = token_provider
+        if token and token_provider is None:
             headers["Authorization"] = f"Bearer {token}"
         self._client = httpx.Client(base_url=self.base_url, headers=headers, timeout=timeout_s, transport=transport)
 
@@ -108,17 +109,20 @@ class HttpBackendPort:
         try:
             body = to_callback(outcome)
         except ValueError as e:
-            log.error("7.7 콜백 본문 생성 실패 recipient=%s source_version=%s: %s", rid, sv, e)
-            return CallbackResult(status=RunStatus.FAILED, code=ErrorCode.PIPELINE_ERROR, message=f"콜백 본문 생성 실패: {e}")
+            log.error("7.7 콜백 본문 생성 실패 recipient=%s source_version=%s: %s", rid, sv, type(e).__name__)
+            return CallbackResult(status=RunStatus.FAILED, code=ErrorCode.PIPELINE_ERROR, message=f"콜백 본문 생성 실패: {type(e).__name__}")
 
         path = CALLBACK_PATH.format(recipientUserId=rid)
         t0 = time.perf_counter()
         try:
-            res = self._client.post(path, content=body.model_dump_json())
+            headers = {"Authorization": "Bearer " + self._token_provider().value} if self._token_provider else None
+            res = self._client.post(path, content=body.model_dump_json(), headers=headers)
+        except ValueError:
+            return CallbackResult(status=RunStatus.RESULT_READY, code=ErrorCode.CALLBACK_UNREACHABLE, message="SERVICE_TOKEN_UNAVAILABLE")
         except httpx.RequestError as e:  # 타임아웃·연결 실패·DNS — 네트워크 층
-            log.warning("7.7 콜백 recipient=%s source_version=%s → %s 네트워크 오류 %s: %s (재시도 대상)",
-                        rid, sv, ErrorCode.CALLBACK_UNREACHABLE, type(e).__name__, e)
-            return CallbackResult(status=RunStatus.RESULT_READY, code=ErrorCode.CALLBACK_UNREACHABLE, message=f"{type(e).__name__}: {e}")
+            log.warning("7.7 콜백 recipient=%s source_version=%s → %s 네트워크 오류 %s (재시도 대상)",
+                        rid, sv, ErrorCode.CALLBACK_UNREACHABLE, type(e).__name__)
+            return CallbackResult(status=RunStatus.RESULT_READY, code=ErrorCode.CALLBACK_UNREACHABLE, message=type(e).__name__)
 
         status = _status_from_response(res.status_code)
         elapsed = time.perf_counter() - t0

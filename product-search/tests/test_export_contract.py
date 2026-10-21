@@ -40,6 +40,21 @@ def test_projection_uses_export_values_and_preserves_source_enrichment(inputs):
     assert inputs == before
 
 
+def test_optional_popularity_preserves_existing_value_and_kind(inputs):
+    inputs[2]['products'][0].update(view_count=87, kind='스피커')
+    assert project(*inputs)['products'][0]['view_count'] == 87
+    assert project(*inputs)['products'][0]['kind'] == '스피커'
+    inputs[0]['data']['products'][0]['viewCount'] = 0
+    assert project(*inputs)['products'][0]['view_count'] == 0
+
+
+@pytest.mark.parametrize('value', [-1, True, '2', 2.1])
+def test_popularity_rejects_invalid_export_types(inputs, value):
+    inputs[0]['data']['products'][0]['viewCount'] = value
+    with pytest.raises(ValueError):
+        project(*inputs)
+
+
 @pytest.mark.parametrize('value', [True, 1.0, '1', 0, -1, 9007199254740992])
 @pytest.mark.parametrize('field', ['productId', 'categoryId'])
 def test_product_wire_ids_are_strict_positive_safe_integers(inputs, field, value):
@@ -175,3 +190,23 @@ def test_new_product_does_not_invent_source_identity_or_images(inputs):
     assert p['source_product_id'] is None and p['description'] == ''
     assert p['image'] == p['image_large'] == p['image_fallback'] == ''
     assert p['product_type'] is None and p['price'] == 0
+
+
+def test_unagreed_synthetic_contract_fixture_covers_null_omission_deletion_and_unavailable():
+    import json
+    from pathlib import Path
+
+    fixture = json.loads((Path(__file__).resolve().parents[2] / 'integration/contracts/be-export-draft.fixture.json').read_text())
+    assert fixture['synthetic'] and not fixture['realBEConnected']
+    assert fixture['contractStatus'] == 'local-draft-not-agreed-with-BE'
+    from search.complete_export import complete
+    projection, _, _ = complete(fixture['export'], fixture['categories'])
+    args = [projection, fixture['categories'], fixture['previousCatalog'], fixture['productMap'], fixture['categoryMap']]
+    result = project(*args)
+    assert [p['id'] for p in result['products']] == fixture['expectedIds']
+    old, new = result['products']
+    assert old['view_count'] == 17 and old['kind'] == '머그' and old['availability'] == 'unavailable'
+    assert new['view_count'] == 0 and new['kind'] == '' and new['source_product_id'] is None
+    assert old['parent_category_id'] == new['parent_category_id'] == 10
+    projection['data']['products'][0]['viewCount'] = 0
+    assert project(*args)['products'][0]['view_count'] == 0

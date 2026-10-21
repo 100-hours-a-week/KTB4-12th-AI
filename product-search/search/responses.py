@@ -28,6 +28,7 @@ class ProductSummary(ResponseModel):
     price: Count
     description: str
     productType: Literal['Shipping', 'Pickup', 'Voucher'] | None
+    productKind: str | None = None
     availability: Literal['available', 'unavailable', 'unknown']
     image: str
     imageLarge: str
@@ -157,6 +158,7 @@ class FeedbackResponse(ResponseModel):
 
 
 ErrorCode = Literal[
+    "UNAUTHORIZED",
     'INVALID_REQUEST', 'UNKNOWN_CATEGORY', 'UNKNOWN_BRAND', 'SNAPSHOT_MISMATCH',
     'SEARCH_BUSY', 'SEARCH_TIMEOUT', 'ENCODER_FAILURE', 'NOT_FOUND', 'SEARCH_NOT_READY',
 ]

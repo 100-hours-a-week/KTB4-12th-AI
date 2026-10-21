@@ -1,0 +1,47 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      # PRs opened or updated with GITHUB_TOKEN do not start pull_request workflows. Dispatch the
+      # required checks on the release branch (workflow_dispatch is exempt from that rule).
+      # Workflows not present on the release branch yet are skipped.
+      - name: Run required checks on the release PR
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          branch=$(printf '%s' "$PR_JSON" | jq -r '.headBranchName // empty')
+          [ -n "$branch" ] || exit 0
+          for wf in integration.yml pr-checks.yml pr-title.yml; do
+            if gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/$wf?ref=$branch" --silent 2>/dev/null; then
+              gh workflow run "$wf" --repo "$GITHUB_REPOSITORY" --ref "$branch"
+            else
+              echo "skip $wf (not on $branch)"
+            fi
+          done

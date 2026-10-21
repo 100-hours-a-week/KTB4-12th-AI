@@ -1,0 +1,204 @@
+name: AI staging image publish
+run-name: AI staging images / ${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 중간에 취소해 이미지 일부만 발행되는 것을 방지한다. 재실행은 기존 SHA 태그를 재사용한다.
+concurrency:
+  group: ai-staging-image-publish
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require AI main before running checks or requesting credentials
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$SOURCE_REPOSITORY" = '100-hours-a-week/KTB4-12th-AI'
+          test "$SOURCE_REF" = refs/heads/main
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+  checks:
+    needs: guard
+    uses: ./.github/workflows/pr-checks.yml
+
+  contracts:
+    needs: guard
+    uses: ./.github/workflows/integration.yml
+
+  publish:
+    needs: [checks, contracts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    # Environment를 지정하면 OIDC subject가 바뀐다. 발행 역할은 main Branch subject만 신뢰한다.
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [search, profiler, chat, migrate]
+    env:
+      AWS_REGION: ap-northeast-2
+      AWS_ACCOUNT_ID: '721744297924'
+      REGISTRY: 721744297924.dkr.ecr.ap-northeast-2.amazonaws.com
+      SOURCE_SHA: ${{ github.sha }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Prepare temporary Docker configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker_config="$RUNNER_TEMP/ai-ecr-docker"
+          mkdir -p "$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Configure short-lived staging publisher credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::721744297924:role/seonjalal-v2-staging-ai-image-publisher
+          aws-region: ap-northeast-2
+          allowed-account-ids: '721744297924'
+          role-duration-seconds: 3600
+          role-session-name: ai-staging-${{ github.run_id }}-${{ matrix.target }}
+
+      - name: Check immutable tag and repository safety
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository="seonjalal/staging/ai-$TARGET"
+          tag="main-$SOURCE_SHA"
+          image="$REGISTRY/$repository:$tag"
+          test "$(aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
+          aws ecr describe-repositories --repository-names "$repository" > "$RUNNER_TEMP/repository.json"
+          jq -e --arg name "$repository" --arg account "$AWS_ACCOUNT_ID" '
+            .repositories | length == 1 and
+            (.[0] | .repositoryName == $name and .registryId == $account and
+            .imageTagMutability == "IMMUTABLE" and
+            .imageScanningConfiguration.scanOnPush == true)
+          ' "$RUNNER_TEMP/repository.json" > /dev/null
+          echo "uri=$image" >> "$GITHUB_OUTPUT"
+          # 인증·통신 오류나 Repository 부재는 이미지 없음으로 처리하지 않고 중단한다.
+          if aws ecr describe-images --repository-name "$repository" --image-ids "imageTag=$tag" \
+              > "$RUNNER_TEMP/existing-image.json" 2> "$RUNNER_TEMP/image-lookup.err"; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          elif grep -q '(ImageNotFoundException)' "$RUNNER_TEMP/image-lookup.err"; then
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          else
+            echo '::error::ECR tag lookup failed; refusing to interpret this as a missing image'
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.image.outputs.exists == 'false'
+
+      - name: Build production target for ECS amd64
+        if: steps.image.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: integration/containers/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.image.outputs.uri }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/100-hours-a-week/KTB4-12th-AI
+          cache-from: type=gha,scope=ai-staging-${{ matrix.target }}
+          cache-to: type=gha,scope=ai-staging-${{ matrix.target }},mode=max
+          provenance: false
+
+      - name: Verify architecture and push image
+        if: steps.image.outputs.exists == 'false'
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect "$IMAGE_URI" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          mkdir -p "$DOCKER_CONFIG"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+          docker push "$IMAGE_URI"
+
+      - name: Resolve immutable digest and record image receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository="seonjalal/staging/ai-$TARGET"
+          aws ecr describe-images --repository-name "$repository" \
+            --image-ids "imageTag=main-$SOURCE_SHA" > "$RUNNER_TEMP/published-image.json"
+          digest=$(jq -er '.imageDetails | select(length == 1) | .[0].imageDigest |
+            select(test("^sha256:[0-9a-f]{64}$"))' "$RUNNER_TEMP/published-image.json")
+          mkdir -p "$RUNNER_TEMP/ai-image-receipt"
+          jq -n --arg target "$TARGET" --arg sha "$SOURCE_SHA" --arg digest "$digest" \
+            --arg image "$REGISTRY/$repository@$digest" \
+            '{target:$target, source_sha:$sha, tag:("main-"+$sha), digest:$digest, image:$image}' \
+            > "$RUNNER_TEMP/ai-image-receipt/$TARGET.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-staging-image-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-image-receipt/*.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Log out of staging ECR
+        if: always()
+        shell: bash
+        run: docker logout "$REGISTRY"
+
+  manifest:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ai-staging-image-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-image-receipts
+          merge-multiple: true
+      - name: Require all four images from the same source commit
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 integration/tools/staging_image_manifest.py \
+            --receipts "$RUNNER_TEMP/ai-image-receipts" \
+            --source-sha "$SOURCE_SHA" \
+            --output "$RUNNER_TEMP/ai-staging-images.json"
+          {
+            echo '### AI staging image set'
+            echo "Source SHA: $SOURCE_SHA"
+            echo 'Image publishing completed. ECS deployment and DB migration require separate steps.'
+            jq -r '.images[] | "- `" + .image + "`"' "$RUNNER_TEMP/ai-staging-images.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-staging-images-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-staging-images.json
+          if-no-files-found: error
+          retention-days: 30

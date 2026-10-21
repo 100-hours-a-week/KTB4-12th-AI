@@ -10,6 +10,8 @@ dependencies = [
     "kiwipiepy==0.23.2",
     "kiwipiepy-model==0.23.0",
     "httpx>=0.28,<0.29",
+    "psycopg[binary]>=3.3.6,<3.4",
+    "boto3>=1.40,<2",
 ]
 
 [dependency-groups]

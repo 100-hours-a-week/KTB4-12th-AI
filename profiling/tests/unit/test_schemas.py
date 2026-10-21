@@ -35,8 +35,26 @@ def test_extract_request_v1_three_fields_only() -> None:
     """v1 BE는 giftPreference·reviews 없이 세 필드만 보낸다 — 키가 없으면 null·[]."""
     req = ProfileExtractRequest(recipientUserId=1, sourceVersion=0, dislikedCategories=[{"categoryId": 12, "categoryName": "캠핑용품"}])
     assert req.giftPreference is None and req.reviews == []
-    with pytest.raises(ValidationError):                                         # dislikedCategories는 v1 핵심 — 키 생략 불가
+    with pytest.raises(ValidationError):                                         # dislikedCategories 키 생략 불가 (10-09 전환 1단계)
         ProfileExtractRequest(recipientUserId=1, sourceVersion=0)
+    with pytest.raises(ValidationError):                                         # 최대 5 — BE MAX_SELECTABLE_COUNT 와 같은 값(09-29). 6개면 400
+        ProfileExtractRequest(recipientUserId=1, sourceVersion=0,
+                              dislikedCategories=[{"categoryId": i, "categoryName": f"c{i}"} for i in range(1, 7)])
+
+
+def test_extract_request_keys_required_values_may_be_empty() -> None:
+    """10-09 결정: 입력 세 칸은 **키를 반드시** 보내고 값은 비어도 된다. 키가 빠지면 Backend 결함으로 보고 400(분석 안 함).
+
+    전환 1단계(지금): dislikedCategories 키 필수. giftPreference·reviews 는 Backend 가 V2 를 배포할 때까지 생략 허용.
+    전환 2단계(V2 배포 시): 아래 '생략 허용' 두 줄을 400 으로 뒤집고 schemas.py 의 default 를 지운다.
+    """
+    empty = ProfileExtractRequest(**BASE)                                        # 세 칸 전부 빈 값 — 접수(콜드 스타트, 인기순 30개)
+    assert empty.dislikedCategories == [] and empty.giftPreference is None and empty.reviews == []
+    for missing in ("recipientUserId", "sourceVersion", "dislikedCategories"):
+        with pytest.raises(ValidationError):                                     # 1단계 키 필수 셋
+            ProfileExtractRequest(**{k: v for k, v in BASE.items() if k != missing})
+    only_three = ProfileExtractRequest(recipientUserId=1, sourceVersion=0, dislikedCategories=[])   # 지금 Backend 가 보내는 모양
+    assert only_three.giftPreference is None and only_three.reviews == []       # 2단계에서 ValidationError 로 바뀐다
 
 
 def test_callback_request_no_tags_and_max_30() -> None:
@@ -79,3 +97,22 @@ def test_product_record_availability_three_values() -> None:
     assert ProductRecord(**{**base, "availability": "unknown"}).availability == "unknown"  # 3값을 그대로 줘도 받는다
     with pytest.raises(ValidationError):
         ProductRecord(**{**base, "availability": "품절"})                                  # 3값 밖은 거부
+
+
+def test_unknown_observations_require_explicit_search_source_context() -> None:
+    product = {"productId":1,"name":"synthetic","brand":"b","description":None,"categoryId":1,
+               "categoryName":"c","price":0,"availability":"unknown","updatedAt":None,"viewCount":None}
+    with pytest.raises(ValidationError):
+        ProductRecord.model_validate(product)
+    export = ProductRecord.model_validate(product, context={"catalog_source":"backend-export"})
+    assert export.updatedAt is None and export.viewCount is None
+    record = ProductRecord.model_validate(product, context={"catalog_source":"catalog-snapshot"})
+    assert record.updatedAt is None and record.viewCount is None
+    for change in ({"viewCount":0},{"updatedAt":"2026-10-18T00:00:00Z"},{"availability":"available"}):
+        with pytest.raises(ValidationError):
+            ProductRecord.model_validate(product | change, context={"catalog_source":"catalog-snapshot"})
+    for missing in ("viewCount", "updatedAt"):
+        for source in ("catalog-snapshot", "backend-export"):
+            with pytest.raises(ValidationError):
+                ProductRecord.model_validate({k:v for k,v in product.items() if k != missing},
+                                             context={"catalog_source":source})

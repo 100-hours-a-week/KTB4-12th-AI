@@ -1,4 +1,4 @@
-"""접수 단계 중복 판정 — Backend가 같은 sourceVersion으로 재전송할 때(10분 PENDING 타임아웃, 최대 2회) 무엇을 하는가.
+"""접수 단계 중복 판정 — Backend가 같은 sourceVersion으로 다시 보낼 때(콜백을 못 받았을 때 · 6시간 뒤 복구 전송) 무엇을 하는가.
 
 DB도 앱도 띄우지 않는다: decide()는 순수 함수이고, 라우터는 ports 모양의 가짜를 넣어 직접 부른다.
 판정 기준은 두 가지뿐 — **분석이 몇 번 돌았나**와 **콜백이 몇 번 나갔나**.
@@ -9,8 +9,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import anyio
 import pytest
-from fastapi import BackgroundTasks
+from fastapi import HTTPException
 
 from profiling import intake, pipeline
 from profiling.intake import ANALYZE, RESEND, SKIP, decide
@@ -115,13 +116,17 @@ class FakeBackend:
 
 
 class FakeSupervisor:
-    """무엇을 제출했는지만 기록한다. run()으로 그 작업을 실제로 돌린다."""
+    """무엇을 제출했는지만 기록한다. run()으로 그 작업을 실제로 돌린다. accept=False 면 큐 가득을 흉내 낸다."""
 
-    def __init__(self):
+    def __init__(self, accept: bool = True):
         self.submitted = []
+        self.accept = accept
 
-    def submit(self, bg, fn, *args, **kwargs):
+    def submit(self, fn, *args, **kwargs):
+        if not self.accept:
+            return False
         self.submitted.append((fn, args, kwargs))
+        return True
 
     def run(self):
         for fn, args, kwargs in self.submitted:
@@ -139,8 +144,8 @@ def _post(existing, monkeypatch, *, lock_free=True, store=None) -> tuple[list[st
     monkeypatch.setattr(intake, "resend_callback", lambda outcome, *a, **k: done.append(("resend", outcome)))
 
     res = asyncio.run(intake.extract_and_pool(
-        body=_body(), bg=BackgroundTasks(), catalog=FakeCatalog(), store=store, recipient_store=object(),
-        backend=backend, supervisor=sup, settings=Settings(),
+        body=_body(), catalog=FakeCatalog(), store=store, recipient_store=object(),
+        backend=backend, supervisor=sup, settings=Settings(), io_limiter=anyio.CapacityLimiter(1),
     ))
     assert res.data.profileStatus == "PENDING" and res.data.sourceVersion == SV   # 어느 경로든 응답은 같다
     assert [fn for fn, _, _ in sup.submitted] == [intake.dispatch]                # 접수는 판정하지 않는다
@@ -195,6 +200,31 @@ def test_lookup_failure_does_not_block_intake(monkeypatch) -> None:
     assert done == ["analyze"]
 
 
+def test_dislike_mode_flows_from_settings_to_pipeline(monkeypatch) -> None:
+    """설정 DISLIKE_MODE 가 접수 → 슬롯(dispatch) → run_and_callback → pipeline.profile 까지 그대로 간다 (10-11 스위치)."""
+    seen = {}
+    real_run = intake.run_and_callback
+
+    def spy_run(*a, **k):
+        seen["run"] = k.get("dislike_mode")
+        real_run(*a, **k)
+
+    def spy_profile(rq, **k):
+        seen["profile"] = k.get("dislike_mode")
+        raise RuntimeError("여기서 멈춘다 — 전달만 본다")      # run_and_callback 이 잡아 로그로 남긴다
+
+    monkeypatch.setattr(intake, "run_and_callback", spy_run)
+    monkeypatch.setattr(pipeline, "profile", spy_profile)
+    sup = FakeSupervisor()
+    asyncio.run(intake.extract_and_pool(
+        body=_body(), catalog=FakeCatalog(), store=FakeStore(None), recipient_store=object(),
+        backend=FakeBackend(), supervisor=sup, settings=Settings(_env_file=None, DISLIKE_MODE="penalty"),
+        io_limiter=anyio.CapacityLimiter(1),
+    ))
+    sup.run()
+    assert seen == {"run": "penalty", "profile": pipeline.DislikeMode.PENALTY}
+
+
 def test_resend_records_callback_failure() -> None:
     """재전송이 실패해도 그 결과가 기록된다 (RESULT_READY로 남아 다음 재전송 대상)."""
     class Unreachable(FakeBackend):
@@ -207,3 +237,19 @@ def test_resend_records_callback_failure() -> None:
     assert store.saved[0].status is RunStatus.RESULT_READY
     assert store.saved[0].failure_code is ErrorCode.CALLBACK_UNREACHABLE
     assert store.saved[0].callback_attempts == existing.callback_attempts + 1
+
+
+# ---------------------------------------------------------------- 큐 가득 (09-28)
+
+
+def test_queue_full_is_rejected_with_503_and_short_retry_after() -> None:
+    """Supervisor 가 받지 못하면(큐 가득·종료 중) 기다리지 않고 503 — Retry-After 는 QUEUE_FULL_RETRY_AFTER_S(30), 카탈로그 없음의 300이 아니다."""
+    sup = FakeSupervisor(accept=False)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(intake.extract_and_pool(
+            body=_body(), catalog=FakeCatalog(), store=FakeStore(None), recipient_store=object(),
+            backend=FakeBackend(), supervisor=sup, settings=Settings(), io_limiter=anyio.CapacityLimiter(1),
+        ))
+    assert ei.value.status_code == 503
+    assert ei.value.detail["code"] == "SERVICE_UNAVAILABLE" and ei.value.detail["retryAfter"] == Settings().QUEUE_FULL_RETRY_AFTER_S
+    assert sup.submitted == []                                     # 아무것도 실행되지 않는다

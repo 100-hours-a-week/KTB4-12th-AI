@@ -1,0 +1,499 @@
+# Disposable synthetic cluster only; never target an existing volume.
+name: emmet4930-synthetic-smoke
+services:
+  mesh:
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: mesh
+    networks:
+    - backend
+    environment:
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg18-bookworm@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+    networks:
+    - backend
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_USER: fixture_owner
+      POSTGRES_DB: emmet4930_smoke
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+    - smoke-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U fixture_owner -d emmet4930_smoke
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  qa-init:
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: qa-init
+    networks:
+    - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+    volumes:
+    - smoke-data:/shared
+    - &id001
+      type: bind
+      source: ${EMMET_MODEL_DIR:?existing verified models directory}
+      target: /assets/models
+      read_only: true
+      bind:
+        create_host_path: false
+    restart: 'no'
+  search:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: search
+    command:
+    - search
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '8000'
+      SEARCH_CATALOG_DATABASE_URL_FILE: /run/fixture/search_db
+      SEARCH_MEDIA_ROOT: /run/fixture/media
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+    volumes:
+    - smoke-data:/run/fixture:ro
+    - search-cache:/runtime
+    - *id001
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -m
+      - integration.containers.health
+      - search
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+  backend:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: console-smoke
+    command:
+    - backend
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+      search:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '8002'
+      LIVE_BACKEND_STATE: /run/fixture/backend-state.json
+      SEARCH_URL: http://127.0.0.1:8000
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+    volumes:
+    - smoke-data:/run/fixture
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -m
+      - integration.containers.health
+      - backend
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+  budget-fixture:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: budget-smoke
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '18942'
+      STORE_TOKEN_FILE: /run/fixture/store_token
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+    volumes:
+    - smoke-data:/run/fixture:ro
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:18942/fixture/count',timeout=2)
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  profiler:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: profiler-smoke
+    command:
+    - profiler-smoke
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+      budget-fixture:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '8001'
+      PROFILING_DATABASE_URL_FILE: /run/fixture/profiler_db
+      AI_BUDGET_MODE: guarded
+      STORE_TOKEN_FILE: /run/fixture/store_token
+      OPENROUTER_API_KEY_FILE: /run/fixture/openrouter_key
+      EMMET_FIXTURE_MODE: /run/fixture/provider-mode.json
+      PROFILING_BACKEND_BASE_URL: http://127.0.0.1:8002
+      BUDGET_GUARDED_ORIGIN: http://127.0.0.1:18942
+      BUDGET_EXPECTED_MAX_ATTEMPTS: '6'
+      BUDGET_EXPECTED_MAX_RESERVED_USD: '0.2'
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+      PROFILING_APP_DB_ROLE: ai_profiler_service
+    volumes:
+    - smoke-data:/run/fixture:ro
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -m
+      - integration.containers.health
+      - profiler
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+  chat:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: chat-smoke
+    command:
+    - chat-smoke
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+      search:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '7860'
+      DATABASE_URL_FILE: /run/fixture/chat_db
+      AI_BUDGET_MODE: guarded
+      SEARCH_URL: http://127.0.0.1:8000
+      INTERNAL_URL: http://127.0.0.1:7860
+      COOKIE_SECURE: 'false'
+      SESSION_SECRET_FILE: /run/fixture/session_secret
+      QA_ADMIN_PASSWORD_FILE: /run/fixture/qa_admin_password
+      DEMO_ACCESS_TOKEN_FILE: /run/fixture/demo_access_token
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+    volumes:
+    - smoke-data:/run/fixture:ro
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -m
+      - integration.containers.health
+      - chat
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 20
+  console:
+    # Only the authenticated Console has host ingress. AI/DB stay on the internal network.
+    networks:
+    - backend
+    - console-ingress
+    ports:
+    - 127.0.0.1:18811:18800
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: console-smoke
+    command:
+    - console
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+      chat:
+        condition: service_healthy
+      profiler:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '18800'
+      CONSOLE_SERVICE_HOST: mesh
+      AI_BUDGET_MODE: guarded
+      CONSOLE_ADMIN_ORIGIN: http://127.0.0.1:18811
+      CONSOLE_ADMIN_HASH_FILE: /run/fixture/console_admin.hash
+      CONSOLE_ADMIN_SESSION_FILE: /runtime/admin-session/sessions.sqlite3
+      DATABASE_URL_FILE: /run/fixture/console_db
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+    volumes:
+    - smoke-data:/run/fixture:ro
+    - console-cache:/runtime
+  smoke-check:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: smoke-check
+    depends_on:
+      console:
+        condition: service_started
+    volumes:
+    - smoke-data:/run/fixture:ro
+    profiles:
+    - check
+    environment:
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+  fault-missing-budget:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: profiler-smoke
+    command:
+    - profiler-smoke
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+      budget-fixture:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '8011'
+      PROFILING_DATABASE_URL_FILE: /run/fixture/profiler_db
+      STORE_TOKEN_FILE: /run/fixture/store_token
+      OPENROUTER_API_KEY_FILE: /run/fixture/openrouter_key
+      EMMET_FIXTURE_MODE: /run/fixture/provider-mode.json
+      PROFILING_BACKEND_BASE_URL: http://127.0.0.1:8002
+      BUDGET_EXPECTED_MAX_ATTEMPTS: '6'
+      BUDGET_EXPECTED_MAX_RESERVED_USD: '0.2'
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+      PROFILING_APP_DB_ROLE: ai_profiler_service
+    volumes:
+    - smoke-data:/run/fixture:ro
+    profiles:
+    - faults
+  fault-missing-assets:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    - /runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: search
+    command:
+    - search
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '8011'
+      SEARCH_CATALOG_DATABASE_URL_FILE: /run/fixture/search_db
+      SEARCH_MEDIA_ROOT: /run/fixture/media
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+    volumes:
+    - smoke-data:/run/fixture:ro
+    profiles:
+    - faults
+  fault-unready-db:
+    network_mode: service:mesh
+    read_only: true
+    init: true
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    tmpfs:
+    - /tmp:uid=10001,gid=10001,mode=0700
+    - /run/runtime:uid=10001,gid=10001,mode=0700
+    restart: 'no'
+    build:
+      context: ../..
+      dockerfile: integration/containers/Dockerfile
+      target: profiler-smoke
+    command:
+    - profiler-smoke
+    depends_on:
+      mesh:
+        condition: service_started
+      qa-init:
+        condition: service_completed_successfully
+      budget-fixture:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+    environment:
+      AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
+      PORT: '8011'
+      PROFILING_DATABASE_URL_FILE: /run/fixture/unready_db
+      STORE_TOKEN_FILE: /run/fixture/store_token
+      OPENROUTER_API_KEY_FILE: /run/fixture/openrouter_key
+      EMMET_FIXTURE_MODE: /run/fixture/provider-mode.json
+      PROFILING_BACKEND_BASE_URL: http://127.0.0.1:8002
+      BUDGET_GUARDED_ORIGIN: http://127.0.0.1:18942
+      BUDGET_EXPECTED_MAX_ATTEMPTS: '6'
+      BUDGET_EXPECTED_MAX_RESERVED_USD: '0.2'
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      AI_DATABASE_NAME: emmet4930_smoke
+      PROFILING_APP_DB_ROLE: ai_profiler_service
+    volumes:
+    - smoke-data:/run/fixture:ro
+    profiles:
+    - faults
+volumes:
+  smoke-data: {}
+  smoke-postgres: {}
+  search-cache: {}
+  console-cache: {}
+networks:
+  backend:
+    internal: true
+  console-ingress: {}

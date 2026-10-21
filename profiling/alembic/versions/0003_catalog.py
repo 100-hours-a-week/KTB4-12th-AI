@@ -4,7 +4,7 @@ Revision ID: 0003
 Revises: 0002
 Create Date: 2026-09-23
 
-입력은 Backend 전달 패키지 `product-catalog-20260922-v1` (상품 4,231 · 대분류 10 + 소분류 57, 분류 버전 2026-09-15.final57).
+입력은 Backend 가 전달한 카탈로그 패키지(상품 · 대분류 · 소분류).
 그 패키지의 `schemas/product.schema.json`·`category.schema.json`을 그대로 옮긴 표다 — 필드를 만들거나 합치지 않는다.
 
 **ID 규칙이 이 표의 핵심이다.**

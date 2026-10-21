@@ -8,7 +8,10 @@ __pycache__/
 .env
 tests/
 docs/
-tools/fake_backend/
+# tools/ 는 운영 CLI(tools/catalog — 카탈로그 적재)만 이미지에 넣는다(10-13). 시험 도구 · 시험 결과물(out · results ·
+# 가짜 개인정보가 든 시나리오 엑셀)은 운영 서버에 둘 이유가 없다. git 이 무시하는 결과물도 빌드 컨텍스트로는 들어오므로 막는다
+tools/*
+!tools/catalog/
 tools/catalog/returned/
 이름_대조표.md
 docker-compose.yml

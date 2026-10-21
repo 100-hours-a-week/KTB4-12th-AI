@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # 1) 상수 · 타입 별칭 — 클래스 필드가 아님. 응답 본문에 들어가는 값의 "허용 범위"를 정의한다.
@@ -29,8 +29,9 @@ ProfileExtractErrorCode = Literal[
     "INVALID_REQUEST",  # 400 — 필수 필드 누락·타입 오류·reviews 10개 초과·rating 범위 밖. Backend 재시도 안 함
     "UNAUTHORIZED",  # 401 — 서비스 토큰 오류
     "FORBIDDEN",  # 403 — 접근 권한 없음
-    "INTERNAL_SERVER_ERROR",  # 500 — Backend가 다음 디바운스 주기에 재시도
-    "SERVICE_UNAVAILABLE",  # 503 — 활성 카탈로그 없음·모델 서버 다운. Backend가 다음 주기에 재시도
+    "INTERNAL_SERVER_ERROR",  # 500 — Backend: 재시도 가능 실패 → 틱 중단 + 디바운스 재시작 1회, 두 번째 실패면 접음(통합 수정점 v0.7 ②③, 10-08 실측)
+    "SERVICE_UNAVAILABLE",  # 503 — 활성 카탈로그 없음·대기열 가득. Backend 처리는 500과 같다(Retry-After 는 읽지 않음).
+                             #       카탈로그 없음은 보통 /health 핑(catalog.active=false)에서 먼저 걸러져 7.6 자체가 오지 않는다
 ]
 
 ## 7.7 오류 코드 — AI가 콜백을 보낸 뒤 Backend에게 받는 것
@@ -84,7 +85,8 @@ _ALLOW = ConfigDict(extra="allow")
 class DislikedCategoryDto(BaseModel):
     model_config = _ALLOW
 
-    categoryId: int = Field(gt=0, description="안전한 양의 정수; 제외 판정 키. BE는 대분류(root) id 1~10만 보낸다(09-27) — AI는 그 하위 소분류 전체를 제외")
+    categoryId: int = Field(gt=0, description="안전한 양의 정수; 비선호 판정 키(위키 7.6: 감점 대상 판정 키). BE는 대분류(root) id 1~10만 보낸다(09-27) — "
+                                         "AI는 그 하위 소분류 전체를 비선호로 본다. v1은 제외, v2는 감점(settings.DISLIKE_MODE)")
     categoryName: str = Field(description="LLM이 의미를 이해하는 용도")
 
 
@@ -97,17 +99,20 @@ class ReviewDto(BaseModel):
     reviewText: str | None = Field(default=None, description="리뷰 본문. 글이 없으면 null (별점 필수·글 선택)")
 
 
-## 프로파일 추출 요청 — v1은 recipientUserId·sourceVersion·dislikedCategories 세 필드.
-## giftPreference·reviews는 v3 입력이라 선택(없으면 null·[])으로 둔다 — 계약 원문은 "키 생략 불가"지만 v1 BE가 안 쓰는 키를 요구하지 않기 위한 결정(09-22).
-## 보내면 그대로 받는다(v3 대비).
+## 프로파일 추출 요청 — 값이 꼭 있어야 하는 건 recipientUserId·sourceVersion 둘뿐이지만, 입력 세 칸은 **키를 반드시 보내고 값은 비어도 된다**([]·null·[]).
+## 키가 빠지면 Backend 쪽 결함으로 보고 400 — 분석하지 않는다(10-09 결정: 빈 값을 "일부러" 보냈다는 것이 드러나게). 세 칸이 전부 비어도 접수한다(인기순 30개).
+## **전환 2단계(10-09):** 1단계(지금) dislikedCategories 키 필수. giftPreference·reviews 는 지금 Backend 가 세 필드만 보내므로 생략을 허용한다.
+##   2단계(Backend V2 배포와 같은 시점) 두 칸도 키 필수로 올린다 — 아래 두 줄의 default 를 지우고 test_schemas 의 콜드 스타트 시험을 뒤집는다.
 class ProfileExtractRequest(BaseModel):
     model_config = _ALLOW
 
     recipientUserId: int = Field(gt=0)
     sourceVersion: int = Field(ge=0, description="호출 시점의 최신 값. 등록 데이터가 없으면 0")
-    dislikedCategories: list[DislikedCategoryDto] = Field(description="없으면 []; 필드 생략 불가")
-    giftPreference: str | None = Field(default=None, description="취향 자유 텍스트(v3). v1은 보내지 않음 → null")
-    reviews: list[ReviewDto] = Field(default_factory=list, max_length=10, description="작성일 최신순 최대 10개(v3). v1은 보내지 않음 → []")
+    dislikedCategories: list[DislikedCategoryDto] = Field(
+        max_length=5,
+        description="비선호 대분류. 키 필수, 값은 [] 가능 — 키가 빠지면 400(10-09). 최대 5 — BE PreferencePolicy.MAX_SELECTABLE_COUNT 와 같은 값(09-27 결정), 6개 이상은 400")
+    giftPreference: str | None = Field(default=None, description="취향 자유 텍스트. 없으면 null. 키 생략은 Backend V2 배포 전까지만 허용(전환 2단계에서 필수로)")
+    reviews: list[ReviewDto] = Field(default_factory=list, max_length=10, description="작성일 최신순 최대 10개(상품당 최신 1건). 없으면 []. 키 생략은 Backend V2 배포 전까지만 허용(전환 2단계에서 필수로). 11개 이상은 400(자르지 않음, 10-09 D5)")
 
 
 def unknown_fields(body: ProfileExtractRequest) -> dict[str, list[str]]:
@@ -161,8 +166,8 @@ class ProfileCallbackAccepted(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-## 상품 레코드 — data.products[] 한 건. description만 null 허용.
-## 모르는 필드는 무시(extra="ignore") — Backend가 필드를 더 보내도 상품이 버려지지 않게. 무엇이 왔는지는 가져오기 CLI(tools/catalog/fetch_export.py)가 보고한다.
+## 상품 레코드 — BE 관측 필드 검증을 유지하며, Search snapshot context에서만 미확인 관측값을 받는다.
+## 모르는 필드는 무시(extra="ignore") — Backend가 필드를 더 보내도 상품이 버려지지 않게.
 class ProductRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -174,19 +179,27 @@ class ProductRecord(BaseModel):
     categoryName: str
     parentCategoryId: int | None = Field(
         default=None, gt=0,
-        description="대분류 Backend id(categories.id, 1~10). 7.9 export에는 없고 DB 카탈로그가 categories 부모 조인으로 채운다. "
-                    "비선호는 대분류로 오므로(09-27 BE 결정: PreferenceSaveService 가 root만 허용) 제외 판정에 쓴다. 파일 카탈로그는 없으면 None")
+        description="대분류 Backend id(categories.id). 7.9 export에는 없고 DB 카탈로그가 categories 부모 조인으로 채운다. "
+                    "비선호는 대분류로 오므로(09-27 BE 결정: PreferenceSaveService 가 root만 허용) 비선호 판정(v1 제외 · v2 감점)에 쓴다. "
+                    "파일 카탈로그는 없으면 None")
     parentCategoryName: str | None = Field(default=None, description="대분류 이름 — 이름 보조 판정용")
+    productKind: str | None = Field(default=None, description="상품 종류(product_kind, 727종 — 예: 공용향수 · 헤드폰). 태그 추출 프롬프트가 쓴다. "
+                                                          "DB 카탈로그가 채우고 7.9 export · 파일 카탈로그엔 없으면 None")
     price: int = Field(ge=0, description="현재 가격. export 시점의 값이며 결제 근거가 아님")
     availability: Availability = Field(
         default="unknown", validation_alias=AliasChoices("availability", "available"),
         description="재고 상태 3값(검색기와 같은 형). 7.9는 boolean available로 보내므로 true→available · false→unavailable로 받고, "
                     "필드가 없거나 null이면 unknown(=재고 정보가 없는 상품). unknown을 available/unavailable로 추정하지 않는다")
-    updatedAt: datetime = Field(description="상품·카테고리 updated_at 중 늦은 값 (UTC ISO 8601)")
+    updatedAt: datetime | None = Field(description="상품·카테고리 updated_at 중 늦은 값 (UTC ISO 8601). 검증된 Search 계약의 명시적 null은 미관측")
     ## v1이후 삭제 예정
-    viewCount: int = Field(default=0, ge=0, validation_alias=AliasChoices("viewCount", "views", "view_count"),
+    viewCount: int | None = Field(default=0, ge=0, validation_alias=AliasChoices("viewCount", "views", "view_count"),
                            description="조회수 — v1 추천 풀 정렬 기준(내림차순). Backend가 초기에는 임의 값을 넣어 보냄(09-22 합의). "
-                                       "Backend 열 이름이 views라 viewCount·views·view_count 어느 이름으로 와도 받는다. 없으면 0")
+                                       "Backend 열 이름이 views라 viewCount·views·view_count 어느 이름으로 와도 받는다. 없으면 0. "
+                                       "검증된 Search snapshot/export의 명시적 null은 관측값 없음이며 인기 점수에 쓰지 않는다")
+    tags: frozenset[tuple[str, str]] | None = Field(
+        default=None, exclude=True,
+        description="상품 축 태그 (축, 대표 이름) 집합 — DB 카탈로그가 판(tags_rule · tags_sha256)이 코드와 같을 때만 채운다(0011). "
+                    "None 이면 vocab 이 같은 함수로 그 자리에서 계산한다. 계약 필드가 아니라 응답 · export 에는 나가지 않는다")
 
     @field_validator("availability", mode="before")
     @classmethod
@@ -196,8 +209,22 @@ class ProductRecord(BaseModel):
             return "available" if v else "unavailable"
         return "unknown" if v is None else v
 
+    @model_validator(mode="after")
+    def _source_signals(self, info: ValidationInfo):
+        # Only the bound Search contract can allow unknown ranking metadata.
+        # Direct Backend/file validation retains its existing required fields.
+        source = info.context.get("catalog_source") if isinstance(info.context, dict) else None
+        if source in {"catalog-snapshot", "backend-export"} and not {"updatedAt", "viewCount"} <= self.model_fields_set:
+            raise ValueError("Search observation fields must be explicit")
+        if source == "catalog-snapshot":
+            if self.updatedAt is not None or self.viewCount is not None or self.availability != "unknown":
+                raise ValueError("Snapshot observation metadata must remain unknown")
+        elif source != "backend-export" and (self.updatedAt is None or self.viewCount is None):
+            raise ValueError("Observed catalog metadata required")
+        return self
 
-PRODUCT_FIELDS = frozenset(ProductRecord.model_fields)                                   # 계약 필드 이름 (CLI 보고용)
+
+PRODUCT_FIELDS = frozenset(ProductRecord.model_fields) - {"tags"}                        # 계약 필드 이름 (CLI 보고용) — tags 는 DB 전용
 PRODUCT_FIELD_ALIASES = frozenset({"views", "view_count", "available"})                   # 같은 뜻의 다른 이름 — 모르는 필드로 세지 않음
 
 
