@@ -57,8 +57,15 @@ jobs:
       REGISTRY: 721744297924.dkr.ecr.ap-northeast-2.amazonaws.com
       SOURCE_SHA: ${{ github.sha }}
       TARGET: ${{ matrix.target }}
-      DOCKER_CONFIG: ${{ runner.temp }}/ai-ecr-docker
     steps:
+      - name: Prepare temporary Docker configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker_config="$RUNNER_TEMP/ai-ecr-docker"
+          mkdir -p "$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
