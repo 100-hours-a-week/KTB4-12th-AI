@@ -5,13 +5,14 @@ on:
   push:
     branches: [main, develop]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ai-contracts-${{ github.ref }}
-  cancel-in-progress: true
+  group: ai-contracts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   free-contracts:
