@@ -30,7 +30,7 @@ Console은 `http://127.0.0.1:18811`이며 로그인이 필요합니다. 호스�
 
 | 설정 | 준비할 값 |
 |---|---|
-| `AI_DATABASE_NAME`, `EMMET_POSTGRES_VOLUME` | 전용 `emmet4930_...` DB 이름과 준비된 PG18 external volume |
+| `AI_DATABASE_NAME`, `EMMET_POSTGRES_VOLUME` | 환경별 전용 DB 이름(`ai_db_develop`, `ai_db_staging`, `ai_db_production`)과 준비된 PG18 external volume |
 | `CHAT_DATABASE_URL_FILE`, `PROFILER_DATABASE_URL_FILE`, `SEARCH_DATABASE_URL_FILE` | 같은 `postgres:5432` DB의 서비스별 DSN 파일 |
 | `MIGRATION_DATABASE_URL_FILE`, `CATALOG_SYNC_DATABASE_URL_FILE` | `ai_migrator`, `ai_catalog_sync`의 DSN 파일 |
 | `AI_SERVICE_TOKEN_FILE`, `SESSION_SECRET_FILE`, `QA_ADMIN_PASSWORD_FILE`, `DEMO_ACCESS_TOKEN_FILE` | 서비스·세션·관리자·체험 인증 파일 |

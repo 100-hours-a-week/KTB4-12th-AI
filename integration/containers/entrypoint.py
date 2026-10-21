@@ -63,9 +63,8 @@ def secret(name, *, required=True):
 def database(value, role):
     parsed = urlsplit(value.replace("postgresql+psycopg://", "postgresql://"))
     expected_database = os.environ.get("AI_DATABASE_NAME", "")
-    if not expected_database.startswith("emmet4930_"):
-        raise ValueError("AI_DATABASE_NAME must identify the one prepared application database")
-    from integration.database_identity import configured_host
+    from integration.database_identity import configured_host, validate_database_name
+    validate_database_name(expected_database)
     if parsed.hostname != configured_host() or parsed.path != "/" + expected_database:
         raise ValueError("Dedicated separate PostgreSQL service/database required")
     expected = {
