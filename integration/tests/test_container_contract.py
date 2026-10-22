@@ -11,7 +11,6 @@ import pytest
 import yaml
 
 from integration.containers import entrypoint
-from integration.containers.relay import ACCOUNT, BudgetRelay, validate_summary
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTAINERS = ROOT / "integration/containers"
@@ -19,55 +18,18 @@ CONTAINERS = ROOT / "integration/containers"
 
 @pytest.fixture(autouse=True)
 def synthetic_database_names(monkeypatch):
-    """These contract tests use legacy emmet4930_* DB names, allowed only for synthetic runs."""
+    """Legacy names are permitted only in these synthetic tests (PR28)."""
     monkeypatch.setenv("INTEGRATION_SYNTHETIC_ONLY", "1")
 
 
-def summary():
-    return {
-        "limitUsd": 5,
-        "halted": None,
-        "remainingUsd": 4,
-        "validationMaxAttempts": 6,
-        "validationMaxReservedUsd": 0.2,
-        "validationAttempts": 0,
-        "validationReservedUsd": 0,
-    }
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("halted", "halt"),
-        ("limitUsd", 10),
-        ("remainingUsd", 0),
-        ("remainingUsd", float("nan")),
-        ("validationMaxAttempts", 5),
-        ("validationMaxAttempts", True),
-        ("validationMaxReservedUsd", 1),
-        ("validationAttempts", 6),
-        ("validationAttempts", -1),
-        ("validationReservedUsd", 0.2),
-        ("validationReservedUsd", float("inf")),
-    ],
-)
-def test_bad_fence_fails_closed(field, value):
-    data = summary()
-    data[field] = value
-    with pytest.raises(ValueError):
-        validate_summary(data, 6, 0.2)
 
 
-@pytest.mark.parametrize("field", list(summary()))
-def test_missing_fence_fields_fail_closed(field):
-    data = summary()
-    del data[field]
-    with pytest.raises(ValueError):
-        validate_summary(data, 6, 0.2)
 
 
 def test_guarded_compose_separate_processes_and_one_external_database():
-    cfg = yaml.safe_load((CONTAINERS / "compose.guarded.yaml").read_text())
+    cfg = yaml.safe_load((CONTAINERS / "compose.yaml").read_text())
     services = cfg["services"]
     assert [
         s for s, v in services.items() if v.get("image", "").startswith("pgvector/pgvector:")
@@ -92,10 +54,9 @@ def test_guarded_compose_separate_processes_and_one_external_database():
         assert "extra_hosts" not in service
     for role in ["chat", "profiler"]:
         env = services[role]["environment"]
-        assert env["BUDGET_GUARDED_ORIGIN"] == "${BUDGET_GUARDED_ORIGIN:-}"
-        name = "OPENROUTER_API_KEY_FILE" if role == "chat" else "PROFILING_OPENROUTER_API_KEY_FILE"
-        assert env[name] == f"/run/secrets/{role}_openrouter_key"
-        assert "OPENROUTER_API_KEY" not in env
+        assert not any(k.startswith('BUDGET_') or k == 'STORE_TOKEN_FILE' for k in env)
+        name = "OPENROUTER_API_KEY_CHAT" if role == "chat" else "OPENROUTER_API_KEY_PROFILER"
+        assert name in env and 'BE_SERVICE_TOKEN' in env
     for role in ["search"]:
         mount = next(
             m
@@ -125,7 +86,7 @@ def test_smoke_only_console_has_ingress_and_ai_database_have_no_egress():
     assert (
         cfg["services"]["qa-init"]["environment"]["INTEGRATION_SYNTHETIC_ONLY"] == "1"
     )
-    for fault in ["missing-budget", "unready-db"]:
+    for fault in ["unready-db"]:
         service = cfg["services"]["fault-" + fault]
         assert service["profiles"] == ["faults"] and service["command"] == [
             "profiler-smoke"
@@ -175,29 +136,6 @@ def test_database_cannot_point_to_original_host_or_database(role):
         entrypoint.database("postgresql://fixture_owner@127.0.0.1/run2", role)
 
 
-def test_missing_budget_prevents_assets_or_database_and_provider(monkeypatch):
-    for name in [
-        "BUDGET_GUARDED_ORIGIN",
-        "BUDGET_EXPECTED_MAX_ATTEMPTS",
-        "BUDGET_EXPECTED_MAX_RESERVED_USD",
-    ]:
-        monkeypatch.delenv(name, raising=False)
-
-    def fake_secret(name, **kwargs):
-        return (
-            "postgresql+psycopg://ai_app@postgres/emmet4930_test"
-            if name == "PROFILING_DATABASE_URL"
-            else "synthetic-unit-only"
-        )
-
-    monkeypatch.setattr(entrypoint, "secret", fake_secret)
-
-    def forbidden(*args):
-        pytest.fail("Missing budget must block before assets/DB/provider")
-
-    monkeypatch.setattr(entrypoint, "prepare_encoder", forbidden)
-    with pytest.raises((KeyError, ValueError)):
-        entrypoint.configure("profiler")
 
 
 def test_missing_and_mismatching_assets_fail_before_database(tmp_path, monkeypatch):
@@ -249,45 +187,6 @@ def test_sync_preparation_never_rewrites_shared_encoder_code(tmp_path, monkeypat
     assert prepared.read_text()=='// synthetic version 1'
 
 
-def test_unready_database_propagates_without_starting_relay(monkeypatch):
-    monkeypatch.setenv("PROFILING_OPENROUTER_API_KEY", "synthetic-unit-only")
-    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
-    monkeypatch.setenv("AI_DATABASE_NAME", "emmet4930_test")
-    from integration import database_identity
-    monkeypatch.setattr(database_identity, "audit", lambda *a: None)
-    monkeypatch.setenv("PROFILING_APP_DB_ROLE", "ai_profiler_service")
-    monkeypatch.setattr(
-        entrypoint,
-        "secret",
-        lambda name, **kw: (
-            "postgresql+psycopg://ai_profiler_service@postgres/emmet4930_test"
-            if name == "PROFILING_DATABASE_URL"
-            else "synthetic-unit-only"
-        ),
-    )
-    monkeypatch.setattr(entrypoint, "prepare_encoder", lambda *args: None)
-    monkeypatch.syspath_prepend(str(ROOT / "product-search"))
-    import catalog_db
-
-    def unavailable(*args):
-        raise RuntimeError("SYNTHETIC database unavailable")
-
-    monkeypatch.setattr(entrypoint, "profile_database", unavailable)
-    relay = BudgetRelay(
-        "http://host.docker.internal:19999",
-        "synthetic",
-        6,
-        0.2,
-        transport=httpx.MockTransport(
-            lambda r: pytest.fail("DB failure must precede relay/provider calls")
-        ),
-    )
-    monkeypatch.setattr(
-        BudgetRelay, "from_environment", classmethod(lambda cls, *args, **kwargs: relay)
-    )
-    with pytest.raises(RuntimeError, match="database unavailable"):
-        entrypoint.configure("profiler")
-    assert relay.http.is_closed and relay.server is None
 
 
 @pytest.mark.parametrize('ready', [False, True])
@@ -313,97 +212,15 @@ def test_only_fixed_roles_allowed():
         entrypoint.configure("profiler-smoke")
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://127.0.0.1:19999",
-        "http://example.invalid:19999",
-        "http://host.docker.internal",
-        "http://host.docker.internal:19999/rpc",
-        "http://user@host.docker.internal:19999",
-    ],
-)
-def test_normal_relay_rejects_unapproved_origin(url):
-    with pytest.raises(ValueError):
-        BudgetRelay(url, "synthetic", 6, 0.2)
 
 
-def test_relay_only_cost_methods_and_finite_settlement():
-    requests = []
-
-    def fake(request):
-        data = json.loads(request.content)
-        requests.append(data)
-        return httpx.Response(
-            200,
-            json={"result": summary() if data["method"] == "budget_summary" else True},
-        )
-
-    relay = BudgetRelay(
-        "http://host.docker.internal:19999",
-        "synthetic",
-        6,
-        0.2,
-        transport=httpx.MockTransport(fake),
-    )
-    try:
-        relay.summary()
-        with pytest.raises(ValueError):
-            relay.forward({"method": "start", "args": {"account": ACCOUNT}})
-        with pytest.raises(ValueError):
-            relay.forward(
-                {
-                    "method": "budget_finish",
-                    "args": {
-                        "account": ACCOUNT,
-                        "ident": "test",
-                        "cost": float("nan"),
-                        "status": "received",
-                    },
-                }
-            )
-        assert len(requests) == 1
-        assert relay.forward(
-            {
-                "method": "budget_finish",
-                "args": {
-                    "account": ACCOUNT,
-                    "ident": "test",
-                    "cost": None,
-                    "status": "unknown",
-                },
-            }
-        ) == {"result": True}
-    finally:
-        relay.close()
 
 
-def test_redirect_never_followed():
-    calls = []
-
-    def redirect(request):
-        calls.append(request)
-        return httpx.Response(
-            307, headers={"Location": "https://example.invalid/never"}
-        )
-
-    relay = BudgetRelay(
-        "http://host.docker.internal:19999",
-        "synthetic",
-        6,
-        0.2,
-        transport=httpx.MockTransport(redirect),
-    )
-    try:
-        with pytest.raises(httpx.HTTPStatusError):
-            relay.summary()
-        assert len(calls) == 1
-    finally:
-        relay.close()
 
 
 @pytest.mark.parametrize("service_host", ["127.0.0.1", "mesh"])
 def test_console_config_written_before_app_module_import(tmp_path, monkeypatch, service_host):
+    monkeypatch.setenv("INTEGRATION_SYNTHETIC_ONLY", "1")
     monkeypatch.setenv("AI_DATABASE_NAME", "emmet4930_candidate")
     monkeypatch.setenv("CONSOLE_SERVICE_HOST", service_host)
     monkeypatch.setenv("CONSOLE_TARGET_FILE", "")
@@ -482,6 +299,7 @@ def test_console_config_written_before_app_module_import(tmp_path, monkeypatch, 
 
 
 def test_chat_role_uses_migrated_schema_without_public_create(monkeypatch):
+    monkeypatch.setenv("INTEGRATION_SYNTHETIC_ONLY", "1")
     monkeypatch.setenv("AI_DATABASE_NAME", "emmet4930_candidate")
     from integration import database_identity
     monkeypatch.setattr(database_identity, "audit", lambda *a: None)
@@ -500,13 +318,13 @@ def test_chat_role_uses_migrated_schema_without_public_create(monkeypatch):
     assert "target=root/'assets'/version" in dockerfile
 
 
-@pytest.mark.parametrize("name", ["compose.guarded.yaml", "compose.smoke.yaml"])
+@pytest.mark.parametrize("name", ["compose.yaml", "compose.smoke.yaml"])
 def test_shared_network_joiners_do_not_override_donor_hosts_or_dns(name):
     cfg = yaml.safe_load((CONTAINERS / name).read_text())
     mesh = cfg["services"]["mesh"]
     assert "backend" in mesh["networks"] and cfg["networks"]["backend"]["internal"]
-    if name == "compose.guarded.yaml":
-        assert mesh["extra_hosts"] == ["host.docker.internal:host-gateway"]
+    if name == "compose.yaml":
+        assert "extra_hosts" not in mesh
     forbidden = {
         "extra_hosts",
         "dns",
@@ -531,7 +349,8 @@ def test_shared_network_joiners_do_not_override_donor_hosts_or_dns(name):
                     service | {"extra_hosts": ["host.docker.internal:host-gateway"]}
                 )
     assert cfg["services"]["search"]["build"]["target"] == "search"
-    assert cfg["services"]["search"]["environment"]["SEARCH_CATALOG_DATABASE_URL_FILE"]
+    assert ("SEARCH_CATALOG_DATABASE_URL" in cfg["services"]["search"]["environment"]
+            or "SEARCH_CATALOG_DATABASE_URL_FILE" in cfg["services"]["search"]["environment"])
 
 
 def test_unmodified_search_import_and_static_assets_with_readonly_source():
@@ -563,7 +382,7 @@ def test_catalog_sync_is_an_explicit_separate_search_job():
     assert worker['network_mode'] == 'service:mesh' and 'ports' not in worker
     assert 'sync-cache:/runtime' in worker['volumes']
     assert worker['environment']['CATALOG_SYNC_DATABASE_URL_FILE']=='/run/secrets/catalog_sync_database_url'
-    normal = yaml.safe_load((CONTAINERS / 'compose.guarded.yaml').read_text())
+    normal = yaml.safe_load((CONTAINERS / 'compose.yaml').read_text())
     assert 'SEARCH_CATALOG_MODE' not in normal['services']['search']['environment']
     assert normal['services']['search']['environment']['AI_DATABASE_NAME'].startswith('${AI_DATABASE_NAME:?')
     assert 'fixture_owner' not in str(normal) and 'console' not in normal['services'] and 'backend' not in normal['services']
@@ -571,7 +390,7 @@ def test_catalog_sync_is_an_explicit_separate_search_job():
     assert 'rabbit' not in str(normal).lower()
 
 
-@pytest.mark.parametrize("name", ["compose.guarded.yaml", "compose.smoke.yaml"])
+@pytest.mark.parametrize("name", ["compose.yaml", "compose.smoke.yaml"])
 def test_postgres_image_has_verified_vector_extension_and_existing_volume_contract(name):
     cfg = yaml.safe_load((CONTAINERS / name).read_text())
     postgres = cfg["services"]["postgres"]
@@ -581,7 +400,7 @@ def test_postgres_image_has_verified_vector_extension_and_existing_volume_contra
     )
     assert postgres["environment"]["PGDATA"] == "/var/lib/postgresql/data/pgdata"
     assert not postgres.get("ports")
-    if name == "compose.guarded.yaml":
+    if name == "compose.yaml":
         assert cfg["volumes"]["postgres-data"]["external"] is True
         assert postgres["volumes"] == ["postgres-data:/var/lib/postgresql/data"]
         assert "POSTGRES_HOST_AUTH_METHOD" not in postgres["environment"]
@@ -593,50 +412,3 @@ def test_smoke_profiler_depends_on_search_and_does_not_own_encoder_assets():
     assert service["depends_on"]["search"] == {"condition": "service_healthy"}
     assert service["volumes"] == ["smoke-data:/run/fixture:ro"]
     assert "profiler-cache" not in cfg["volumes"]
-
-
-@pytest.mark.parametrize("role", ["profiler", "profiler-smoke"])
-def test_both_profiler_launchers_use_shared_search_without_local_vectors(role, tmp_path, monkeypatch):
-    monkeypatch.setenv("AI_BUDGET_MODE", "guarded")
-    monkeypatch.setenv("AI_DATABASE_NAME", "emmet4930_test")
-    from integration import database_identity
-    monkeypatch.setattr(database_identity, "audit", lambda *a: None)
-    marker = tmp_path / "synthetic-marker"
-    marker.touch()
-    real_path = Path
-    monkeypatch.setattr(entrypoint, "Path", lambda value: marker if value in {
-        "/workspace/integration/containers/smoke_only",
-        "/workspace/integration/tests/emmet_fixture_profiler.py",
-    } else real_path(value))
-    monkeypatch.setenv("PROFILING_APP_DB_ROLE", "ai_profiler_service")
-    # Ensure all launcher environment changes are restored even after a failure.
-    monkeypatch.setattr(entrypoint.os, "environ", os.environ.copy())
-    monkeypatch.setattr(entrypoint, "secret", lambda name, **kw:
-        "postgresql+psycopg://ai_profiler_service@postgres/emmet4930_test"
-        if name == "PROFILING_DATABASE_URL" else "synthetic-launch-test")
-    monkeypatch.setenv("PROFILING_OPENROUTER_API_KEY", "synthetic-launch-test")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-launch-test")
-    audits = []
-    monkeypatch.setattr(entrypoint, "profile_database", lambda value: audits.append(value))
-    monkeypatch.setattr(entrypoint, "prepare_encoder", lambda *args:
-        pytest.fail("Profiler must use Search, not load or materialize local vectors"))
-
-    class Relay:
-        url = "http://127.0.0.1:19000"
-        started = False
-        def start(self): self.started = True
-        def close(self): pass
-
-    relay = Relay()
-    modes = []
-    def factory(cls, token, *, synthetic):
-        modes.append(synthetic)
-        return relay
-    monkeypatch.setattr(BudgetRelay, "from_environment", classmethod(factory))
-    assert entrypoint.configure(role) is relay
-    assert relay.started and len(audits) == 1
-    assert modes == [role.endswith("-smoke")]
-    assert os.environ["PROFILING_CATALOG_SOURCE"] == "search_http"
-    assert os.environ["PROFILING_SEARCH_BASE_URL"] == "http://127.0.0.1:8000"
-    assert os.environ["PROFILING_SEARCH_TOKEN"] == os.environ["AI_SERVICE_TOKEN"]
-    assert os.environ["PROFILING_TAG_SPEC"] == "tag3disliked"

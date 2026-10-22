@@ -33,15 +33,6 @@ CREATE TABLE IF NOT EXISTS runtime_lease (
 CREATE TABLE IF NOT EXISTS feedback (
  id uuid PRIMARY KEY, turn uuid REFERENCES turns(id) NOT NULL, payload jsonb NOT NULL,
  reviewed boolean NOT NULL DEFAULT false, created timestamptz NOT NULL DEFAULT now());
-CREATE TABLE IF NOT EXISTS task_budget_accounts (
- id text PRIMARY KEY, limit_usd numeric NOT NULL CHECK(limit_usd>0 AND limit_usd<=5),
- imported_usd numeric NOT NULL CHECK(imported_usd>=0), import_hash text NOT NULL,
- halted text, created timestamptz NOT NULL DEFAULT now());
-CREATE TABLE IF NOT EXISTS task_budget_attempts (
- id uuid PRIMARY KEY, account text REFERENCES task_budget_accounts(id) NOT NULL,
- reserved_usd numeric NOT NULL CHECK(reserved_usd>0), actual_usd numeric CHECK(actual_usd>=0),
- model text NOT NULL, status text NOT NULL DEFAULT 'reserved',
- created timestamptz NOT NULL DEFAULT now(), finished timestamptz);
 ALTER TABLE feedback ADD COLUMN IF NOT EXISTS context jsonb NOT NULL DEFAULT '{}';
 CREATE TABLE IF NOT EXISTS conversation_reports (
  id uuid PRIMARY KEY, conversation uuid REFERENCES conversations(id) NOT NULL,

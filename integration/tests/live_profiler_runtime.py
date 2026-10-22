@@ -1,4 +1,4 @@
-"""Synthetic-only response evidence around the real guarded Profiler transport."""
+"""Synthetic-only response evidence around the real Profiler transport."""
 import json
 import os
 from pathlib import Path
@@ -6,10 +6,10 @@ from pathlib import Path
 if os.getenv('INTEGRATION_SYNTHETIC_ONLY') != '1':
     raise RuntimeError('Synthetic validation module only')
 
-from integration.profiler_boundary import BudgetTransport
+from integration.profiler_boundary import PreflightTransport
 from integration.profiler_runtime import app
 
-original = BudgetTransport.handle_request
+original = PreflightTransport.handle_request
 
 
 def record(self, request):
@@ -24,4 +24,4 @@ def record(self, request):
     return response
 
 
-BudgetTransport.handle_request = record
+PreflightTransport.handle_request = record

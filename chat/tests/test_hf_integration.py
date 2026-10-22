@@ -1,7 +1,6 @@
 import asyncio,copy,json,uuid
 from contextlib import asynccontextmanager
 import httpx,pytest
-from app.task_budget import BudgetHTTP,bounded_request
 from app.turn_report import report,text_report
 from app.errors import APIError
 from app.protocol_fixture import ProtocolFixture
@@ -14,42 +13,9 @@ class SyntheticPrices:
   return {'prompt':'0.00000099' if body['model']=='qwen/qwen3.8-27b' else '0.0000006',
           'completion':'0.00000149' if body['model']=='qwen/qwen3.8-27b' else '0.000005','request':'0'}
 
-class BudgetStore:
- def __init__(self,deny=False):self.calls=[];self.deny=deny
- async def call(self,method,**args):
-  self.calls.append((method,args))
-  if method=='budget_reserve' and self.deny:raise APIError(429,'cap')
-  return True
 
-@pytest.mark.parametrize('stream,cost',[(False,.001),(True,.002),(True,None)])
-async def test_paid_calls_reserve_before_send_and_settle_or_keep_unknown(stream,cost):
- store=BudgetStore();calls=[]
- def reply(request):
-  assert store.calls[0][0]=='budget_reserve';calls.append(json.loads(request.content))
-  if stream:return httpx.Response(200,text='data: '+json.dumps({'usage':{'cost':cost}})+'\n\ndata: [DONE]\n\n')
-  return httpx.Response(200,json={'usage':{'cost':cost}})
- async with httpx.AsyncClient(base_url='https://test',transport=httpx.MockTransport(reply)) as http:
-  adapter=BudgetHTTP(http,store);body={'model':'qwen/qwen3.8-27b','messages':[],'max_tokens':600,'provider':{'only':['Cerebras'],'allow_fallbacks':False}}
-  if stream:
-   async with adapter.stream('POST','/chat/completions',json=body) as response:assert [x async for x in response.aiter_lines()]
-  else:await adapter.post('/chat/completions',json=body)
- assert store.calls[-1][0]=='budget_finish' and store.calls[-1][1]['cost']==cost
- assert calls[0]['provider']['only']==['Cerebras'] and calls[0]['provider']['allow_fallbacks'] is False
- assert calls[0]['provider']['max_price']=={'prompt':0.6,'completion':5,'request':0}
- assert 'max_price' not in body['provider']
 
-async def test_budget_rejection_never_transmits_and_cancel_keeps_reservation():
- store=BudgetStore(True);sent=[]
- async with httpx.AsyncClient(base_url='https://test',transport=httpx.MockTransport(lambda r:sent.append(r))) as http:
-  with pytest.raises(APIError):await BudgetHTTP(http,store).post('/chat/completions',json={'model':'openai/gpt-6-luna','messages':[],'max_tokens':600})
- assert not sent and len(store.calls)==1
 
-async def test_unknown_network_attempt_is_not_refunded():
- store=BudgetStore()
- def fail(request):raise httpx.ReadError('uncertain')
- async with httpx.AsyncClient(base_url='https://test',transport=httpx.MockTransport(fail)) as http:
-  with pytest.raises(httpx.ReadError):await BudgetHTTP(http,store).post('/chat/completions',json={'model':'openai/gpt-6-luna','messages':[],'max_tokens':600})
- assert store.calls[-1][1]['cost'] is None and store.calls[-1][1]['status']=='unknown'
 
 @pytest.mark.parametrize('mode',['live','protocol-fixture'])
 def test_public_report_excludes_private_trace_and_handles_unknown_cost(mode):

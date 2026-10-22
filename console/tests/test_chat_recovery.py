@@ -19,7 +19,7 @@ def request_body():
 
 
 def readiness(opened):
-    return {"ready": True, "mode": "live", "database": "postgresql",
+    return {"ready": opened, "mode": "live", "database": "postgresql",
             "model": "synthetic/test", "budgetMode": "guarded",
             "budgetAccount": "gift-chat-harness-2026-10-06",
             "sharedBudget": {"limitUsd": 5, "remainingUsd": 1 if opened else 0, "halted": None}}
@@ -200,7 +200,7 @@ def test_http_restart_retains_owner_without_reopening_generation(tmp_path, lost_
                 assert sum(method == 'PUT' and '/turns/' in path and not path.endswith('/cancellation') for method, path in calls) == 2
 
                 for overrides in ({'targets': {'chat': 'http://127.0.0.1:2'}}, {'liveModel': False},
-                                  {'budgetMode': 'guarded'}, {'database': 'postgresql://synthetic/other'}):
+                                  {'database': 'postgresql://synthetic/other'}):
                     changed = await start(overrides); apps.append(changed)
                     before = len(calls)
                     async with browser(changed, {'console_admin': cookie}, csrf) as moved:

@@ -142,14 +142,12 @@ def test_missing_upstream_turn_retry_keeps_grant_guard_and_reports_prerequisite(
     ('empty-search', 'QUICK_CHECK_SEARCH_NOT_READY'),
     ('offline-search', 'QUICK_CHECK_SEARCH_NOT_READY'),
     ('changed-snapshot', 'QUICK_CHECK_SEARCH_NOT_READY'),
-    ('guarded-budget', 'Actual live runtime not verified'),
 ])
 def test_quick_check_prerequisites_fail_before_any_upstream_write(fault, code):
     async def case():
         settings = config()
         if fault == 'not-live': settings['liveModel'] = False
         if fault == 'no-fixture': settings['targets'].pop('backend')
-        if fault == 'guarded-budget': settings['budgetMode'] = 'guarded'
         calls = []
         def upstream(request):
             calls.append(request.method)
