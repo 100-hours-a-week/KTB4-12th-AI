@@ -80,8 +80,7 @@ async def lifespan(app):
  if not os.getenv('DEMO_ACCESS_TOKEN'):raise ValueError('DEMO_ACCESS_TOKEN is required')
  app.state.runtime_mode=os.getenv('CHAT_RUNTIME_MODE','live')
  if app.state.runtime_mode not in {'live','mock'}:raise ValueError('CHAT_RUNTIME_MODE must be live or mock')
- app.state.budget_mode=os.getenv('AI_BUDGET_MODE','').strip() or 'provider-key-limits'
- if app.state.budget_mode not in {'guarded','provider-key-limits'}:raise ValueError('AI_BUDGET_MODE must be guarded or provider-key-limits')
+ app.state.budget_mode='provider-key-limits'
  mode=os.getenv('STORE_MODE','http');bridge_mode=mode=='bridge'
  if mode=='postgres':
   from app.local_store import LocalStore
@@ -96,24 +95,7 @@ async def lifespan(app):
   app.state.search=SearchClient(os.getenv('SEARCH_URL','https://wjo-ai-search-demo.hf.space'),token=os.environ['SEARCH_TOKEN'],source='chat',timeout=45)
   runtime_type=LowLatencyRuntime
  app.state.runtime=runtime_type(app.state.store,app.state.search,OWNER)
- app.state.budget_store=None
- app.state.budget_account=None
- bridge_budget=False
- if app.state.runtime_mode=='live' and app.state.budget_mode=='guarded':
-  from app.task_budget import BudgetHTTP,budget_settings,validate_limit
-  account,expected_limit=budget_settings()
-  app.state.budget_account=account
-  budget_store=app.state.store
-  if os.getenv('BUDGET_STORE_URL'):
-   from app.budget_ledger import BudgetLedger
-   budget_store=BudgetLedger(os.environ['BUDGET_STORE_URL'],os.environ['STORE_TOKEN'])
-   app.state.budget_store=budget_store
-  # A bridge attaches after lifespan yields; keep it unready until its ledger responds.
-  bridge_budget=bridge_mode and app.state.budget_store is None
-  if not bridge_budget:validate_limit(await budget_store.call('budget_summary',account=account),expected_limit)
-  app.state.runtime.http=BudgetHTTP(app.state.runtime.http,budget_store,account=account,expected_limit=expected_limit,check_summary=bridge_budget)
-  app.state.runtime.catalog.http=app.state.runtime.http
- elif app.state.runtime_mode=='live':
+ if app.state.runtime_mode=='live':
   app.state.runtime.http.follow_redirects=False
   app.state.runtime.http.event_hooks['request'].append(provider_key_request)
  from app.protocol_fixture import ProtocolFixture
@@ -125,7 +107,6 @@ async def lifespan(app):
   while True:
    try:
     runtime=app.state.runtime
-    if bridge_budget:validate_limit(await budget_store.call('budget_summary',account=account),expected_limit)
     current=app.state.store.epoch if bridge_mode else 0
     reconnect=current!=epoch or not runtime.healthy or runtime.recovery_version!=runtime.recovered_version
     if reconnect:
@@ -158,7 +139,6 @@ async def lifespan(app):
  finally:
   heartbeat_task.cancel();await asyncio.gather(heartbeat_task,return_exceptions=True)
   await app.state.runtime.close()
-  if app.state.budget_store is not None:await app.state.budget_store.close()
   await app.state.proxy.aclose();await app.state.search.close()
   try:
    await asyncio.wait_for(app.state.store.call('lease',owner=app.state.runtime.owner,next_owner=app.state.runtime.owner,release=True),LEASE_RELEASE_TIMEOUT_SECONDS)
@@ -236,9 +216,6 @@ async def ready():
   async with asyncio.timeout(5):await app.state.search.ready()
  except (httpx.HTTPError,ValueError,TimeoutError):raise APIError(503,'검색 서버 연결을 복구하고 있습니다.',headers={'Retry-After':'5'}) from None
  result={'ready':True,'database':'postgresql','budgetMode':app.state.budget_mode,**runtime_info()}
- if app.state.budget_store is not None:
-  result['sharedBudget']=await app.state.budget_store.call('budget_summary',account=app.state.budget_account)
-  result['budgetAccount']=app.state.budget_account
  return result
 @app.get('/internal/credentials',dependencies=[Depends(service)])
 async def credential_status():

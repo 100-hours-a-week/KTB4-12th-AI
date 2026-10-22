@@ -13,7 +13,6 @@ import httpx
 import psycopg
 import pytest
 
-from integration.shared_budget import ACCOUNT
 from integration.tests.test_single_server import database, source
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -79,36 +78,14 @@ def test_actual_profiler_and_chat_models(database, source):
 
 def run_models(database, export, contract, search_url, be, callbacks, token, output, start, wait, *, cases=CASES, include_profiler=True):
     # Only previously injected credentials are used. No key ever goes to disk.
-    key, store_token = os.environ['OPENROUTER_API_KEY'], os.environ['STORE_TOKEN']
+    key = os.environ['OPENROUTER_API_KEY']
     evidence = {'synthetic': True, 'mock': False, 'modelFallback': False, 'requestedModel': MODEL,
                 'catalog': export, 'contract': contract, 'cases': cases, 'profilerLiveIncluded': include_profiler, 'conversations': [],
                 'realBEConnected': False, 'linuxImagesVerified': False,
                 'localFence': {'maxAttempts': 16, 'maxReservedUsd': .25},
                 'scope': 'fixed representative smoke; not a holdout or aggregate quality benchmark'}
-    budget_url = None
-    def budget(http):
-        response = http.post(budget_url+'/rpc', headers={'Authorization': 'Bearer '+store_token},
-                             json={'method': 'budget_summary', 'args': {'account': ACCOUNT}})
-        response.raise_for_status()
-        return response.json()['result']
     with httpx.Client(headers={'Authorization': 'Bearer '+token}, timeout=120, trust_env=False) as http:
         try:
-            gateway, budget_url = start('budget', 'chat', 'integration.budget_gateway:app', {
-                'PYTHONPATH': str(ROOT), 'STORE_TOKEN': store_token,
-                'LIVE_VALIDATION_BUDGET_DB': str(output/'cost-fence.sqlite3'),
-                'LIVE_VALIDATION_MAX_ATTEMPTS': '16', 'LIVE_VALIDATION_MAX_RESERVED_USD': '.25'})
-            deadline = time.monotonic()+30
-            while True:
-                assert gateway.poll() is None
-                try:
-                    before = budget(http)
-                    break
-                except httpx.ConnectError:
-                    if time.monotonic() >= deadline:
-                        raise
-                    time.sleep(.1)
-            evidence['budgetBefore'] = before
-            assert before['limitUsd'] == 5 and not before['halted'] and before['remainingUsd'] >= .25
             body = {'recipientUserId': 777, 'sourceVersion': 1, 'giftPreference': PREFERENCE,
                     'dislikedCategories': [{'categoryId': 41, 'categoryName': '향초'}], 'reviews': []}
             if include_profiler:
@@ -119,8 +96,8 @@ def run_models(database, export, contract, search_url, be, callbacks, token, out
                     'PROFILING_BACKEND_BASE_URL': be, 'PROFILING_TAGGER': 'openrouter',
                     'PROFILING_TAG_SPEC': 'tag3disliked', 'PROFILING_TAGGER_MODEL': MODEL,
                     'PROFILING_TAGGER_REQUIRED': 'true', 'PROFILING_EMBEDDING_REQUIRED': 'true',
-                    'PROFILING_OPENROUTER_API_KEY': key, 'PROFILING_BUDGET_URL': budget_url, 'STORE_TOKEN': store_token,
-                    'AI_BUDGET_MODE': 'guarded',
+                    'PROFILING_OPENROUTER_API_KEY': key,
+
                     'PROFILING_CATALOG_SOURCE': 'search_http', 'PROFILING_SEARCH_BASE_URL': search_url,
                     'PROFILING_SEARCH_TOKEN': token, 'PROFILING_STRICT_STARTUP': 'true',
                     'PROFILING_CALLBACK_MAX_ATTEMPTS': '1', 'INTEGRATION_SYNTHETIC_ONLY': '1',
@@ -146,23 +123,21 @@ def run_models(database, export, contract, search_url, be, callbacks, token, out
                     evidence['profile'] = db.execute('SELECT to_jsonb(r) FROM ai_profile.recipient_profiles r WHERE recipient_user_id=777').fetchone()[0]
                 evidence['callbacks'] = callbacks[:]
                 assert evidence['profile']['tag_status'] == 'ok'
-                budget_after_profile = budget(http)
                 # The same source version must replay its callback without another model call.
                 assert http.post(profile_url+'/api/internal/v1/ai/profile/extract-and-pool', json=body).status_code == 202
                 deadline = time.monotonic()+10
                 while len(callbacks) < 2 and time.monotonic() < deadline:
                     time.sleep(.1)
                 assert len(callbacks) == 2 and callbacks[0] == callbacks[1]
-                assert budget(http)['attempts'] == budget_after_profile['attempts']
                 evidence['duplicateProfileNoNewPaidAttempt'] = True
             chat, chat_url = start('chat-live', 'chat', 'app.main:app', {
                 'PYTHONPATH': os.pathsep.join(map(str, [ROOT/'chat', ROOT])), 'STORE_MODE': 'postgres',
                 'DATABASE_URL': database['chat']+'?options=-csearch_path%3Dai_chat,public',
                 'CHAT_RUNTIME_MODE': 'live', 'CHAT_MODEL': MODEL, 'CHAT_HARNESS_VARIANT': 'stable-v4.12',
-                'AI_BUDGET_MODE': 'guarded',
+
                 'AI_SERVICE_TOKEN': token, 'SESSION_SECRET': token, 'QA_ADMIN_PASSWORD': token,
                 'DEMO_ACCESS_TOKEN': token, 'COOKIE_SECURE': 'false', 'OPENROUTER_API_KEY': key,
-                'SEARCH_URL': search_url, 'SEARCH_TOKEN': token, 'BUDGET_STORE_URL': budget_url, 'STORE_TOKEN': store_token})
+                'SEARCH_URL': search_url, 'SEARCH_TOKEN': token})
             wait(http, chat_url, chat)
             evidence['chatReady'] = http.get(chat_url+'/readyz').json()
             assert evidence['chatReady']['mode'] == 'live'
@@ -199,9 +174,7 @@ def run_models(database, export, contract, search_url, be, callbacks, token, out
                     item['checks']['exactSyntheticCount'] = len(ids) == case['expectedCount']
                 if 'expectedExcludedProductIds' in case:
                     item['checks']['exclusionLifetime'] = receipt['lowLatencyState']['publicFilters']['exclude_product_ids'] == case['expectedExcludedProductIds']
-                previous = budget(http)
                 assert http.put(base+'/turns/'+tid, json=request).json()['data'] == state
-                assert budget(http)['attempts'] == previous['attempts']
                 item['retryNoNewPaidAttempt'] = True
             evidence['passed'] = all(all(v is True for k, v in c['checks'].items() if k != 'displayedIds')
                                      for c in evidence['conversations'])
@@ -209,9 +182,4 @@ def run_models(database, export, contract, search_url, be, callbacks, token, out
             evidence['qualitativeReviewRequired'] = True
             return evidence
         finally:
-            if budget_url:
-                try:
-                    evidence['budgetAfter'] = budget(http)
-                except Exception as exc:
-                    evidence['budgetAfterErrorClass'] = type(exc).__name__
             (output/'live-evidence.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2)+'\n')

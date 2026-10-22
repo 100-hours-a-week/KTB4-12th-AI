@@ -16,7 +16,6 @@ for key in ['AI_SERVICE_TOKEN', 'SESSION_SECRET', 'QA_ADMIN_PASSWORD', 'DEMO_ACC
 from app.low_latency import LowLatencyRuntime
 from app.model_config import ModelCatalog
 from app.search_client import SearchClient
-from app.task_budget import BudgetHTTP
 from app.gift_core.contracts import Filters
 from test_low_latency import Store, tool
 
@@ -56,7 +55,7 @@ async def check():
                 runtime.init_state(store, search, 'synthetic-owner')
                 runtime.model = 'openai/gpt-6-luna'
                 runtime.catalog = ModelCatalog(http)
-                runtime.http = BudgetHTTP(http, store)
+                runtime.http = http
                 runtime.admissions[tid] = {'prepared_context': {'productIds':profile['productIds'], 'snapshotId':metadata['snapshotId']} if prepared else None}
                 receipt = {'startedMonotonic':time.monotonic(), 'usage':[]}
                 await runtime.generate(cid, tid, receipt)

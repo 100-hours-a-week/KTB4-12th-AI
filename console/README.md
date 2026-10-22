@@ -39,7 +39,7 @@ Docker의 로컬 포트 전달은 `CONSOLE_ADMIN_ORIGIN=http://127.0.0.1:18811`�
 
 형식이 잘못된 입력과 교체 전 쓰기 실패는 기존 저장값·초기 주입값을 보존합니다. 교체 후 디스크 동기화가 실패하면 저장 여부를 미확인으로 표시하므로 상태를 다시 확인합니다. 저장은 제공자 인증 성공 검사가 아니므로 **형식은 맞지만 무효인 키**까지 거르지는 않습니다. 그런 키가 저장되면 다음 요청이 실패하며 이전 키로 자동 복귀하지 않습니다.
 
-Chat·Profiler·Console의 기본 비용 정책은 `provider-key-limits`이며 자체 비용 원장·gateway를 사용하지 않습니다. OpenRouter에서 키별 한도를 설정하세요. 기존 원장 실험만 `AI_BUDGET_MODE=guarded`를 명시하며 기존 누적액·예약은 보존합니다. Console은 서버에서 공식 [현재 키 API](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key)를 조회해 Chat·Profiler의 누적 사용액·설정 한도·남은 한도와 확인 시각을 표시합니다. 남은 한도는 계정 잔액이 아닙니다. 화면을 열거나 조회 버튼을 누를 때 키당 최대 1분에 한 번 조회하며, 5분 경과·조회 실패·무제한·미확인 값을 구분합니다. 채팅 요청은 이 조회를 기다리지 않습니다. Console 대상 파일의 `budgetMode`·`expectedChatModel`·`expectedProfilerModel`은 각각 같은 환경변수 `AI_BUDGET_MODE`·`CHAT_MODEL`·`PROFILING_TAGGER_MODEL`보다 우선합니다. 대상 파일에 명시한 값은 실제 실행기와 일치해야 하며, 모델의 기존 `expectedModel`은 서비스별 설정이 없을 때의 기본값입니다.
+Chat·Profiler는 별도 예산 gateway나 원장 없이 실행합니다. OpenRouter 키별 한도·사용량 표시는 제공자 관측이며 앱 기동이나 채팅 전송의 승인 조건이 아닙니다. 키 한도는 OpenRouter에서 운영자가 설정합니다.
 
 ## Develop 설정 등록
 
@@ -50,7 +50,6 @@ Chat·Profiler·Console의 기본 비용 정책은 `provider-key-limits`이며 �
 | 변수명 | 값 |
 |---|---|
 | `AI_ENVIRONMENT` | `develop` |
-| `AI_BUDGET_MODE` | 선택. 기본값 `provider-key-limits`; 기존 원장 실험만 `guarded` |
 | `CHAT_MODEL`, `PROFILING_TAGGER_MODEL` | 선택. 통합 컨테이너 기본값은 각각 `openai/gpt-6-luna`; 변경할 때 OpenRouter 모델 ID 사용 |
 | `PROFILING_BACKEND_BASE_URL` | 실제 BE 내부 origin. 로컬 기본값을 Develop 주소로 사용하지 않음 |
 
@@ -127,6 +126,6 @@ node --test console/tests/*.test.js
 
 - 통합 런타임은 기존 Chat `OPENROUTER_API_KEY`와 Profiler `PROFILING_OPENROUTER_API_KEY` 및 각각의 `_FILE`도 읽습니다. 새 이름과 기존 이름을 함께 공급하면 배포 초기값이 실제 사용되는 시점에 값이 같아야 하며, 다르면 `PROVIDER_KEY_SOURCE_CONFLICT`로 거부합니다. 빈 환경변수는 미설정으로 취급하고, 이름별 `_FILE`은 같은 이름의 환경변수보다 우선합니다. 명시한 파일의 누락·공백을 다른 이름으로 우회하지 않습니다.
 - 관리 폴더의 대시보드 저장값이 있으면 그것이 우선합니다. 예전 배포 파일이 사라져도 저장값 사용·교체는 가능하며, 저장 후 파일 손상·삭제 시 배포 초기값으로 돌아가지 않습니다.
-- 관리형 Compose Search는 `AI_INTERNAL_SERVICE_TOKEN_FILE`로 연결합니다. Search의 기존 `AI_SERVICE_TOKEN` 또는 `_FILE`도 호환하며 두 이름을 함께 공급할 때 다른 값은 거부합니다. 기존 비관리형 guarded/smoke 구성의 공용 토큰 계약은 유지합니다. Chat·Profiler에는 공통 `BE_SERVICE_TOKEN`과 레거시 BE 이름 `AI_SERVICE_TOKEN`·`PROFILING_SERVICE_TOKEN`을 중복 주입하지 않습니다.
+- 관리형 Compose Search는 `AI_INTERNAL_SERVICE_TOKEN_FILE`로 연결합니다. Search의 기존 `AI_SERVICE_TOKEN` 또는 `_FILE`도 호환하며 두 이름을 함께 공급할 때 다른 값은 거부합니다. 합성 smoke 구성의 공용 토큰 계약은 유지합니다. Chat·Profiler에는 공통 `BE_SERVICE_TOKEN`과 레거시 BE 이름 `AI_SERVICE_TOKEN`·`PROFILING_SERVICE_TOKEN`을 중복 주입하지 않습니다.
 - 기존 서비스별 선별 주입 구성도 정상 동작합니다. 이번 이름 정리는 필수 장애 수정이 아니라 연결 계약을 일관되게 만드는 호환 변경입니다. Secret 전체를 모든 컨테이너에 주입하기보다 필요한 필드만 서비스별로 연결하세요.
 - 현재 Cloud 저장소의 배포 스크립트에 AI 서비스 연결은 구현되어 있지 않습니다. Secret/Parameter Store에 이름을 등록하는 것만으로 AI 컨테이너에 전달되지 않습니다. 배포 담당자가 환경별 allowlist와 Compose 환경변수 연결을 별도로 준비해야 하며, 앱에 SSM 직접 조회를 추가하지 않습니다.

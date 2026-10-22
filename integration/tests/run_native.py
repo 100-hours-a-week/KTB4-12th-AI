@@ -183,7 +183,6 @@ def main():
             assert qa.status_code==200
             with psycopg.connect(url) as db:
                 assert db.execute('SELECT count(*) FROM ai_search.searches').fetchone()[0]>0
-                assert db.execute('SELECT count(*) FROM ai_chat.task_budget_accounts').fetchone()[0]==0
             passed('search_qa_in_shared_postgres_without_sqlite_or_paid_budget')
             with psycopg.connect(url) as db:
                 db.execute('UPDATE ai_catalog.products SET unit_price=unit_price+1 WHERE id=%s',(first_id,))

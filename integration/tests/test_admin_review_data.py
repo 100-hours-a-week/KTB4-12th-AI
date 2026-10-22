@@ -245,16 +245,13 @@ def database_contents(database):
     return contents
 
 
-def test_additive_v1_reviews_preserve_all_existing_data_grants_and_unknown_budget(database, monkeypatch):
+def test_additive_v1_reviews_preserve_all_existing_data_and_grants(database, monkeypatch):
     from integration.migrate_single_server import migrate
     store = chat_store(database)
     try:
         cid, tid, owner = conversation(store)
         store.feedback(cid, tid, str(uuid4()), {"verdict": "helpful", "note": "기존 사용자 의견"})
         store.conversation_feedback(cid, str(uuid4()), {"category": "quality", "note": "기존 대화 신고"})
-        store.budget_import("synthetic-v3-migration", 1.23, "a" * 64)
-        store.budget_reserve("synthetic-v3-migration", str(uuid4()), .1, "synthetic")
-        budget = store.budget_summary("synthetic-v3-migration")
         assert store.lease(owner, release=True)
         store.close()
         with psycopg.connect(database["owner"]) as db:
@@ -277,7 +274,6 @@ def test_additive_v1_reviews_preserve_all_existing_data_grants_and_unknown_budge
         assert not migrate(database["owner"], database["name"])["changed"]
         assert database_contents(database) == before
         store = chat_store(database)
-        assert store.budget_summary("synthetic-v3-migration") == budget
         assert store.context(cid, tid) == {"legacyTrace": "PRESERVE_WITHOUT_INVENTING_STATUS"}
         assert store.admin_conversation(cid)["turns"][0]["reviews"] == []
         assert store.admin_turn_review(cid, tid, str(uuid4()), "업그레이드 후 첫 검토")["saved"]

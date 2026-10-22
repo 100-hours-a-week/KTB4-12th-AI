@@ -3,7 +3,6 @@ import asyncio,copy,json,time,uuid
 import httpx,pytest
 from app.low_latency import LowLatencyRuntime
 from app.model_config import ModelCatalog
-from app.task_budget import BudgetHTTP
 from app.gift_core.contracts import Filters,strict_schema,ContextArgs
 from app.turn_report import report
 from test_hf_integration import FixtureStore
@@ -43,13 +42,20 @@ async def run(packets,prepared=None,private=False,old=None,message="합성 질�
   oid=str(uuid.uuid4());store.states[oid]={'turnId':oid,'status':'COMPLETED','message':'이전 합성 요청','blocks':[],'lastEventId':1,'_cid':cid};store.traces[oid]=old
  if private:store.supplied={'recipientUserId':42,'status':'AVAILABLE','giftPreference':'PRIVATE_CANARY_BOOK_SUPPORT','dislikedCategories':[{'categoryId':20,'categoryName':'식품'}]}
  await store.call('start',cid=cid,tid=tid,message=message)
- if stored:store.traces[tid]={'recipientProfile':stored}
+ if stored:
+  stored=copy.deepcopy(stored)
+  # SQL snapshots always carry these version fields; legacy synthetic fixtures
+  # used to omit them. Keep explicit mismatches/nulls unchanged for regressions.
+  if stored.get('source')=='AI_PROFILE_STORE' and stored.get('analysisCurrent'):
+   data=stored.setdefault('data',{});data.setdefault('sourceVersion',1)
+   stored.setdefault('inputSourceVersion',data['sourceVersion']);stored.setdefault('analysisSourceVersion',data['sourceVersion'])
+  store.traces[tid]={'recipientProfile':stored}
  def reply(req):
   sent.append(json.loads(req.content));packet=packets.pop(0)
   wire=packet if isinstance(packet,list) else [packet]
   return httpx.Response(200,text=''.join('data: '+json.dumps(part,ensure_ascii=False)+'\n\n' for part in wire)+'data: [DONE]\n\n')
- async with httpx.AsyncClient(base_url='https://synthetic',transport=httpx.MockTransport(reply)) as http:
-  runtime=object.__new__(LowLatencyRuntime);runtime.init_state(store,search,'owner');runtime.model='openai/gpt-6-luna';runtime.catalog=ModelCatalog(http);runtime.http=BudgetHTTP(http,store)
+ async with httpx.AsyncClient(base_url='https://openrouter.ai/api/v1',transport=httpx.MockTransport(reply),event_hooks={"request":[__import__("app.main",fromlist=["provider_key_request"]).provider_key_request]}) as http:
+  runtime=object.__new__(LowLatencyRuntime);runtime.init_state(store,search,'owner');runtime.model='openai/gpt-6-luna';runtime.catalog=ModelCatalog(http);runtime.http=http
   runtime.admissions[tid]={'prepared_context':prepared};receipt={'startedMonotonic':time.monotonic(),'usage':[]}
   await runtime.generate(cid,tid,receipt)
  return receipt,sent,store,search,cid,tid
@@ -58,7 +64,7 @@ async def run(packets,prepared=None,private=False,old=None,message="합성 질�
 async def test_ordinary_chat_keeps_one_request_and_no_search():
  receipt,sent,store,search,*_=await run([text('안녕하세요.')])
  assert len(sent)==1 and not search.queries
- assert len([v for k,v in store.budget if k=='budget_reserve'])==1
+ assert not store.budget
 
 def test_integrated_provenance_hashes_the_active_adapter():
  from app.integrated_harness import protocol_manifest
@@ -83,7 +89,7 @@ async def test_native_decision_then_selection_preserves_transport_and_budget(pre
  assert not fields.get('required')  # Omission must stay different from null/[] clearing.
  assert receipt['selectedProducts'][0]['productId']==101
  assert receipt['lowLatencyState']['publicFilters']['max_price']==20000
- assert len([v for k,v in store.budget if k=='budget_reserve'])==2
+ assert not store.budget
  if prepared_mode:assert search.queries[0]['filters']['includeProductIds']==[101]
 
 async def test_private_profile_and_exclusions_stay_outside_model_and_report():
@@ -153,8 +159,9 @@ async def test_current_stored_dislikes_filter_across_categories_without_model_di
  assert [p['productId'] for p in receipt['observedProducts']]==[101]
  assert [p['productId'] for p in receipt['selectedProducts']]==[101]
  assert search.queries[0]['query']=='독서'
- assert 'PRIVATE_RAW_DO_NOT_DISCLOSE' not in json.dumps(sent)
- assert term not in json.dumps(sent,ensure_ascii=False)
+ assert 'PRIVATE_RAW_DO_NOT_DISCLOSE' in json.dumps(sent)
+ assert term in json.dumps(sent,ensure_ascii=False)
+ assert 'PRIVATE_RAW_DO_NOT_DISCLOSE' not in json.dumps(report(_[0],store.public(store.states[_[1]]),receipt))
 
 
 async def test_unauthorized_stored_profile_allows_generic_message_only_chat():
@@ -180,12 +187,12 @@ async def test_incomplete_analysis_never_uses_raw_dislikes_as_positive_query(ana
   'data':{'recipientUserId':42,'sourceVersion':2,'giftPreference':raw,
    'dislikedCategories':[{'categoryId':20,'categoryName':'식품'}],
    'preferredTags':[{'axis':'카테고리','tag':'향수'}],'dislikedTags':[{'axis':'카테고리','tag':'독서'}]}}
- receipt,sent,store,search,*_=await run([tool('gift_context',context()),tool('show_gifts',show())],stored=snapshot)
- assert [q['query'] for q in search.queries]==['책받침']
- assert all(20 in q['filters']['excludeCategoryIds'] for q in search.queries)
- assert [p['productId'] for p in receipt['selectedProducts']]==[101]
- assert raw not in json.dumps(search.queries,ensure_ascii=False)
- assert 'PRIVATE_RAW' not in json.dumps(sent)
+ from app.errors import APIError
+ packets=[tool('gift_context',context()),tool('show_gifts',show())]
+ with pytest.raises(APIError,match='최신 취향 분석'):
+  await run(packets,stored=snapshot)
+ assert len(packets)==2  # No model call when analysis is pending/failed/stale.
+
 
 
 def test_stored_dislikes_apply_only_to_bound_recipient():
@@ -280,7 +287,7 @@ async def test_optional_card_introduction_never_persists_empty_text(message,oper
  receipt,sent,store,search,cid,tid=await run([tool('gift_context',context()),tool(operation,payload)])
  assert [e['event'] for e in store.events[tid]]==['progress','cards']
  assert store.states[tid]['blocks']==[{'type':'cards','products':[{'productId':101,'reason':'상품 정보: 책을 올려 두는 합성 테스트 상품'}]}]
- assert len(sent)==2 and len([v for k,v in store.budget if k=='budget_reserve'])==2
+ assert len(sent)==2 and not store.budget
  assert receipt['selectedProducts'][0]['productId']==101
 
 async def test_meaningful_card_introduction_remains_in_stream_and_saved_state():

@@ -59,7 +59,7 @@ def test_separate_model_expectations_apply_to_guards_and_snapshot(monkeypatch, s
         backend.request = request
         monkeypatch.setattr(backend, "database_snapshot", lambda: {})
         try:
-            for check, allowed in [(backend.check_live_budget, chat_ok),
+            for check, allowed in [(backend.check_chat_ready, chat_ok),
                                    (backend.check_profile_ready, profiler_ok)]:
                 if allowed:
                     await check()
@@ -70,82 +70,16 @@ def test_separate_model_expectations_apply_to_guards_and_snapshot(monkeypatch, s
             snapshot = await backend.snapshot()
             assert (snapshot["services"]["chat"]["status"] == "ready") is chat_ok
             assert (snapshot["services"]["profiling"]["status"] == "ready") is profiler_ok
-            assert snapshot["budgetPolicyVerified"] is chat_ok
+            assert snapshot["runtimeVerified"] is chat_ok
         finally:
             await backend.http.aclose()
     asyncio.run(case())
 
 
-@pytest.mark.parametrize("mode", ["guarded", "provider-key-limits"])
-@pytest.mark.parametrize("reported", ["central-account", "provider-key-limits", "missing-integration", "missing-guard", None, "unknown", []])
-def test_profiler_policy_must_match_before_admission_and_ready_display(monkeypatch, mode, reported):
-    class DB:
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def execute(self, query):
-            assert query in {"SET TRANSACTION READ ONLY", "SET LOCAL statement_timeout='2000ms'"} or query.startswith("SELECT current_database(),database_name,version")
-            return self
-        def fetchone(self): return ("synthetic", "synthetic", server.DATABASE_VERSION)
-
-    monkeypatch.setattr(server.psycopg, "connect", lambda *args, **kwargs: DB())
-
-    async def case():
-        app = configured_app({"liveModel": True, "budgetMode": mode,
-            "database": "postgresql://synthetic@127.0.0.1/synthetic",
-            "targets": {"chat": "http://127.0.0.1:1", "profiling": "http://127.0.0.1:2"}})
-        backend = app.state.backend
-        monkeypatch.setattr(backend, "database_snapshot", lambda: {})
-        # A legacy tagger.required field alone must not attest the cost policy.
-        health = {"tagger": {"enabled": True, "required": True, "model": "synthetic/profiler"},
-                  "embedding": {"enabled": True}, "store": {"connected": True}, "catalog": {"active": True}}
-        if reported != "missing-integration":
-            health["integration"] = {} if reported == "missing-guard" else {"budgetGuard": reported}
-        mutations = []
-
-        def upstream(request):
-            if request.method != "GET":
-                mutations.append((request.method, request.url.path))
-                return httpx.Response(202, json={"data": {"profileStatus": "PENDING"}})
-            if request.url.port == 1:
-                return httpx.Response(200, json={"ready": True, "database": "postgresql", "mode": "live",
-                    "model": "synthetic/chat", "budgetMode": mode, "budgetAccount": "gift-chat-harness-2026-10-06",
-                    "sharedBudget": {"limitUsd": 5, "remainingUsd": 1, "halted": None}})
-            if request.url.path == "/readyz":
-                return httpx.Response(200, json={"ready": True, "checks": {key: True for key in
-                    ("catalog", "db", "migration", "integration_required", "required_embedding")}})
-            return httpx.Response(200, json=health)
-
-        await backend.http.aclose()
-        backend.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
-        allowed = reported == ("central-account" if mode == "guarded" else mode)
-        try:
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://127.0.0.1:9000",
-                                         headers={"Origin": "http://127.0.0.1:9000"}) as client:
-                await login(client)
-                policy = (await client.get("/api/config")).json()
-                assert policy["chatSendAllowed"] is True
-                assert policy["profileSendAllowed"] is allowed
-                snapshot = (await client.get("/api/snapshot")).json()
-                observed = snapshot["services"]["profiling"]
-                assert (observed["status"] == "ready") is allowed
-                assert ("실제 비용 정책 미확인 또는 설정 불일치" in observed["reasons"]) is not allowed
-                assert mutations == []
-                response = await client.post("/api/profile", json={"recipientUserId": 42, "sourceVersion": 1,
-                                                                     "giftPreference": "SYNTHETIC"})
-                if allowed:
-                    assert response.status_code == 200 and response.json()["httpStatus"] == 202
-                    assert mutations == [("POST", "/api/internal/v1/ai/profile/extract-and-pool")]
-                else:
-                    assert response.status_code == 409
-                    assert mutations == [] and backend.profile_inputs == {}
-        finally:
-            await backend.http.aclose()
-            await app.state.provider_usage.close()
-    asyncio.run(case())
 
 
 @pytest.mark.parametrize("fault", [None, "chat_down", "not_ready", "wrong_model", "wrong_database",
-    "wrong_account", "changed_limit", "halted", "exhausted", "nonfinite", "missing_budget",
+
     "profile_down", "profile_store_down", "profile_catalog_missing", "profile_shape",
     "profile_metadata", "profile_model", "profile_enabled", "profile_not_ready", "profile_migration", "profile_ready_shape",
     "wrong_identity", "wrong_db_version", "missing_identity"])
@@ -182,12 +116,6 @@ def test_stale_pid_resume_and_faults_never_admit_unverified_sends(monkeypatch, f
                         'sharedBudget': {'limitUsd': 5, 'remainingUsd': 4, 'halted': None}}
                 if fault == 'wrong_model': data['model'] = 'other-model'
                 if fault == 'wrong_database': data['database'] = 'sqlite'
-                if fault == 'wrong_account': data['budgetAccount'] = 'other-budget'
-                if fault == 'changed_limit': data['sharedBudget']['limitUsd'] = 10
-                if fault == 'halted': data['sharedBudget']['halted'] = 'held'
-                if fault == 'exhausted': data['sharedBudget']['remainingUsd'] = 0
-                if fault == 'nonfinite': data['sharedBudget']['remainingUsd'] = float('nan')
-                if fault == 'missing_budget': data.pop('sharedBudget')
                 return httpx.Response(200, content=json.dumps(data))
             if request.method == 'GET' and path == '/health':
                 if fault == 'profile_down': return httpx.Response(503, json={})
@@ -213,24 +141,25 @@ def test_stale_pid_resume_and_faults_never_admit_unverified_sends(monkeypatch, f
             return httpx.Response(201, json={'data': {}})
         await app.state.backend.http.aclose()
         app.state.backend.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        profile_ok = fault is None or fault in {'chat_down','not_ready','wrong_model','wrong_database'}
         chat_ok = fault is None or fault.startswith('profile_') or fault in {'wrong_identity', 'wrong_db_version', 'missing_identity'}
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://127.0.0.1:9000',
                                      headers={'Origin': 'http://127.0.0.1:9000'}) as client:
             await login(client)
             policy = (await client.get('/api/config')).json()
             assert policy['chatSendAllowed'] == chat_ok
-            assert policy['budgetPolicyVerified'] == chat_ok
-            assert policy['profileSendAllowed'] == (fault is None)
+            assert policy['runtimeVerified'] == chat_ok
+            assert policy['profileSendAllowed'] == profile_ok
             body = {k: str(uuid.uuid4()) for k in ['request_id', 'conversation_id', 'turn_id']} | {'message': 'SYNTHETIC FREE CONTRACT'}
             for _ in range(2):
                 chat = await client.post('/api/chat', json=body)
                 profile = await client.post('/api/profile', json={'recipientUserId': 42, 'sourceVersion': 99, 'giftPreference': 'SYNTHETIC'})
                 assert (chat.status_code == 200 and chat.json()['httpStatus'] == 202) == chat_ok
-                assert (profile.status_code == 200 and profile.json()['httpStatus'] == 202) == (fault is None)
+                assert (profile.status_code == 200 and profile.json()['httpStatus'] == 202) == profile_ok
             assert len(accepted_turns) == int(chat_ok)
-            assert len(accepted_profiles) == int(fault is None)
-            if not chat_ok: assert mutations == []
-            if fault is not None: assert not any(method == 'POST' for method, _ in mutations)
+            assert len(accepted_profiles) == int(profile_ok)
+            if not chat_ok: assert not any('/turns/' in path for _,path in mutations)
+            if not profile_ok: assert not any(method == 'POST' for method, _ in mutations)
         await app.state.backend.http.aclose()
     asyncio.run(case())
 
@@ -261,11 +190,7 @@ def test_profiler_provider_mode_does_not_probe_an_unavailable_chat(monkeypatch, 
                 "embedding": {"enabled": True}, "store": {"connected": True}, "catalog": {"active": True}}
         backend.request = request
         try:
-            if mode == "guarded":
-                with pytest.raises(HTTPException): await backend.check_profile_ready()
-                assert probes == [("chat", "/readyz")]
-            else:
-                await backend.check_profile_ready()
-                assert probes == [("profiling", "/readyz"), ("profiling", "/health")]
+            await backend.check_profile_ready()
+            assert probes == [("profiling", "/readyz"), ("profiling", "/health")]
         finally: await backend.http.aclose()
     asyncio.run(case())
