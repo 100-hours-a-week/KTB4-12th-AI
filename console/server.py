@@ -396,7 +396,7 @@ class Backend:
         self.admission_store = admission_store if not self.demo else None
         self.target_scope = hashlib.sha256(json.dumps({
             "targets": self.targets, "liveModel": bool(self.config.get("liveModel")),
-            "budgetMode": self.config.get("budgetMode", "provider-key-limits"),
+            "budgetMode": "provider-key-limits",
             "database": self.config.get("database"),
         }, sort_keys=True).encode()).hexdigest()
         self.profile_inputs = {}
@@ -451,22 +451,9 @@ class Backend:
             else "/v1/chat/test/conversations/"
         )
 
-    def budget_policy_matches(self, ready, service="chat"):
-        mode = self.config.get("budgetMode", "provider-key-limits")
-        if mode not in {"guarded", "provider-key-limits"}:
-            return False
-        if service == "profiling":
-            integration = ready.get("integration")
-            expected = "central-account" if mode == "guarded" else mode
-            return isinstance(integration, dict) and integration.get("budgetGuard") == expected
-        # Older guarded servers omitted this field. Provider limits require an
-        # explicit matching runtime policy; configuration alone is not evidence.
-        return ready.get("budgetMode") == mode if "budgetMode" in ready or mode == "provider-key-limits" else True
-
-    async def check_live_budget(self):
-        mode = self.config.get("budgetMode", "provider-key-limits")
-        if not self.config.get("liveModel") or mode not in {"guarded", "provider-key-limits"}:
-            raise HTTPException(409, "Live mode and an explicit supported cost policy are required")
+    async def check_chat_ready(self):
+        if not self.config.get("liveModel"):
+            raise HTTPException(409, "Live Chat runtime is required")
         status, ready = await self.request("chat", "GET", "/readyz")
         ready = ready if isinstance(ready, dict) else {}
         expected_model = self.config.get("expectedChatModel", self.config.get("expectedModel"))
@@ -478,27 +465,8 @@ class Backend:
             or not isinstance(ready.get("model"), str)
             or not ready["model"].strip()
             or (expected_model and ready.get("model") != expected_model)
-            or not self.budget_policy_matches(ready)
         ):
             raise HTTPException(409, "Actual live runtime not verified")
-        # PR20 explicitly delegates cost limits to the provider in this mode.
-        # Missing ledger data alone must never select that policy.
-        if mode == "provider-key-limits":
-            return ready
-        budget = ready.get("sharedBudget", {})
-        if (
-            ready.get("budgetAccount") != "gift-chat-harness-2026-10-06"
-            or not isinstance(budget, dict)
-            or type(budget.get("limitUsd")) not in (int, float)
-            or budget.get("limitUsd") != 5
-            or budget.get("halted") is not None
-            or type(budget.get("remainingUsd")) not in (int, float)
-            or not math.isfinite(budget["remainingUsd"])
-            or budget["remainingUsd"] <= 0
-        ):
-            raise HTTPException(
-                409, "Actual live mode and existing cumulative ledger not verified"
-            )
         return ready
 
     async def request(self, service, method, path, body=None, *, quick_check=False):
@@ -624,7 +592,7 @@ class Backend:
                             "Upstream Chat state query failed",
                         )
                 if self.config.get("liveModel"):
-                    ready = await self.check_live_budget()
+                    ready = await self.check_chat_ready()
                     if old:
                         data = old["body"]
                     elif quick_check:
@@ -989,8 +957,6 @@ class Backend:
     async def check_profile_ready(self):
         if not self.demo:
             if self.config.get("liveModel"):
-                if self.config.get("budgetMode", "provider-key-limits") == "guarded":
-                    await self.check_live_budget()
                 ready_status, ready = await self.request("profiling", "GET", "/readyz")
                 checks = ready.get("checks") if isinstance(ready, dict) else None
                 if (ready_status != 200 or not isinstance(ready, dict) or ready.get("ready") is not True
@@ -1005,8 +971,6 @@ class Backend:
                     for field in ("llm", "integration", "tagger", "embedding", "store", "catalog")
                 ):
                     raise HTTPException(409, "Required actual tagging/embedding runtime not verified")
-                if not self.budget_policy_matches(health, "profiling"):
-                    raise HTTPException(409, "Actual Profiler cost policy not verified")
                 tagger = model_state(health)
                 expected_model = self.config.get("expectedProfilerModel", self.config.get("expectedModel"))
                 if (
@@ -1148,10 +1112,6 @@ class Backend:
                 "SELECT status,count(*) n FROM ai_profile.profile_runs WHERE created_at>=now()-interval '24 hours' GROUP BY status"
             ).fetchall()
             budget = None
-            if self.config.get("budgetMode", "provider-key-limits") == "guarded":
-                budget = db.execute(
-                    "SELECT count(*) n,sum(actual_usd) actual,sum(reserved_usd) FILTER(WHERE actual_usd IS NULL) reserved,count(*) FILTER(WHERE actual_usd IS NULL) unconfirmed_n FROM ai_chat.task_budget_attempts WHERE created>=now()-interval '24 hours'"
-                ).fetchone()
         now = datetime.now(timezone.utc)
 
         def code(value):
@@ -1311,7 +1271,7 @@ class Backend:
                 )
                 if not isinstance(data, dict):
                     raise TypeError("invalid health")
-                policy_matches = self.budget_policy_matches(data, service) if service in {"chat", "profiling"} else True
+                policy_matches = True
                 data = public_health(service, data)
                 ready = status == 200 and (
                     data.get("ready") is True
@@ -1463,15 +1423,12 @@ class Backend:
             "catalogVersion": self.config.get("catalogVersion"),
             "sourceManifest": self.config.get("sourceManifest"),
             "budget": None,
-            "budgetMode": self.config.get("budgetMode", "provider-key-limits"),
-            "budgetPolicyVerified": bool(self.config.get("liveModel")
+            "budgetMode": "provider-key-limits",
+            "runtimeVerified": bool(self.config.get("liveModel")
                 and services.get("chat", {}).get("status") == "ready"
-                and self.budget_policy_matches(services["chat"].get("data", {}))),
+                and True),
             "unmeasured": ["Server TTFT", "전체 Search 요청 이력", "전체 서비스 비용"],
         }
-        shared = services.get("chat", {}).get("data", {}).get("sharedBudget")
-        if isinstance(shared, dict):
-            result["sharedBudget"] = shared
         if self.config.get("database"):
             try:
                 data = await asyncio.to_thread(self.database_snapshot)
@@ -1487,11 +1444,6 @@ class Backend:
             else "collected"
         )
         result["collectedAt"] = STAMP()
-        result["budgetSeparation"] = {
-            "actualUsd": None,
-            "unconfirmedUsd": None,
-            "reason": "central summary combines actual and uncertain reservations; no fabricated split",
-        }
         return result
 
     def read_profile(self, key):
@@ -1580,8 +1532,7 @@ async def session_events(admin, request, stream, *, interval=1):
 
 def create_app(config=None):
     config = dict(config or {})
-    for field, variable in (("budgetMode", "AI_BUDGET_MODE"),
-                            ("expectedChatModel", "CHAT_MODEL"),
+    for field, variable in (("expectedChatModel", "CHAT_MODEL"),
                             ("expectedProfilerModel", "PROFILING_TAGGER_MODEL")):
         value = os.getenv(variable, "").strip()
         if value and field not in config and config.keys() - {"adminAuth"}:
@@ -1837,7 +1788,7 @@ def create_app(config=None):
                     return True
                 except (HTTPException, httpx.HTTPError, psycopg.Error, KeyError, TypeError, ValueError):
                     return False
-            chat_allowed, profile_allowed = await asyncio.gather(allowed(backend.check_live_budget), allowed(backend.check_profile_ready))
+            chat_allowed, profile_allowed = await asyncio.gather(allowed(backend.check_chat_ready), allowed(backend.check_profile_ready))
         return {
             "mode": "DEMO" if backend.demo else "LOCAL_TARGET",
             "targetLabel": backend.config.get("label", "내장 합성 대상"),
@@ -1845,7 +1796,7 @@ def create_app(config=None):
             "profileSendAllowed": profile_allowed,
             "paidCallsEnabled": bool(backend.config.get("liveModel")),
             "budgetMode": backend.config.get("budgetMode", "provider-key-limits"),
-            "budgetPolicyVerified": bool(backend.config.get("liveModel") and chat_allowed),
+            "runtimeVerified": bool(backend.config.get("liveModel") and chat_allowed),
             "defaultRecipientUserId": backend.config.get("defaultRecipientUserId", 42),
             "defaultSenderUserId": backend.config.get("defaultSenderUserId", 7),
             "chatRecipients": backend.config.get("chatRecipients", []),

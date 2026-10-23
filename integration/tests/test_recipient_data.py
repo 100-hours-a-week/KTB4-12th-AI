@@ -72,20 +72,6 @@ def snapshot(database, cid):
         return db.execute("SELECT ai_profile.chat_recipient_snapshot(%s::uuid)", (cid,)).fetchone()[0]
 
 
-def grant(database, cid, version, *, caller=None, recipient=None, expired=False, revoked=False):
-    """Explicit synthetic authority; the one-hour test TTL is not a product policy."""
-    with psycopg.connect(database["owner"]) as db:
-        sender, bound_recipient = db.execute(
-            "SELECT sender,recipient FROM ai_chat.conversations WHERE id=%s", (cid,)).fetchone()
-        ident = str(uuid4())
-        db.execute("""INSERT INTO ai_profile.read_grants
-            (id,caller_user_id,recipient_user_id,source_version,expires_at,revoked_at)
-            VALUES (%s,%s,%s,%s,now() + (%s * interval '1 hour'),
-                CASE WHEN %s THEN now() ELSE NULL END)""",
-            (ident, caller if caller is not None else sender,
-             recipient if recipient is not None else bound_recipient, version,
-             -1 if expired else 1, revoked))
-    return ident
 
 
 def analysis(database, rid, version, *, status="ok", tag="합성 커피"):
@@ -200,7 +186,6 @@ def test_three_bound_recipients_have_separate_snapshots_and_owner_checks(databas
             assert record(database, rid, 1, value) == "stored"
             cid = str(uuid4())
             store.conversation(cid, 900, rid)
-            grant(database, cid, 1)
             data = snapshot(database, cid)
             assert data["source"] == "AI_PROFILE_STORE" and data["status"] == "AVAILABLE"
             assert data["data"]["recipientUserId"] == rid
@@ -224,7 +209,6 @@ def test_new_input_failure_keeps_latest_raw_and_last_success_version_separate(da
     cid = str(uuid4())
     try:
         store.conversation(cid, 900, 204)
-        grant(database, cid, 1)
         record(database, 204, 1, payload("이전 커피 취향"))
         analysis(database, 204, 1, tag="OLD_SUCCESS_TAG")
         complete = snapshot(database, cid)
@@ -235,7 +219,6 @@ def test_new_input_failure_keeps_latest_raw_and_last_success_version_separate(da
 
         newer = payload("새 취향은 차", 30)
         record(database, 204, 2, newer)
-        grant(database, cid, 2)
         run_status(database, 204, 2, newer, "RUNNING")
         pending = snapshot(database, cid)
         assert pending["analysisStatus"] == "PROCESSING"
@@ -277,7 +260,6 @@ def test_turn_snapshot_is_frozen_across_replay_context_updates_and_reopen(databa
     try:
         record(database, 205, 1, first)
         store.conversation(cid, 900, 205)
-        grant(database, cid, 1)
         assert store.lease(owner)
         assert store.start(cid, tid, "선물 추천", owner)[1]
         frozen = store.context(cid, tid)["recipientProfile"]
@@ -296,7 +278,6 @@ def test_turn_snapshot_is_frozen_across_replay_context_updates_and_reopen(databa
         assert store.context(cid, tid)["syntheticTrace"] == "retained"
         assert store.start(cid, tid, "선물 추천", owner)[1] is False
         next_tid = str(uuid4())
-        grant(database, cid, 2)
         store.start(cid, next_tid, "새 질문", owner)
         newer = store.context(cid, next_tid)["recipientProfile"]
         assert newer["inputSourceVersion"] == 2 and newer["data"]["giftPreference"] == second["giftPreference"]
@@ -308,11 +289,10 @@ def test_turn_snapshot_is_frozen_across_replay_context_updates_and_reopen(databa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('explicit_none', [False, True])
-async def test_ordinary_chat_without_grant_admits_without_private_profile(database, explicit_none):
+async def test_ordinary_chat_uses_bound_profile_unless_explicit_context_is_supplied(database, explicit_none):
     """General chat remains usable; a stored private profile is never authority."""
     from app.low_latency import LowLatencyRuntime
     from app.model_config import ModelCatalog
-    from app.task_budget import BudgetHTTP
     store = chat_store(database)
     cid, tid, owner = str(uuid4()), str(uuid4()), str(uuid4())
     canary, account = 'SYNTHETIC_UNAUTHORIZED_PROFILE_CANARY', 'synthetic-public-chat-only'
@@ -338,76 +318,53 @@ async def test_ordinary_chat_without_grant_admits_without_private_profile(databa
 
     try:
         record(database, 8799, 8, payload(canary))
+        analysis(database, 8799, 8)
         store.conversation(cid, 9799, 8799)
         assert store.lease(owner)
-        store.budget_import(account, 0, '0' * 64)
         empty = {'recipientUserId': 8799, 'status': 'NONE', 'sourceVersion': 0,
                  'giftPreference': None, 'dislikedCategories': []}
         state, made = store.start(cid, tid, '안녕', owner,
                                   recipient_context=empty if explicit_none else None)
         assert made and state['status'] == 'PROCESSING'
         saved = store.context(cid, tid)
-        assert canary not in json.dumps(saved)
         if explicit_none:
+            assert canary not in json.dumps(saved)
             assert 'recipientProfile' not in saved
         else:
-            assert saved['recipientProfile']['accessStatus'] == 'NOT_AUTHORIZED'
-            assert not saved['recipientProfile'].get('data')
+            assert saved['recipientProfile']['data']['giftPreference'] == canary
         async with httpx.AsyncClient(base_url='https://synthetic.invalid', transport=httpx.MockTransport(reply)) as http:
             runtime = LowLatencyRuntime.__new__(LowLatencyRuntime)
             adapter = Adapter()
             runtime.init_state(adapter, Search(), owner)
             runtime.model = 'openai/gpt-6-luna'
             runtime.catalog = ModelCatalog(http)
-            runtime.http = BudgetHTTP(http, adapter, account, expected_limit=5)
+            runtime.http = http
             receipt = {'startedMonotonic': time.monotonic(), 'usage': []}
             await runtime.generate(cid, tid, receipt)
-        assert len(sent) == 1 and canary not in json.dumps(sent)
-        assert canary not in json.dumps(receipt)
-        assert receipt['recipientProfile']['status'] == ('NONE' if explicit_none else 'UNAVAILABLE')
+        assert len(sent) == 1
+        assert (canary in json.dumps(sent)) is not explicit_none
+        assert receipt['recipientProfile']['status'] == ('NONE' if explicit_none else 'AVAILABLE')
         store.emit(cid, tid, 'turn.finished', {'status': 'COMPLETED'}, owner)
         assert store.read(cid)['turns'][0]['status'] == 'COMPLETED'
     finally:
         store.close()
 
 
-def test_quick_check_uses_current_grant_without_reading_profile_prose(database):
-    """Real SQL/roles on the scenario runner's newly created synthetic cluster."""
-    from app.errors import APIError
-    store = chat_store(database)
-    owner = str(uuid4())
+def test_quick_check_uses_trusted_binding_without_exposing_profile_prose(database):
+    store=chat_store(database);owner=str(uuid4());cid,tid=str(uuid4()),str(uuid4())
     try:
         assert store.lease(owner)
-        for index, condition in enumerate(('missing', 'expired', 'revoked', 'wrong_sender', 'wrong_version', 'valid')):
-            rid, cid, tid = 8800 + index, str(uuid4()), str(uuid4())
-            record(database, rid, 8, payload('SYNTHETIC_PRIVATE_QUICK_CHECK_CANARY'))
-            store.conversation(cid, 9700 + index, rid)
-            grant_id = None
-            if condition != 'missing':
-                options = {'expired': True} if condition == 'expired' else {'revoked': True} if condition == 'revoked' else {'caller': 99999} if condition == 'wrong_sender' else {}
-                grant_id = grant(database, cid, 7 if condition == 'wrong_version' else 8, **options)
-            empty = {'recipientUserId': rid, 'status': 'NONE', 'sourceVersion': 0,
-                     'giftPreference': None, 'dislikedCategories': []}
-            args = dict(cid=cid, tid=tid, message='합성 점검', owner=owner,
-                        recipient_context=empty, quick_check=True)
-            if condition != 'valid':
-                with pytest.raises(APIError) as error:
-                    store.start(**args)
-                assert error.value.status == 409 and error.value.message == 'QUICK_CHECK_GRANT_REQUIRED'
-                with psycopg.connect(database['owner']) as db:
-                    assert db.execute('SELECT count(*) FROM ai_chat.turns WHERE id=%s', (tid,)).fetchone()[0] == 0
-                continue
-            state, made = store.start(**args)
-            assert made and state['status'] == 'PROCESSING'
-            assert store.recipient_context(cid, tid) == empty
-            assert 'recipientProfile' not in store.context(cid, tid)
-            assert 'SYNTHETIC_PRIVATE_QUICK_CHECK_CANARY' not in json.dumps(store.context(cid, tid))
-            with psycopg.connect(database['owner']) as db:
-                db.execute('UPDATE ai_profile.read_grants SET revoked_at=now() WHERE id=%s', (grant_id,))
-            assert store.start(**args)[1] is False  # Existing acceptance is read-only.
-            store.emit(cid, tid, 'turn.finished', {'status': 'CANCELLED'}, owner)
-    finally:
-        store.close()
+        record(database,8800,8,payload("SYNTHETIC_PRIVATE_QUICK_CHECK_CANARY"))
+        store.conversation(cid,9700,8800)
+        empty={"recipientUserId":8800,"status":"NONE","sourceVersion":0,
+               "giftPreference":None,"dislikedCategories":[]}
+        args=dict(cid=cid,tid=tid,message="합성 점검",owner=owner,recipient_context=empty,quick_check=True)
+        assert store.start(**args)[1]
+        assert store.recipient_context(cid,tid)==empty
+        assert "recipientProfile" not in store.context(cid,tid)
+        assert "SYNTHETIC_PRIVATE_QUICK_CHECK_CANARY" not in json.dumps(store.context(cid,tid))
+        assert store.start(**args)[1] is False
+    finally:store.close()
 
 
 def test_missing_cleared_and_test_fixture_contexts_do_not_fetch_another_profile(database):
@@ -416,7 +373,6 @@ def test_missing_cleared_and_test_fixture_contexts_do_not_fetch_another_profile(
         record(database, 206, 1, payload("PRIVATE_REAL_PROFILE"))
         cid = str(uuid4())
         store.conversation(cid, 900, 207)
-        grant(database, cid, 2)
         assert snapshot(database, cid)["status"] == "NOT_PROVIDED"
         assert not snapshot(database, cid).get("data")
         record(database, 207, 2, payload(None, None))
@@ -445,7 +401,6 @@ def test_guard_rejected_input_is_unavailable_not_an_empty_preference(database):
     try:
         record(database, 209, 1, malicious)
         store.conversation(cid, 900, 209)
-        grant(database, cid, 1)
         guarded = snapshot(database, cid)
         assert guarded["status"] == "UNAVAILABLE"
         assert not guarded["data"].get("giftPreference")
@@ -502,39 +457,26 @@ def test_chat_role_cannot_read_raw_profile_tables_or_let_other_roles_use_snapsho
                 db.execute("SELECT ai_profile.chat_recipient_snapshot(%s::uuid)", (str(uuid4()),))
 
 
-def test_bound_id_requires_exact_authority_and_revocation_blocks_new_turn(database):
-    store = chat_store(database)
-    cid, unknown_cid, owner = str(uuid4()), str(uuid4()), str(uuid4())
+def test_trusted_binding_reads_only_its_recipient_without_external_grants(database):
+    from app.errors import APIError
+    store=chat_store(database)
+    cid, other, owner=str(uuid4()),str(uuid4()),str(uuid4())
     try:
-        record(database, 210, 1, payload("PRIVATE_ACCESS_CANARY"))
-        store.conversation(cid, 900, 210)
-        store.conversation(unknown_cid, 900, 99999)
-        denied = snapshot(database, cid)
-        assert denied["status"] == "UNAVAILABLE" and denied["accessStatus"] == "NOT_AUTHORIZED"
-        assert not denied.get("data")
-        assert snapshot(database, unknown_cid) == denied  # Do not disclose profile existence.
-        for bad in [{"caller": 901}, {"recipient": 211}, {"expired": True}, {"revoked": True}]:
-            grant(database, cid, 1, **bad)
-            assert snapshot(database, cid) == denied
-        grant(database, cid, 2)
-        assert snapshot(database, cid) == denied
-        allowed = grant(database, cid, 1)
+        record(database,210,1,payload("SYNTHETIC_BOUND_PROFILE"))
+        store.conversation(cid,900,210);store.conversation(other,901,211)
+        assert snapshot(database,cid)["data"]["recipientUserId"]==210
+        assert snapshot(database,other)["status"]=="NOT_PROVIDED"
+        with pytest.raises(APIError):store.owned(cid,901)
+        with pytest.raises(APIError):store.conversation(cid,900,211)
         assert store.lease(owner)
-        tid = str(uuid4())
-        store.start(cid, tid, "권한이 있을 때의 질문", owner)
-        frozen = store.context(cid, tid)["recipientProfile"]
-        assert frozen["data"]["giftPreference"] == "PRIVATE_ACCESS_CANARY"
-        store.emit(cid, tid, "turn.finished", {"status": "COMPLETED"}, owner)
-        with psycopg.connect(database["owner"]) as db:
-            db.execute("UPDATE ai_profile.read_grants SET revoked_at=now() WHERE id=%s", (allowed,))
-        assert snapshot(database, cid) == denied
-        assert store.context(cid, tid)["recipientProfile"] == frozen
-        assert store.start(cid, tid, "권한이 있을 때의 질문", owner)[1] is False
-        next_tid = str(uuid4())
-        store.start(cid, next_tid, "철회 후 새 질문", owner)
-        assert store.context(cid, next_tid)["recipientProfile"] == denied
-    finally:
-        store.close()
+        tid=str(uuid4());store.start(cid,tid,"합성 질문",owner)
+        frozen=store.context(cid,tid)["recipientProfile"]
+        record(database,210,2,payload("SYNTHETIC_NEW_VERSION"))
+        assert store.context(cid,tid)["recipientProfile"]==frozen
+        store.emit(cid,tid,"turn.finished",{"status":"COMPLETED"},owner)
+        next_tid=str(uuid4());store.start(cid,next_tid,"후속 질문",owner)
+        assert store.context(cid,next_tid)["recipientProfile"]["inputSourceVersion"]==2
+    finally:store.close()
 
 
 @pytest.mark.asyncio
@@ -542,12 +484,10 @@ def test_bound_id_requires_exact_authority_and_revocation_blocks_new_turn(databa
 async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_input(database, input_mode):
     from app.low_latency import LowLatencyRuntime
     from app.model_config import ModelCatalog
-    from app.task_budget import BudgetHTTP
     from app.turn_report import report
     store = chat_store(database)
     owner, account = str(uuid4()), "synthetic-recipient-test-only"
     store.lease(owner)
-    store.budget_import(account, 0, "0" * 64)
     friends = [(301, "PRIVATE_COFFEE_CANARY", 20), (302, "PRIVATE_BOOKS_CANARY", 30),
                (303, "PRIVATE_CAMPING_CANARY", 40)]
     product = {"productId": 101, "name": "합성 선물", "brand": "합성", "price": 10000,
@@ -642,17 +582,18 @@ async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_i
                 else:
                     record(database, rid, 1, payload(private_text, excluded))
                 assert raw_row(database, rid)[1]["giftPreference"] == private_text
+                from profiling.types import RecipientProfile
+                RecipientInputStore(database["profiler"]).record_analysis(RecipientProfile(
+                    recipient_user_id=rid,source_version=1,tag_status="ok",
+                    preferred_tags=[],disliked_tags=[]))
             cid, tid = str(uuid4()), str(uuid4())
             store.conversation(cid, 900, rid)
             if input_mode == "profile_intake":
-                assert snapshot(database, cid).get("accessStatus") == "NOT_AUTHORIZED"
-                # This isolated fixture proves the allowed data path, not an
-                # authority that the current BE can issue in production.
-            grant(database, cid, 1)
+                assert snapshot(database, cid)["data"]["recipientUserId"] == rid
             store.start(cid, tid, "친구에게 선물을 추천해 줘", owner)
             admitted = store.context(cid, tid)["recipientProfile"]
             assert admitted["status"] == "AVAILABLE"
-            assert admitted["analysisCurrent"] is analyzed
+            assert admitted["analysisCurrent"] is True
             search, sent = Search(), []
             packets = [("gift_context", {"queries": ["선물"], "changes": {}}),
                        ("show_gifts", {"product_ids": ["101"]})]
@@ -673,10 +614,25 @@ async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_i
                 runtime.init_state(adapter, search, owner)
                 runtime.model = "openai/gpt-6-luna"
                 runtime.catalog = ModelCatalog(http)
-                runtime.http = BudgetHTTP(http, adapter, account, expected_limit=5)
+                runtime.http = http
                 receipt = {"startedMonotonic": time.monotonic(), "usage": []}
                 await runtime.generate(cid, tid, receipt)
             assert len(sent) == 2 and not packets
+            # Verify the actual serialized provider body, not only a profile flag.
+            assert all(private in json.dumps(request['messages'],ensure_ascii=False) for request in sent)
+            if input_mode == "profile_intake":
+                from pathlib import Path
+                stored_text=admitted['data']['giftPreference']
+                assert all(stored_text in json.dumps(request['messages'],ensure_ascii=False) for request in sent)
+                proof={'synthetic':True,'provider':'httpx.MockTransport','migrationMode':database['migrationMode'],
+                    'recipientUserId':rid,'inputSourceVersion':admitted['inputSourceVersion'],
+                    'analysisSourceVersion':admitted['analysisSourceVersion'],
+                    'storedTextSha256':hashlib.sha256(stored_text.encode()).hexdigest(),
+                    'storedTextInEveryModelRequest':True,'modelRequests':len(sent),
+                    'searchExcludesRecipientCategory':all(excluded in q['filters']['excludeCategoryIds'] for q in search.queries),
+                    'selectedProductIds':[p['productId'] for p in receipt['selectedProducts']]}
+                with (Path(os.environ['SINGLE_SERVER_TEST_OUTPUT'])/'combined-profile-model-proof.jsonl').open('a') as file:
+                    file.write(json.dumps(proof)+'\n')
             # Raw preferences can contain negatives. Only a current analysis
             # supplies a private positive branch; pending intake uses public text.
             assert [query["query"] for query in search.queries] == ([private, "선물"] if analyzed else ["선물"])
@@ -711,15 +667,13 @@ async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_i
                     assert sensitive not in json.dumps(sent)
                     assert sensitive not in json.dumps(public)
             for _, canary, _ in friends:
-                assert canary not in json.dumps(sent) and canary not in json.dumps(public)
+                assert canary not in json.dumps(public)
+                if canary != private:assert canary not in json.dumps(sent)
                 if canary != private:
                     assert canary not in json.dumps(search.queries)
                     assert canary not in json.dumps(store.context(cid, tid))
-        before = store.budget_summary(account)
-        assert before["attempts"] == 6 and before["committedUsd"] == 0
         store.close()
         store = chat_store(database)
-        assert store.budget_summary(account) == before
         assert store.context(cid, tid)["recipientProfile"]["data"]["recipientUserId"] == 303
     finally:
         store.close()
@@ -866,7 +820,6 @@ def test_legacy_delivered_replay_recovers_exact_analysis_without_new_model(datab
         with psycopg.connect(database["owner"]) as db:
             migrate(db)
         store.conversation(cid, 900, 403)
-        grant(database, cid, 1)
         assert snapshot(database, cid)["status"] == "NOT_PROVIDED"
         intake_call(body, Catalog(), inputs, queue, run_store=runs,
                     recipient_store=RecordingRecipientStore(profiles, inputs))

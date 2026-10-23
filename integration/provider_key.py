@@ -37,6 +37,8 @@ def deployment_source(kind, env):
     def source(name):
         path = (env.get(name + "_FILE") or "").strip() or None
         value = (env.get(name) or "").strip() or None
+        if value and path and not Path(path).exists():
+            path = None  # ECS injected value replaces an absent local Compose mount.
         return path, None if path else value
     current, legacy = source(KINDS[kind]), source(LEGACY_KINDS[kind])
     selected = current if any(current) else legacy

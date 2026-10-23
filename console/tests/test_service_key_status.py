@@ -104,8 +104,7 @@ def test_console_uses_deployment_model_and_budget_defaults_without_changing_expl
         assert app.state.backend.config["expectedChatModel"] == "synthetic/explicit"
         assert app.state.backend.config["expectedProfilerModel"] == "synthetic/profiler"
         assert app.state.backend.config["budgetMode"] == "guarded"
-        assert app.state.backend.budget_policy_matches({"budgetMode": "guarded"})
-        assert not app.state.backend.budget_policy_matches({"budgetMode": "provider-key-limits"})
+        assert not hasattr(app.state.backend, "budget_policy_matches")
         assert supplied == {"expectedChatModel": "synthetic/explicit", "budgetMode": "guarded"}
         await app.state.backend.http.aclose()
         await app.state.provider_usage.close()

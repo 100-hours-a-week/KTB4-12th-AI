@@ -1,6 +1,6 @@
 """A denied new-turn snapshot must retire private retrieval, not public history.
 
-The PostgreSQL grant, expiry and revocation checks live in test_recipient_data.
+The PostgreSQL conversation-binding checks live in test_recipient_data.
 This test starts from their admitted snapshots and scripts every model decision.
 """
 import copy
@@ -12,7 +12,6 @@ import httpx
 
 from app.low_latency import LowLatencyRuntime
 from app.model_config import ModelCatalog
-from app.task_budget import BudgetHTTP
 from test_low_latency import PRODUCT, Search, Store, context, show, text, tool
 
 
@@ -44,6 +43,7 @@ async def test_revoked_profile_stops_private_retrieval_and_keeps_public_conversa
                      protocol_fixture=False, demo_profile=None)
     available = {
         "source": "AI_PROFILE_STORE", "status": "AVAILABLE", "analysisCurrent": True,
+        "inputSourceVersion":1,"analysisSourceVersion":1,
         "data": {
             "recipientUserId": 42, "sourceVersion": 1,
             "giftPreference": "PRIVATE_PROFILE_TEXT",
@@ -78,7 +78,7 @@ async def test_revoked_profile_stops_private_retrieval_and_keeps_public_conversa
         runtime.init_state(store, search, "owner")
         runtime.model = "openai/gpt-6-luna"
         runtime.catalog = ModelCatalog(http)
-        runtime.http = BudgetHTTP(http, store)
+        runtime.http = http
         for snapshot, message, replies in turns:
             tid = str(uuid4())
             await store.call("start", cid=cid, tid=tid, message=message)
@@ -108,7 +108,8 @@ async def test_revoked_profile_stops_private_retrieval_and_keeps_public_conversa
                for r in receipts)
     assert all([p["product_id"] for p in r["lowLatencyState"]["lastDisplayedProducts"]]
                == ["101"] for r in receipts)
-    wire = json.dumps(sent, ensure_ascii=False)
+    assert "PRIVATE_PROFILE_TEXT" in json.dumps(model_turns[0],ensure_ascii=False)
+    wire = json.dumps(model_turns[1:], ensure_ascii=False)
     assert all(private not in wire for private in (
         "PRIVATE_PROFILE_TEXT", "PRIVATE_PROFILE_TAG", "PRIVATE_DISLIKE_TAG"))
     # Publicly shown product 101 remains; a private-derived unshown candidate

@@ -40,7 +40,7 @@ def initialize_database(url, python, run):
         db.execute('CREATE TABLE ai_catalog.integration_marker(id boolean PRIMARY KEY CHECK(id))')
         db.execute('INSERT INTO ai_catalog.integration_marker VALUES(true)')
         db.execute('GRANT USAGE ON SCHEMA ai_runtime,ai_catalog,ai_chat,ai_profile TO ai_console_service')
-        db.execute('GRANT SELECT ON ai_runtime.database_identity,ai_catalog.integration_marker,ai_chat.turns,ai_chat.events,ai_chat.task_budget_attempts,ai_profile.profile_runs,ai_catalog.generation_products,ai_catalog.catalog_state TO ai_console_service')
+        db.execute('GRANT SELECT ON ai_runtime.database_identity,ai_catalog.integration_marker,ai_chat.turns,ai_chat.events,ai_profile.profile_runs,ai_catalog.generation_products,ai_catalog.catalog_state TO ai_console_service')
 
 
 def check_database(url):

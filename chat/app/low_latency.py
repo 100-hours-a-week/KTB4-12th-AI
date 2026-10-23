@@ -105,6 +105,10 @@ class LowLatencyRuntime(AgentRuntime):
   # message-only BE chat. Other lookup failures must remain visible failures.
   if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='UNAVAILABLE' and snapshot.get('accessStatus')!='NOT_AUTHORIZED':
    raise APIError(503,'수신자 취향의 조회 권한 또는 상태를 확인할 수 없습니다.')
+  from app.profile import recipient_model_context
+  model_profile=recipient_model_context(snapshot)
+  if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='AVAILABLE' and model_profile is None:
+   raise APIError(503,'수신자의 최신 취향 분석과 버전 확인이 필요합니다.')
   previous=last_completed_turn(conversation['turns'],tid);old=await self.store.call('context',cid=cid,tid=previous['turnId']) if previous else {}
   prepared=self.admissions.get(tid,{}).get('prepared_context')
   # Metadata failure must not prevent a one-call ordinary conversation.
@@ -139,6 +143,7 @@ class LowLatencyRuntime(AgentRuntime):
    if prepared['snapshotId']!=catalog.snapshot:raise APIError(409,'준비된 후보의 상품 snapshot이 변경됐습니다. 새 질문 ID로 후보를 다시 준비해 주세요.')
    profile=profile.model_copy(update={'candidate_ids':[str(x) for x in prepared['productIds']]})
   session=Session(cid,profile,prior_filters);session.public_exclusions=list(prior_filters.exclude_category_ids)
+  session.recipient_preferences=model_profile
   session.filter_sources=copy.deepcopy(prior_state.get('filterSources',{})) if same else {}
   session.product_exclusion_sources=copy.deepcopy(prior_state.get('productExclusionSources',{})) if same else {}
   session.last_queries=copy.deepcopy(prior_state.get('lastQueries',[])) if same else []

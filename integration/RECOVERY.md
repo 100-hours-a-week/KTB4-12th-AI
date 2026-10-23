@@ -22,7 +22,7 @@ pg_restore --dbname='service=ai_restore_copy' --no-password --exit-on-error /pro
 [실행 안내의 환경 설정](README.md#실제-서비스-준비)을 마친 새 DB 또는 검증용 복사 DB에서 전용 `ai_migrator`로 실행합니다. `PROFILING_APP_DB_PASSWORD`는 설정하지 않습니다.
 
 ```sh
-docker compose -f integration/containers/compose.guarded.yaml --profile migration run --rm migrate
+docker compose -f integration/containers/compose.yaml --profile migration run --rm migrate
 ```
 
 이 명령은 에멧 `0011`과 통합 스키마·권한·DB identity를 적용합니다. 같은 DB·버전의 재실행은 변경 없이 끝납니다. 이미지 밖에서 실행할 때도 `MIGRATION_DATABASE_URL_FILE`과 `AI_DATABASE_NAME`을 준비하고 `python -m integration.migrate_single_server --database "$AI_DATABASE_NAME" --emmet`를 사용합니다. 기존 역할의 자격 증명은 바꾸지 않습니다.

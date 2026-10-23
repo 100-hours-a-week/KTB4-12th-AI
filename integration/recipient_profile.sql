@@ -1,5 +1,8 @@
 -- Chat reads only the recipient of an existing trusted conversation. No raw
 -- profile table grant, caller-supplied recipient ID, HTTP lookup or BE round trip.
+-- The existing service-authenticated BE conversation is the authority. This
+-- function accepts only its immutable conversation UUID, not a recipient ID;
+-- PUBLIC has no execute permission and only ai_chat_service may call it.
 CREATE OR REPLACE FUNCTION ai_profile.chat_recipient_snapshot(conversation_id uuid)
 RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -9,24 +12,12 @@ AS $$
     WHERE c.id = conversation_id AND c.demo_profile IS NULL
       AND NOT c.protocol_fixture
       AND NOT EXISTS (SELECT 1 FROM ai_chat.sessions s WHERE s.sender = c.sender)
-  ), authorized AS (
-    -- The current BE only checks whether both users are active. A conversation
-    -- binding alone does not prove permission to use private profile data.
-    SELECT b.* FROM bound b WHERE EXISTS (
-      SELECT 1 FROM ai_profile.read_grants g WHERE g.caller_user_id=b.sender
-        AND g.recipient_user_id=b.recipient AND g.revoked_at IS NULL
-        AND g.expires_at > statement_timestamp()
-    )
   ), profile AS (
     SELECT i.*, r.status AS run_status, r.tag_status AS run_tag_status,
       (i.successful_analysis->>'sourceVersion')::bigint AS analyzed_version
-    FROM authorized b JOIN ai_profile.recipient_inputs i ON i.recipient_user_id = b.recipient
+    FROM bound b JOIN ai_profile.recipient_inputs i ON i.recipient_user_id = b.recipient
     LEFT JOIN ai_profile.profile_runs r ON r.recipient_user_id = i.recipient_user_id
       AND r.source_version = i.source_version
-    WHERE EXISTS (SELECT 1 FROM ai_profile.read_grants g
-      WHERE g.caller_user_id=b.sender AND g.recipient_user_id=b.recipient
-        AND g.source_version=i.source_version AND g.revoked_at IS NULL
-        AND g.expires_at > statement_timestamp())
   )
   SELECT COALESCE((SELECT jsonb_build_object(
     'source', 'AI_PROFILE_STORE',
@@ -58,8 +49,8 @@ AS $$
     )
   ) FROM profile), CASE
     WHEN NOT EXISTS(SELECT 1 FROM bound)
-      OR (EXISTS(SELECT 1 FROM authorized) AND NOT EXISTS(
-        SELECT 1 FROM authorized b JOIN ai_profile.recipient_inputs i ON i.recipient_user_id=b.recipient))
+      OR NOT EXISTS(
+        SELECT 1 FROM bound b JOIN ai_profile.recipient_inputs i ON i.recipient_user_id=b.recipient)
       THEN '{"source":"AI_PROFILE_STORE","status":"NOT_PROVIDED"}'::jsonb
     ELSE '{"source":"AI_PROFILE_STORE","status":"UNAVAILABLE","accessStatus":"NOT_AUTHORIZED"}'::jsonb END)
 $$;

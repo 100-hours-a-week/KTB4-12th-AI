@@ -5,8 +5,6 @@ from datetime import datetime
 import copy
 import json
 import time
-import math
-from decimal import Decimal
 from psycopg.rows import dict_row
 from psycopg.errors import InsufficientPrivilege, UndefinedColumn, UndefinedTable
 from psycopg.types.json import Jsonb
@@ -43,46 +41,6 @@ class Store:
    # for zero work before closing this gate races with every new admission.
    db.execute('UPDATE admission_control SET paused=%s WHERE id=1',(paused,))
   return {'paused':paused}
- def budget_import(self,account,committed,source_hash):
-  # Operator-only migration; deliberately absent from authenticated RPC methods.
-  amount=Decimal(str(committed))
-  if not amount.is_finite() or not 0<=amount<=5 or len(source_hash)!=64:raise ValueError('Invalid ledger import')
-  with self.pool.connection() as db:
-   db.execute('INSERT INTO task_budget_accounts(id,limit_usd,imported_usd,import_hash) VALUES(%s,5,%s,%s) ON CONFLICT DO NOTHING',(account,amount,source_hash))
-   row=db.execute('SELECT * FROM task_budget_accounts WHERE id=%s FOR UPDATE',(account,)).fetchone()
-   if row['imported_usd']!=amount or row['import_hash']!=source_hash:raise ValueError('Existing ledger migration differs; no reset allowed')
-  return self.budget_summary(account)
- def budget_summary(self,account):
-  with self.pool.connection() as db:
-   row=db.execute('SELECT * FROM task_budget_accounts WHERE id=%s',(account,)).fetchone()
-   if row is None:raise APIError(503,'유료 테스트 예산 이관을 확인하고 있습니다.')
-   extra=db.execute('SELECT coalesce(sum(coalesce(actual_usd,reserved_usd)),0) charged,count(*) attempts FROM task_budget_attempts WHERE account=%s',(account,)).fetchone()
-   charged=row['imported_usd']+extra['charged']
-   return {'limitUsd':float(row['limit_usd']),'committedUsd':float(charged),'remainingUsd':float(max(Decimal(0),row['limit_usd']-charged)),'attempts':extra['attempts'],'halted':row['halted']}
- def budget_reserve(self,account,ident,amount,model):
-  value=Decimal(str(amount))
-  if not value.is_finite() or not 0<value<=5:raise APIError(429,'이 요청은 남은 테스트 예산을 초과합니다.')
-  with self.pool.connection() as db:
-   row=db.execute('SELECT * FROM task_budget_accounts WHERE id=%s FOR UPDATE',(account,)).fetchone()
-   if row is None:raise APIError(503,'유료 테스트 예산 이관을 확인하고 있습니다.')
-   old=db.execute('SELECT * FROM task_budget_attempts WHERE id=%s',(ident,)).fetchone()
-   if old:
-    if old['account']!=account or old['reserved_usd']!=value or old['model']!=model:raise APIError(409,'예산 예약 요청이 다릅니다.')
-    return True
-   extra=db.execute('SELECT coalesce(sum(coalesce(actual_usd,reserved_usd)),0) charged FROM task_budget_attempts WHERE account=%s',(account,)).fetchone()['charged']
-   if row['halted'] or row['imported_usd']+extra+value>row['limit_usd']:raise APIError(429,'누적 유료 테스트 예산이 부족합니다. 무료 연동 테스트를 이용해 주세요.')
-   db.execute('INSERT INTO task_budget_attempts(id,account,reserved_usd,model) VALUES(%s,%s,%s,%s)',(ident,account,value,model))
-  return True
- def budget_finish(self,account,ident,cost,status):
-  value=Decimal(str(cost)) if type(cost) in (int,float) and math.isfinite(cost) and cost>=0 else None
-  with self.pool.connection() as db:
-   row=db.execute('SELECT * FROM task_budget_accounts WHERE id=%s FOR UPDATE',(account,)).fetchone()
-   attempt=db.execute('SELECT * FROM task_budget_attempts WHERE id=%s AND account=%s FOR UPDATE',(ident,account)).fetchone()
-   if row is None or attempt is None:raise APIError(404,'예산 예약이 없습니다.')
-   if attempt['finished'] is not None:return True
-   db.execute('UPDATE task_budget_attempts SET actual_usd=%s,status=%s,finished=now() WHERE id=%s',(value,'received' if status=='received' else 'unknown',ident))
-   if value is not None and value>attempt['reserved_usd']:db.execute("UPDATE task_budget_accounts SET halted='cost_exceeded_reservation' WHERE id=%s",(account,))
-  return True
  def lease(self,owner,release=False,recover=False,next_owner=None,claim=False,inspect=False):
   # Cancelling asyncio.to_thread does not stop its DB call. Bound the synchronous
   # release itself so an unavailable pool cannot consume the shutdown grace.

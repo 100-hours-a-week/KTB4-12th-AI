@@ -7,6 +7,7 @@ the current atomic record. No old token is retained as a fallback.
 import hmac
 import os
 import re
+from pathlib import Path
 
 from integration.provider_key import ProviderKey, KeyUnavailable, environment
 
@@ -39,6 +40,8 @@ class ServiceToken(ProviderKey):
         shared = shared_token_configured(env)
         path = env.get("BE_SERVICE_TOKEN_FILE") if shared else env.get(kind.upper() + "_BE_SERVICE_TOKEN_FILE")
         value = env.get("BE_SERVICE_TOKEN") if shared else env.get(legacy)
+        if value and path and not Path(path).exists():
+            path = None
         backend = env.get("AI_CREDENTIAL_BACKEND", "files")
         if backend not in {"files", "aws-secrets-manager"}:
             raise KeyUnavailable("CREDENTIAL_BACKEND_INVALID")

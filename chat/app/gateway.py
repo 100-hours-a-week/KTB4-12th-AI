@@ -7,7 +7,7 @@ from app.store import Store
 from app.errors import APIError,install_error_handlers
 from pydantic import BaseModel,ConfigDict
 TOKEN=os.environ['STORE_TOKEN']
-METHODS={'review_report','report_summary','conversation_feedback','admin_reports','own_feedback','budget_summary','budget_reserve','budget_finish','health','lease','conversation','read','existing_turn','start','emit','replay','context','session','owned','list_conversations','feedback','admin','binding','admin_conversations','admin_conversation','admin_turn_review','recipient_context'}
+METHODS={'review_report','report_summary','conversation_feedback','admin_reports','own_feedback','health','lease','conversation','read','existing_turn','start','emit','replay','context','session','owned','list_conversations','feedback','admin','binding','admin_conversations','admin_conversation','admin_turn_review','recipient_context'}
 @asynccontextmanager
 async def lifespan(app):
  app.state.store=Store(os.environ['DATABASE_URL']);yield;app.state.store.close()

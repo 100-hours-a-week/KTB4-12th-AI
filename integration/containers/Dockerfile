@@ -22,9 +22,9 @@ COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=encoder /usr/local/bin/node /usr/local/bin/node
 COPY --from=encoder /opt/encoder /opt/encoder
 # Only runtime/migration adapters; historical launchers and fake BE stay out.
-COPY integration/audit_profile_database.py integration/database_identity.py integration/migrate_single_server.py integration/profile_callback.py integration/profile_contract.py integration/profiler_boundary.py integration/profiler_generation.py integration/profiler_health.py integration/profiler_rebind.py integration/profiler_runtime.py integration/search_sync.py integration/shared_budget.py integration/shared_search_binding.py /workspace/integration/
+COPY integration/audit_profile_database.py integration/database_identity.py integration/migrate_single_server.py integration/profile_callback.py integration/profile_contract.py integration/profiler_boundary.py integration/profiler_generation.py integration/profiler_health.py integration/profiler_rebind.py integration/profiler_runtime.py integration/search_sync.py integration/shared_search_binding.py /workspace/integration/
 COPY integration/provider_key.py integration/service_token.py integration/aws_credentials.py /workspace/integration/
-COPY integration/containers/entrypoint.py integration/containers/relay.py integration/containers/health.py /workspace/integration/containers/
+COPY integration/containers/entrypoint.py integration/containers/health.py /workspace/integration/containers/
 COPY integration/recipient_data.py integration/recipient_profile.sql /workspace/integration/
 COPY product-search/catalog_db.py /workspace/product-search/
 COPY product-search/search/encoder_contract.py /workspace/product-search/search/
@@ -90,7 +90,7 @@ COPY profiling/src/profiling/vocab_data /workspace/profiling/src/profiling/vocab
 COPY chat/*.md /workspace/chat/
 COPY integration/database_identity.py /workspace/integration/
 COPY integration/provider_key.py integration/service_token.py integration/aws_credentials.py /workspace/integration/
-COPY integration/containers/entrypoint.py integration/containers/relay.py integration/containers/health.py /workspace/integration/containers/
+COPY integration/containers/entrypoint.py integration/containers/health.py /workspace/integration/containers/
 USER 10001:10001
 ENTRYPOINT ["python","-m","integration.containers.entrypoint"]
 CMD ["chat"]
@@ -138,10 +138,6 @@ COPY integration/tests/media /workspace/integration/tests/media
 RUN mkdir -p /shared && chown 10001:10001 /shared
 USER 10001:10001
 ENTRYPOINT ["python","-m","integration.containers.smoke_init"]
-
-FROM profiler-smoke AS budget-smoke
-COPY integration/containers/smoke_budget.py /workspace/integration/containers/
-ENTRYPOINT ["python","-m","uvicorn","integration.containers.smoke_budget:app","--host","127.0.0.1","--port","18942","--no-access-log"]
 
 FROM profiler-smoke AS smoke-check
 COPY integration/containers/smoke_check.py /workspace/integration/containers/
