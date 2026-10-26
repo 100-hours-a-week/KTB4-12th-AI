@@ -219,6 +219,9 @@ STATE_JSON\n'''
         return SimpleNamespace(message=selection.message, products=selection.products, filters=filters,
                                model_dump=lambda: {**selection.model_dump(), 'filters': filters.model_dump()})
 
+    def numeric_reason(self, reason, filters, truth):
+        return reason
+
     def validate_show(self, args, s, observed, prior=None):
         for pick in args.products:
             truth = self.catalog.products.get(pick.product_id)
@@ -237,7 +240,7 @@ STATE_JSON\n'''
             # Permit source-backed quantities while still rejecting unsupported
             # numeric units. This check does not claim semantic entailment of prose.
             pattern = r'\d+(?:[.,]\d+)*(?:\s*(?:kg|mg|ml|cm|mm|GB|TB|oz|팩|개|켤레|세트|인치|원|%|g|m|L))?'
-            for value in re.findall(pattern, pick.reason, re.IGNORECASE):
+            for value in re.findall(pattern, self.numeric_reason(pick.reason, args.filters, truth), re.IGNORECASE):
                 value = re.sub(r'(?<=\d),(?=\d)', '', normalized(value))
                 if not re.search(r'(?<![\d.])' + re.escape(value) + r'(?!\d|\.\d)', source):
                     raise ProviderError('unsupported_numeric_claim')

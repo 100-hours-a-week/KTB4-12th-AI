@@ -9,6 +9,7 @@ from test_hf_integration import FixtureStore
 
 META={'snapshotId':'synthetic-v1','categories':[{'id':10,'name':'생활','group':'생활','parentId':1},{'id':20,'name':'식품','group':'식품','parentId':2}]}
 PRODUCT={'productId':101,'name':'합성 책받침','brand':'합성','price':10000,'category':'생활','categoryId':10,'description':'책을 올려 두는 합성 테스트 상품','productType':'Shipping','availability':'AVAILABLE'}
+REASON='책을 올려 두는 용도가 확인되어 책받침 후보로 골랐어요.'
 class Search:
  def __init__(self):self.queries=[];self.hydrations=[]
  async def metadata(self):return META
@@ -34,7 +35,7 @@ def text(value):return {'choices':[{'delta':{'content':value},'finish_reason':'s
 def tool(name,args):return {'choices':[{'delta':{'tool_calls':[{'index':0,'id':'synthetic-call','function':{'name':name,'arguments':json.dumps(args,ensure_ascii=False)}}]},'finish_reason':'tool_calls'}],'usage':{'prompt_tokens':10,'completion_tokens':10,'cost':.001}}
 def context(scope='current',budget=None):
  return {'queries':['책받침'],'changes':{'max_price':budget} if budget is not None else {}}
-def show(final=True):return {'product_ids':['101']}
+def show(final=True):return {'product_ids':['101'],'reasons':[{'product_id':'101','reason':REASON}]}
 async def run(packets,prepared=None,private=False,old=None,message="합성 질문",stored=None):
  store=Store();search=Search();sent=[];cid,tid=str(uuid.uuid4()),str(uuid.uuid4())
  await store.call('conversation',cid=cid,sender=7,recipient=42,protocol_fixture=False,demo_profile=None)
@@ -113,7 +114,7 @@ async def test_two_public_queries_keep_both_branches_with_private_retrieval(monk
  monkeypatch.setattr(Search,'search',search);monkeypatch.setattr(Search,'get_products',hydrate)
  receipt,sent,store,search,cid,tid=await run([
   tool('gift_context',{'queries':queries,'changes':{'max_price':20000}}),
-  tool('show_gifts',{'product_ids':['3001']})],private=private)
+  tool('show_gifts',{'product_ids':['3001'],'reasons':[{'product_id':'3001','reason':REASON}]})],private=private)
  assert [q['query'] for q in search.queries]==([private_query] if private else [])+queries
  assert receipt['searchBranches']==(3 if private else 2)
  observed=[p['productId'] for p in receipt['observedProducts']]
@@ -134,7 +135,8 @@ async def test_model_selected_count_and_order_are_preserved_not_inferred(monkeyp
  async def search(self,body,snapshot_id):return {'snapshotId':snapshot_id,'hits':products}
  monkeypatch.setattr(Search,'get_products',hydrate);monkeypatch.setattr(Search,'search',search)
  ids=[str(p['productId']) for p in reversed(products[:count])]
- receipt,sent,*_=await run([tool('gift_context',context()),tool('show_gifts',{'product_ids':ids})],message=message)
+ receipt,sent,*_=await run([tool('gift_context',context()),tool('show_gifts',{'product_ids':ids,
+  'reasons':[{'product_id':ident,'reason':REASON} for ident in ids]})],message=message)
  assert [str(p['productId']) for p in receipt['selectedProducts']]==ids
  # Even the intentionally inconsistent 'one' + three-ID decision is preserved.
  # Natural-language interpretation is a separate, unmeasured model-quality concern.
@@ -228,13 +230,15 @@ async def test_search_can_end_in_explanation_without_forced_cards():
  assert not receipt.get('selectedProducts') and len(sent)==2
 
 async def test_invalid_id_cannot_become_public_card():
+ invalid={'product_ids':['999'],'reasons':[{'product_id':'999','reason':REASON}]}
  with pytest.raises(Exception):
-  await run([tool('gift_context',context()),tool('show_gifts',{'product_ids':['999']}),tool('show_gifts',{'product_ids':['999']})])
+  await run([tool('gift_context',context()),tool('show_gifts',invalid),tool('show_gifts',invalid)])
 
 async def test_max_three_is_schema_validation_not_truncation():
  from app.integrated_harness import IntegratedHarness,PublicListing
  from pydantic import ValidationError
- with pytest.raises(ValidationError):IntegratedHarness.selection_model.model_validate({'product_ids':['1','2','3','4']})
+ with pytest.raises(ValidationError):IntegratedHarness.selection_model.model_validate({'product_ids':['1','2','3','4'],
+  'reasons':[{'product_id':ident,'reason':REASON} for ident in ['1','2','3','4']]})
  with pytest.raises(ValidationError):PublicListing.model_validate({'product_ids':['1','2','3','4']})
 
 async def test_successive_request_retains_display_memory_and_quantity_change(monkeypatch):
@@ -281,18 +285,18 @@ def test_integrated_source_identity_covers_contract_limits_and_profiler_policy()
 @pytest.mark.parametrize('message',[None,'',' \n '])
 @pytest.mark.parametrize('operation',['show_gifts','list_gifts'])
 async def test_optional_card_introduction_never_persists_empty_text(message,operation):
- payload={'product_ids':['101']}
+ payload=show()
  if operation=='list_gifts':payload['format']='brief'
  if message is not None:payload['message']=message
  receipt,sent,store,search,cid,tid=await run([tool('gift_context',context()),tool(operation,payload)])
  assert [e['event'] for e in store.events[tid]]==['progress','cards']
- assert store.states[tid]['blocks']==[{'type':'cards','products':[{'productId':101,'reason':'상품 정보: 책을 올려 두는 합성 테스트 상품'}]}]
+ assert store.states[tid]['blocks']==[{'type':'cards','products':[{'productId':101,'reason':REASON}]}]
  assert len(sent)==2 and not store.budget
  assert receipt['selectedProducts'][0]['productId']==101
 
 async def test_meaningful_card_introduction_remains_in_stream_and_saved_state():
  message='책을 올려 두기 좋은 상품이에요.'
- receipt,sent,store,search,cid,tid=await run([tool('gift_context',context()),tool('show_gifts',{'product_ids':['101'],'message':message})])
+ receipt,sent,store,search,cid,tid=await run([tool('gift_context',context()),tool('show_gifts',{**show(),'message':message})])
  assert [e['data']['delta'] for e in store.events[tid] if e['event']=='answer.delta']==[message]
  assert store.states[tid]['blocks'][0]=={'type':'text','text':message}
 

@@ -3,19 +3,73 @@
 import copy
 import hashlib
 import json
+import re
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
-from pydantic import Field
+from pydantic import Field, ValidationError, field_validator, model_validator
 
-from app.card_contract import catalog_reason, harness_cards
-from app.gift_browse import decision_product
-from app.gift_clean_io import Listing
+from app.card_contract import harness_cards
+from app.gift_clean_io import Listing, Selection
 from app.gift_conversation import ConversationHarness
-from app.limits import MAX_CARD_PRODUCTS
+from app.gift_core.contracts import Filters, Strict
+from app.gift_guided import GuidedHarness
+from app.limits import MAX_CARD_PRODUCTS, MAX_CARD_REASON_LENGTH
+
+
+class RecommendationReason(Strict):
+    product_id: str = Field(min_length=1, max_length=100)
+    reason: str = Field(
+        min_length=1, max_length=MAX_CARD_REASON_LENGTH,
+        description="사용자가 말한 조건과 이 상품의 조회 근거를 연결한 추천 이유. 없는 취향·특성은 추측하지 않는다.",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def meaningful_reason(cls, value):
+        if not value.strip():
+            raise ValueError("blank_recommendation_reason")
+        return value.strip()
+
+
+def _validate_reason_ids(product_ids, reasons):
+    if len(set(product_ids)) != len(product_ids):
+        raise ValueError("duplicate_selected_id")
+    if [item.product_id for item in reasons] != product_ids:
+        raise ValueError("recommendation_reason_ids_mismatch")
+
+
+class PublicSelection(Selection):
+    # Keep the versioned PC selection model unchanged. Serving requires one
+    # explicit ID/reason pair per selected ID, including [] for no selection.
+    reasons: list[RecommendationReason] = Field(
+        max_length=MAX_CARD_PRODUCTS,
+        description="product_ids와 같은 ID·순서로 상품마다 추천 이유 하나. 선택이 없으면 [].",
+    )
+
+    @model_validator(mode="after")
+    def matched_reasons(self):
+        _validate_reason_ids(self.product_ids, self.reasons)
+        return self
+
+
 class PublicListing(Listing):
     product_ids: list[str] = Field(
         max_length=MAX_CARD_PRODUCTS, description="요청한 수 이하, 최대 3개 상품 ID"
     )
+    reasons: list[RecommendationReason] = Field(
+        default_factory=list, max_length=MAX_CARD_PRODUCTS,
+        description="brief 카드에는 product_ids와 같은 ID·순서로 추천 이유를 작성. names에는 생략.",
+    )
+
+    @model_validator(mode="after")
+    def matched_reasons(self):
+        if self.format == "brief":
+            _validate_reason_ids(self.product_ids, self.reasons)
+        elif self.reasons:
+            raise ValueError("names_listing_has_no_reasons")
+        return self
 
 
 def _product_exclusion_sources(session):
@@ -35,28 +89,111 @@ def _product_exclusion_sources(session):
 class IntegratedHarness(ConversationHarness):
     """Keep PC decisions; validate their display at the public transport boundary."""
 
+    selection_model = PublicSelection
     listing_model = PublicListing
 
-    def explanation(self, product):
-        return catalog_reason(decision_product(product))
+    def numeric_reason(self, reason, filters, truth):
+        # Only local, positively sourced budget references or a direct comparison
+        # from the actual product price may omit a boundary number. Other costs,
+        # exact prices and physical claims retain the original numeric guard.
+        number = r'[+\-−]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
+        money = number + r'\s*(?:천|만)?\s*원'
+        label = r'(?:요청(?:하신|한)(?:\s*(?:예산|상한|하한))?|예산|상한|하한)(?:은|는|인|의|이|가)?'
+        pattern = (
+            r'(?<![\d.,+\-−])(?:(?P<label>' + label + r')\s*|'
+            r'(?:(?:상품\s*)?가격(?:은|이|는)?\s*)?(?P<price>' + money + r')'
+            r'\s*(?:으로|이라|이므로|로)\s*(?:요청(?:하신|한)\s*)?)'
+            r'(?P<amount>' + money + r')\s*(?P<direction>이하|이내|이상)'
+        )
+        def amount(text):
+            text = re.sub(r'\s+', '', text).replace(',', '').replace('−', '-').removesuffix('원')
+            scale = {'천': 1000, '만': 10000}.get(text[-1], 1)
+            return Decimal(text[:-1] if scale != 1 else text) * scale
+        def checked(match):
+            # A label in another clause must not authorize a shipping/subscription
+            # cost, nor may a match restart inside a signed or unrelated amount.
+            prefix = reason[:match.start()].rstrip()
+            clause_start = (not prefix or prefix[-1] in '.!?;,\n'
+                            or re.search(r'(?:이며|이고|고|며|지만|그리고|또한)$', prefix))
+            value = amount(match['amount'])
+            lower = match['direction'] == '이상'
+            bound = filters.min_price if lower else filters.max_price
+            label_text = match['label'] or ''
+            negated = re.match(r'\s*(?:가|는|도)?\s*(?:아니|아닌|아닙)', reason[match.end():])
+            if (not clause_start or value < 0 or bound is None or value != bound or negated
+                    or '상한' in label_text and lower or '하한' in label_text and not lower):
+                return match[0]
+            if match['price'] is not None and amount(match['price']) != truth['price']:
+                return match[0]
+            if (truth['price'] < bound if lower else truth['price'] > bound):
+                return match[0]
+            # Preserve the product-price token and all other numbers for normal
+            # validation; only this proven current boundary is substituted.
+            return match[0][:match.start('amount')-match.start()] + '검증된 요청 예산 범위'
+        return re.sub(pattern, checked, reason)
+
+    def show_args(self, selection, filters):
+        return SimpleNamespace(
+            message=selection.message, products=selection.reasons, filters=filters,
+            model_dump=lambda: {**selection.model_dump(), "filters": filters.model_dump()},
+        )
 
     def validate_show(self, *args, **kwargs):
-        cards, filters = super().validate_show(*args, **kwargs)
+        # Model-authored reasons need the original numeric/brand/observed-ID
+        # guards. StableHarness intentionally bypasses them for catalog prose
+        # and overwrites reasons; that legacy rendering is not used in serving.
+        cards, filters = GuidedHarness.validate_show(self, *args, **kwargs)
         if cards:
             harness_cards(cards)  # Before the harness emits introductory text.
         return cards, filters
 
     async def prepare_answer_tool(self, name, payload, schema, session):
-        await super().prepare_answer_tool(name, payload, schema, session)
-        if name == "list_gifts":
-            products = (self._pending.get() or {}).get("gallery")
-            if products:
-                harness_cards(
-                    products
-                )  # Internal CatalogBlock's 700-char cap is insufficient.
+        if name != "list_gifts":
+            return await super().prepare_answer_tool(name, payload, schema, session)
+        pending = self._pending.get()
+        pending.pop("gallery", None)
+        args = self.listing_model.model_validate(payload)
+        cached, by_id = self.validate_list(args, session)
+        if args.format != "brief" or not args.product_ids:
+            return
+        # Retain the gallery's cache/scope, hydration and filter checks, then
+        # validate the supplied reasons just as for recommendation cards.
+        rows, unknown = await self.catalog.hydrate(args.product_ids)
+        if unknown or {p["product_id"] for p in rows} != set(args.product_ids):
+            raise ValueError("unobserved_product_id")
+        resolved = Filters.model_validate(cached["resolvedFilters"])
+        if any(not self.catalog.allowed(row, resolved) for row in rows):
+            raise ValueError("selected_product_violates_filters")
+        self.validate_brands(args, {row["product_id"]: row for row in rows})
+        filters = Filters.model_validate(cached["filters"])
+        products, _ = self.validate_show(self.show_args(args, filters), session, by_id, filters)
+        pending["gallery"] = products
+
+    def feedback(self, exc):
+        if isinstance(exc, ValidationError):
+            allowed = {"product_ids", "reasons", "product_id", "reason", "message", "format"}
+            if all(all(isinstance(x, int) or x in allowed for x in e["loc"]) for e in exc.errors()):
+                return {"code": "invalid_tool_arguments", "fields": [
+                    {"location": ".".join(map(str, e["loc"])), "type": e["type"]}
+                    for e in exc.errors(include_input=False, include_context=False, include_url=False)[:8]],
+                    "hint": "카드는 요청 수 이하, 최대 3개입니다. product_ids와 같은 ID·순서의 reasons에 각 상품의 근거 있는 이유를 1–200자로 쓰세요. 빈 이유나 상품 설명 대체는 허용되지 않습니다."}
+        return super().feedback(exc)
+
+    def selection_contract(self):
+        result = super().selection_contract()
+        result["instruction"] += " show_gifts와 list_gifts(format=brief)는 product_ids마다 같은 순서의 reasons({product_id, reason})가 필요합니다."
+        return result
 
     def system_prompt(self, session, request):
         prompt = super().system_prompt(session, request)
+        prompt = prompt.replace("STATE_JSON\n",
+            "show_gifts와 list_gifts(format=brief)의 reasons에는 product_ids와 같은 ID·순서로 "
+            "각 상품의 추천 이유를 1–200자로 쓴다. 사용자가 말한 용도·조건과 조회된 해당 상품의 "
+            "실제 근거를 연결한다. 상품 설명·치수만 복사하거나 공통 message로 대신하지 않는다. "
+            "전달받지 않은 수신자 취향·상품 특성은 만들지 않는다. 다른 수신자나 실패·취소된 요청의 "
+            "조건을 현재 수신자의 취향으로 옮기지 않는다. 근거가 부족하면 억지로 추천하지 말고 "
+            "미확인 사항을 설명하거나 질문한다. 사진 재표시도 현재 근거로 이유를 작성한다. "
+            "names 목록은 reasons를 생략한다. 상품 이미지는 BE가 관리한다.\nSTATE_JSON\n")
         prompt = prompt.replace(
             "사진·가격·설명이나 4개 이상 목록이면", "사진·가격·설명이면"
         ).replace(
@@ -187,7 +324,7 @@ def _build_protocol_manifest():
         for name in ("models.py", "service.py", "common_api.py")
         if (search / name).is_file()
     }
-    result["integrationAdapter"] = "ai-be-v1/max3/1"
+    result["integrationAdapter"] = "ai-be-v1/max3/reasons/2"
     result["retrievalSourceLocation"] = (
         "local-review-checkout"
         if result["retrievalSourceHashes"]
