@@ -63,16 +63,16 @@ async def public_read(store, cid, tid, monkeypatch, after=0):
 
 
 @pytest.mark.parametrize('operation', ['show_gifts', 'list_gifts'])
-async def test_complete_short_fact_and_public_get_replay(operation, monkeypatch):
+async def test_model_reason_survives_long_description_and_public_get_replay(operation, monkeypatch):
     description = '합성 상품 설명입니다. ' * 25 + '특정 옵션에만 해당합니다.'
     monkeypatch.setitem(fixture.PRODUCT, 'description', description)
-    args = {'product_ids': ['101'], **({'format': 'brief'} if operation == 'list_gifts' else {})}
+    args = {**fixture.show(), **({'format': 'brief'} if operation == 'list_gifts' else {})}
     receipt, _, store, _, cid, tid = await fixture.run([
         fixture.tool('gift_context', fixture.context()), fixture.tool(operation, args)])
     await store.call('emit', cid=cid, tid=tid, kind='turn.finished', payload={'status': 'COMPLETED'})
     card = next(b for b in store.states[tid]['blocks'] if b['type'] == 'cards')
     CardsBlock.model_validate(card)
-    assert card['products'] == [{'productId': 101, 'reason': '상품 정보: ' + fixture.PRODUCT['name']}]
+    assert card['products'] == [{'productId': 101, 'reason': fixture.REASON}]
     assert receipt['selectedProducts'][0]['description'] == description
     snapshot, conversation, events = await public_read(store, cid, tid, monkeypatch)
     assert conversation['turns'] == [snapshot]
@@ -110,10 +110,12 @@ def test_valid_snapshot_preserves_existing_block_boundaries():
 async def test_invalid_preparation_never_commits_intro_or_cards(operation, invalid_reason, monkeypatch):
     store = fixture.Store()
     monkeypatch.setattr(fixture, 'Store', lambda: store)
-    monkeypatch.setattr(IntegratedHarness, 'explanation', lambda *_: (invalid_reason, {'field': 'synthetic'}))
-    args = {'product_ids': ['101'], **({'format': 'brief'} if operation == 'list_gifts' else {})}
+    args = {'product_ids': ['101'], 'reasons': [{'product_id': '101', 'reason': invalid_reason}],
+            'message': '검증이 끝나기 전에는 보이면 안 되는 안내',
+            **({'format': 'brief'} if operation == 'list_gifts' else {})}
     with pytest.raises(ProviderError):
-        await fixture.run([fixture.tool('gift_context', fixture.context()), fixture.tool(operation, args)])
+        await fixture.run([fixture.tool('gift_context', fixture.context()),
+                           fixture.tool(operation, args), fixture.tool(operation, args)])
     tid, state = next(iter(store.states.items()))
     assert not state['blocks']
     assert not any(e['event'] in ('cards', 'answer.delta') for e in store.events[tid])

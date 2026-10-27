@@ -25,3 +25,39 @@ message로 아래 시나리오를 선택합니다. 일반 질문은 cards와 같
 | `/mock timeout` | 부분 답변 후 약 2초 대기하고 FAILED; 시간 초과 표시 |
 
 시간은 시나리오의 대기 설정이며 응답 시간 보장은 아닙니다. timeout은 실제 생성 기한 180초를 기다리지 않고 실패 처리를 확인합니다. 상품 ID 900000001–900000003은 가상 ID이며 실제 상품 조회·구매에 사용하지 않습니다.
+
+## 상품별 추천 이유 합성 회귀
+
+서비스용 `IntegratedHarness`의 `show_gifts`는 기존 `product_ids`와 별도로 `reasons`를 요구합니다. 각 항목은 `{"product_id":"101","reason":"책을 받쳐 읽으려는 요청에 맞는 후보예요."}`이며, `product_ids`와 ID·순서가 정확히 같아야 합니다. 선택이 없으면 두 배열을 모두 `[]`로 보냅니다. `list_gifts(format=brief)`도 같은 검증을 거쳐 카드로 내보내고, 이름만 출력하는 `format=names`는 이유를 생략합니다.
+
+각 이유는 1–200자이며 공백만 있는 값, 잘못된 타입, 누락·추가·중복·순서가 다른 ID는 거부합니다. 긴 이유를 자르거나 상품 설명·공통 message로 대신 채우지 않습니다. 양 끝 공백은 기존 외부 카드와 같이 정리하지만 입력 자체가 200자를 넘으면 거부합니다. 관찰한 ID·필터·브랜드·수치 근거, snapshot·수신자 범위, 취소와 호출 예산 검증도 유지합니다. 서비스의 실제 모델 요청 상한은 2회이므로 검색 후 잘못된 선택을 받으면 추가 모델 호출 없이 실패할 수 있습니다. 하네스의 오류 피드백은 현재 스키마로 정정을 안내하지만 추가 호출을 보장하지 않습니다.
+
+외부 AI–BE 계약은 그대로 `products: [{productId, reason}]`, 최대 3개입니다. 이미지 관리와 조회는 BE 책임입니다. 더 적은 요청 수를 따르도록 프롬프트에 지시하고 선택된 수·순서를 늘리거나 자르지 않습니다. 자연어로 요청한 수를 모델이 올바르게 해석하는지는 이 mock 검사로 증명하지 않습니다.
+
+호환 범위: `gift_clean_io.Selection`과 과거 버전별 PC 하네스·학습 fixture는 변경하지 않습니다. 서비스 하네스만 새 내부 스키마를 사용하며, 구형 ID-only 호출에는 새 이유를 자동 생성하지 않습니다. 저장된 과거 호출 기록은 원문을 유지하고 현재 스키마를 우선하도록 안내합니다. `MockRuntime`/`ProtocolFixture`는 외부 카드 계약을 직접 사용하므로 영향이 없습니다. 실행 영수증의 어댑터 표지는 `ai-be-v1/max3/reasons/2`입니다. 기존 `integration/tests/check_chat_tools_search.py`는 예전 전체 filters/products 프로토콜을 쓰는 별도 native 점검으로, 이 회귀에서 검증하지 않습니다.
+
+저장소 루트에서 무료 회귀를 실행합니다. HTTP·DB 실호출 차단 플러그인을 반드시 사용하며 실제 사용자 대화·취향이나 모델 키는 사용하지 않습니다.
+
+```sh
+PYTHONPATH=chat:chat/pc_tests:profiling/src:. chat/.venv/bin/python -B -m pytest -q \
+  -p no:cacheprovider -p integration.tests.offline_guard chat/tests chat/pc_tests
+```
+
+`tests/test_recommendation_reasons.py`는 수정 전 덮어쓰기 재현, 서로 다른 이유와 선택 순서, 추천·사진 목록에서 저장 상태 → GET → SSE/turn.finished 보존, 형식·길이·ID·취소·수신자 범위를 확인합니다. `tests/test_card_boundary.py`는 긴 상품 설명이 이유를 대체하지 않는지와 기존 저장/재생 경계를 확인합니다. 입력과 전달 계약을 검사하는 scripted 결정이며, 실제 모델의 자연어 품질·사실 함의·수신자 취향 추론 품질을 평가한 결과가 아닙니다. 실제 모델 검증과 배포 검증은 별도 작업입니다.
+
+### 2026-10-26 로컬 수정 검증 기록
+
+출발 checkout은 `work`, `bd0f057929a04c88f777061ce9d0ea52ea65a5f1`이며 작업 전 tracked/untracked 변경은 없었습니다. checkout과 상위 workspace에서 `AGENTS.md`·관련 `.agents/skills`를 찾지 못해 README, TESTING, MAINTENANCE 및 CI 검사 지침을 따랐습니다.
+
+| 검사 | 결과 |
+|---|---|
+| 수정 전 덮어쓰기 합성 재현 | 예상 실패 1개: 전달한 추천 이유 대신 `상품 정보: …` 출력 |
+| 신규 이유 회귀 | 81 통과 |
+| 최종 `chat/tests chat/pc_tests` 전체 | 567 통과, 실패 0, skip 2 (24.29초) |
+| skip 항목 | `test_error_privacy.py`의 새 disposable PG cluster, `test_recipient_context.py`의 disposable PostgreSQL 필요 항목 |
+| Ruff 0.16.8, CI 규칙 `E9,F63,F7,F82` | `chat` 및 수정한 integration fixture 통과 |
+| mypy 2.4.0, 변경 runtime 모듈 | `integrated_harness.py` 통과; `--follow-imports=skip --ignore-missing-imports --check-untyped-defs`, 저장소 전체 타입 검사는 아님 |
+| `git diff --check` | 통과 |
+| DB/native·컨테이너·운영 연동·실제 모델·배포 | 미실행 |
+
+독립 검토자는 실제 production diff와 서비스 연결을 읽고 ID와 이유의 대응, 이유 없는 구형 호출, 사진 목록, 200자 경계, 최대 수·취소·기존 guard, 외부 계약을 점검했습니다. 별도로 offline 기존 회귀 11개 및 순수 스키마/연결 probe 9개를 통과했으며 추가 수정이 필요한 결함은 발견하지 못했습니다. 신규 테스트 전체와 문서는 독립 검토의 완료 범위에 포함하지 않았습니다. 새로운 유료 모델 호출은 0회이며 배포·main 반영 결과가 아닙니다.

@@ -2,6 +2,8 @@
 
 BE가 발신자·수신자와 질문을 보내면 저장된 SSE 이벤트와 추천 상품 ID를 반환합니다. PC `stable-v4.12` 하네스를 `IntegratedHarness`로 연결하며 추천은 최대 3개, 더 적게 요청한 수를 존중합니다.
 
+서비스의 `show_gifts`와 `list_gifts(format=brief)`는 선택한 상품 ID마다 모델이 작성한 추천 이유를 요구합니다. 사용자 조건과 조회 근거를 연결한 이유를 최종 `productId`/`reason` 카드까지 보존하며, 누락되거나 잘못된 이유를 카탈로그 설명으로 대신하지 않습니다. 내부 스키마와 과거 PC 하네스의 호환 범위는 [합성 회귀 안내](TESTING.md#상품별-추천-이유-합성-회귀)를 따릅니다.
+
 - [HTTP/SSE 계약](INTEGRATION.md): 요청·응답, 재시도, 취소와 소유권
 - [무료 연동 테스트](TESTING.md): 고정 응답으로 FE/BE 연결 확인
 - [통합 실행](../integration/README.md) · [채팅 점검](MAINTENANCE.md)

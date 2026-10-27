@@ -32,7 +32,8 @@ def cup_catalog(monkeypatch):
 
 def decision(ident, changes=None):
     return [tool('gift_context', {'queries': ['컵'], 'changes': changes or {}}),
-            tool('show_gifts', {'product_ids': [str(ident)]})]
+            tool('show_gifts', {'product_ids': [str(ident)], 'reasons': [
+                {'product_id': str(ident), 'reason': '요청하신 컵 종류로 확인되어 골랐어요.'}]})]
 
 
 def model_state(sent):
