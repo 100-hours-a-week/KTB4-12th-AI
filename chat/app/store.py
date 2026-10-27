@@ -401,7 +401,7 @@ class Store:
   review_clause={'pending':' AND NOT f.reviewed','reviewed':' AND f.reviewed'}.get(feedback_state,'')
   query="""SELECT c.*,
    (SELECT jsonb_build_object('turnId',id,'status',state->'status','environment',context->'environment',
-    'sourceScope',context->'sourceScope','revision',context->'revision','model',context->'model',
+    'sourceScope',context->'sourceScope','revision',context->'revision','promptVersion',context->'promptVersion','model',context->'model',
     'elapsedMs',context->'elapsedMs','sourceVersion',context->'recipientProfile'->'inputSourceVersion',
     'attemptCount',CASE WHEN jsonb_typeof(context->'modelRequests')='array' THEN jsonb_array_length(context->'modelRequests') ELSE NULL END,
     'usage',context->'usage') FROM turns WHERE conversation=c.id ORDER BY ordinal DESC LIMIT 1) latest_trace,

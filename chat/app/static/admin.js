@@ -65,7 +65,7 @@ async function load(reset = true) {
     for (const row of data.items) {
       const button = el('button', undefined, 'conversation'); button.dataset.id = row.id; button.setAttribute('aria-pressed', row.id === current);
       button.append(el('span', '대화 ' + row.id.slice(0, 8), 'title'), el('p', `${when(row.created)} · ${row.turnCount}턴 · 의견 ${row.feedbackCount}`, 'meta'));
-      if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`${t.status||'미기록'} · ${t.model||'모델 미기록'} · ${t.sourceScope} · ${t.environment||'환경 미기록'}`, 'meta'),el('p',`요청 ${t.turnId?.slice(0,8)||'—'} · v${t.sourceVersion??'—'} · ${t.revision?.slice(0,8)||'버전 미기록'} · 입/출 ${t.inputTokens??'?'}/${t.outputTokens??'?'} · ${t.elapsedMs??'?'}ms · ${t.costUsd??'?'} USD`,'meta'));}
+      if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`${t.status||'미기록'} · ${t.model||'모델 미기록'} · ${t.sourceScope} · ${t.environment||'환경 미기록'}`, 'meta'),el('p',`요청 ${t.turnId?.slice(0,8)||'—'} · v${t.sourceVersion??'—'} · 코드 ${t.promptVersion?.slice(0,8)||'미기록'} · 입/출 ${t.inputTokens??'?'}/${t.outputTokens??'?'} · ${t.elapsedMs??'?'}ms · ${t.costUsd??'?'} USD`,'meta'));}
       if (row.latestFeedbackAt) button.append(el('p', `최근 의견 ${when(row.latestFeedbackAt)} · 미검토 ${row.pendingFeedbackCount}개`, 'meta'));
       if (row.failedCount) button.append(el('span', `실패 ${row.failedCount}건`, 'meta failed'));
       button.onclick = () => select(row.id, false, row.focusTurnId).catch(report); $('#items').append(button);
@@ -134,7 +134,7 @@ function tracePanel(cid, turn) {
   const trace=turn.trace, box=el('section',undefined,'trace-panel');
   if(!trace){box.append(el('p','실행 근거 미수집 · 과거 기록은 재구성하지 않습니다.','meta'));return box;}
   const meta=el('div',undefined,'trace-meta'), totals=trace.totals||{};
-  for(const value of [trace.sourceScope,trace.environment||'환경 미기록',trace.revision?.slice(0,12)||'버전 미기록',trace.connection?.model||turn.context?.model||'모델 미기록'])meta.append(el('span',value,'chip'));
+  for(const value of [trace.sourceScope,trace.environment||'환경 미기록','코드 '+(trace.sourceIdentity?.promptVersion||trace.sourceIdentity?.integrationSourceSha256||'미기록').slice(0,12),trace.connection?.model||turn.context?.model||'모델 미기록'])meta.append(el('span',value,'chip'));
   if(trace.executionMode==='mock')meta.prepend(el('span','합성 UI fixture · 실제 모델 미호출','chip'));
   box.append(meta,el('p',`입력 ${totals.inputTokens??'미확인'} · 출력 ${totals.outputTokens??'미확인'} tokens · 비용 ${totals.costUsd===null?'미확인':totals.costUsd+' USD'}`,'trace-totals'));
   box.append(el('p',`요청 ${turn.turnId} · ${trace.recording.calls} · 캐시/추론은 총 토큰에 다시 더하지 않습니다.`,'meta'));
