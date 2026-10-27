@@ -400,6 +400,11 @@ class Store:
   if feedback_state!='all':clauses.append('qa.focus_turn IS NOT NULL')
   review_clause={'pending':' AND NOT f.reviewed','reviewed':' AND f.reviewed'}.get(feedback_state,'')
   query="""SELECT c.*,
+   (SELECT jsonb_build_object('turnId',id,'status',state->'status','environment',context->'environment',
+    'sourceScope',context->'sourceScope','revision',context->'revision','model',context->'model',
+    'elapsedMs',context->'elapsedMs','sourceVersion',context->'recipientProfile'->'inputSourceVersion',
+    'attemptCount',CASE WHEN jsonb_typeof(context->'modelRequests')='array' THEN jsonb_array_length(context->'modelRequests') ELSE NULL END,
+    'usage',context->'usage') FROM turns WHERE conversation=c.id ORDER BY ordinal DESC LIMIT 1) latest_trace,
    (SELECT state->>'message' FROM turns WHERE conversation=c.id ORDER BY ordinal LIMIT 1) title,
    (SELECT count(*) FROM turns WHERE conversation=c.id) turn_count,
    (SELECT count(*) FROM turns WHERE conversation=c.id AND state->>'status'='FAILED') failed_count,
@@ -414,7 +419,7 @@ class Store:
   with self.pool.connection() as db:rows=db.execute(query,args).fetchall()
   more=len(rows)>limit;rows=rows[:limit];items=[]
   for r in rows:
-   items.append({'id':str(r['id']),'senderUserId':r['sender'],'recipientUserId':r['recipient'],'created':r['created'].isoformat(),'title':r['title'] or '새 대화','turnCount':r['turn_count'],'failedCount':r['failed_count'],'feedbackCount':r['feedback_count'],'pendingFeedbackCount':r['pending_count'],'latestFeedbackAt':r['latest_feedback'].isoformat() if r['latest_feedback'] else None,'focusTurnId':str(r['focus_turn']) if r['focus_turn'] else None})
+   items.append({'id':str(r['id']),'senderUserId':r['sender'],'recipientUserId':r['recipient'],'created':r['created'].isoformat(),'title':r['title'] or '새 대화','turnCount':r['turn_count'],'failedCount':r['failed_count'],'feedbackCount':r['feedback_count'],'pendingFeedbackCount':r['pending_count'],'latestFeedbackAt':r['latest_feedback'].isoformat() if r['latest_feedback'] else None,'focusTurnId':str(r['focus_turn']) if r['focus_turn'] else None,'latestTrace':__import__('app.request_audit',fromlist=['list_summary']).list_summary(r['latest_trace'])})
   next_cursor=base64.urlsafe_b64encode(json.dumps([sort,feedback_state,rows[-1]['sort_stamp'].isoformat(),str(rows[-1]['id'])]).encode()).decode() if more else None
   from app.diagnostics import clean
   return clean({'items':items,'nextCursor':next_cursor})
@@ -431,7 +436,8 @@ class Store:
    for r in rows:
     feedback=db.execute('SELECT id,payload,reviewed,created FROM feedback WHERE turn=%s ORDER BY created,id',(r['id'],)).fetchall()
     reviews=db.execute('SELECT id,note,created FROM turn_reviews WHERE turn=%s ORDER BY created,id',(r['id'],)).fetchall()
+    event_rows=db.execute('SELECT seq,kind FROM events WHERE turn=%s ORDER BY seq LIMIT 101',(r['id'],)).fetchall()
     items.append({'turnId':str(r['id']),'created':r['created'].isoformat(),'state':r['state'],'context':{**r['context'],'recipientContext':r['recipient_context']},'feedback':[{**dict(f),'id':str(f['id']),'created':f['created'].isoformat()} for f in feedback],
-                  'reviews':[{'reviewId':str(v['id']),'note':v['note'],'created':v['created'].isoformat()} for v in reviews]})
+                  'eventSummary':{'events':[{'id':v['seq'],'event':v['kind']} for v in event_rows[:100]],'truncated':len(event_rows)>100,'basis':'stored SSE events; delivery to browser not inferred'},'reviews':[{'reviewId':str(v['id']),'note':v['note'],'created':v['created'].isoformat()} for v in reviews]})
   from app.diagnostics import clean
   return clean({'conversationId':cid,'senderUserId':c['sender'],'recipientUserId':c['recipient'],'turns':items,'nextCursor':rows[-1]['ordinal'] if more else None,'startCursor':after,'focusTurnId':focus_tid})

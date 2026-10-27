@@ -16,6 +16,7 @@ from app.public_answer import PUBLIC_ANSWER_VERSION,previous_public_products
 from app.conversation_memory import history_messages,last_completed_turn
 from app.model_trace import TRACE
 from app.integrated_harness import IntegratedHarness, protocol_manifest
+from app.llm_connection import ACTIVE_CONNECTION
 
 _ROOT=Path(__file__).parent
 _PROMPT_VERSION=hashlib.sha256(_RUNTIME_PROMPT_VERSION.encode()+b''.join(p.read_bytes() for p in [_ROOT/'low_latency.py',_ROOT/'gift_adapter.py',_ROOT/'model_trace.py',*sorted((_ROOT/'gift_core').glob('*.py'))])).hexdigest()[:16]
@@ -35,47 +36,75 @@ class ProviderAdapter:
   for tool in wire_tools:
    if tool.get('type')=='function':tool['function'].setdefault('strict',False)
   body.update(stream=True,stream_options={'include_usage':True},tools=wire_tools,tool_choice='auto')
-  provider=dict(body.get('provider',{}));provider.update(require_parameters=True,sort='latency',allow_fallbacks=False);body['provider']=provider
+  connection=ACTIVE_CONNECTION.get()
+  compatible=connection is not None and connection.kind=='openai-compatible'
+  if not compatible:
+   provider=dict(body.get('provider',{}));provider.update(require_parameters=True,sort='latency',allow_fallbacks=False);body['provider']=provider
+  http=connection.client if compatible else self.runtime.http
   self.receipt['activeStage']='responder'
-  async with self.runtime.http.stream('POST','/chat/completions',json=body) as response:
-   if response.status_code!=200:raise ProviderError('provider_http_'+str(response.status_code))
-   # Claude can stream a narration block before a valid tool_use block.
-   # Keep that narration out of durable answers, then consume usage to settle cost.
-   hold_text=body['model']=='anthropic/claude-haiku-5.5' and bool(tools)
-   buffered=[];text_size=0;has_tool=False;text_released=False;finish=None;has_text=False
-   async for packet in sse_json(response):
-    if not isinstance(packet,dict) or packet.get('error'):raise ProviderError('provider_packet_error')
-    metadata={k:packet[k] for k in ('model','provider') if isinstance(packet.get(k),str)}
-    if metadata and metadata not in self.receipt.setdefault('providerResponses',[]):self.receipt['providerResponses'].append(metadata)
-    if isinstance(packet.get('usage'),dict):yield {'kind':'usage','value':packet['usage']}
-    for choice in packet.get('choices',[]):
-     if choice.get('error'):raise ProviderError('provider_choice_error')
-     delta=choice.get('delta',{})
-     if text_released and (delta.get('content') or delta.get('tool_calls')):raise ProviderError('provider_content_after_finish')
-     if delta.get('content'):
-      has_text=True
-      if hold_text:
-       value=delta['content']
-       if not isinstance(value,str):raise ProviderError('invalid_answer')
-       text_size+=len(value)
-       if text_size>8000:raise ProviderError('invalid_answer')
-       buffered.append(value)
-      else:yield {'kind':'text','value':delta['content']}
-     for call in delta.get('tool_calls',[]):
-      has_tool=True
-      yield {'kind':'tool','value':call}
-     if choice.get('finish_reason') is not None:
-      finish=choice['finish_reason']
-      yield {'kind':'finish','value':finish}
-    if hold_text and not has_tool and not text_released and any(c.get('finish_reason')=='stop' for c in packet.get('choices',[])):
-     # stop determines an ordinary answer; accounting/[DONE] can arrive later.
-     text_released=True
+  from app.request_audit import capture_request
+  from app.diagnostics import timestamp
+  started=time.monotonic()
+  if compatible:
+   from app.model_trace import attempted
+   attempted(body,None)
+  audit={'index':len(self.receipt.setdefault('requestAudit',[]))+1,'startedAt':timestamp(),'offsetMs':round((started-self.receipt['startedMonotonic'])*1000,2),'input':capture_request(body),'status':'running','visibleText':'','toolNames':[]}
+  self.receipt['requestAudit'].append(audit)
+  try:
+   async with http.stream('POST','chat/completions',json=body,**({'timeout':__import__('httpx').Timeout(connection.read_timeout,connect=connection.connect_timeout)} if connection is not None else {})) as response:
+    if response.status_code!=200:raise ProviderError('provider_http_'+str(response.status_code))
+    # Claude can stream a narration block before a valid tool_use block.
+    # Keep that narration out of durable answers, then consume usage to settle cost.
+    hold_text=body['model']=='anthropic/claude-haiku-5.5' and bool(tools)
+    buffered=[];text_size=0;has_tool=False;text_released=False;finish=None;has_text=False
+    async for packet in sse_json(response):
+     if not isinstance(packet,dict) or packet.get('error'):raise ProviderError('provider_packet_error')
+     metadata={k:packet[k] for k in ('model','provider') if isinstance(packet.get(k),str)}
+     if metadata and metadata not in self.receipt.setdefault('providerResponses',[]):self.receipt['providerResponses'].append(metadata)
+     if isinstance(packet.get('usage'),dict):
+      audit['usage']={k:copy.deepcopy(packet['usage'][k]) for k in ('prompt_tokens','completion_tokens','cost','prompt_tokens_details','completion_tokens_details') if k in packet['usage']}
+      yield {'kind':'usage','value':packet['usage']}
+     for choice in packet.get('choices',[]):
+      if choice.get('error'):raise ProviderError('provider_choice_error')
+      delta=choice.get('delta',{})
+      if isinstance(delta.get('content'),str):audit['visibleText']=(audit['visibleText']+delta['content'])[:4000]
+      for tool in delta.get('tool_calls',[]):
+       name=tool.get('function',{}).get('name')
+       if name:audit['toolNames'].append(name[:80])
+      if choice.get('finish_reason') is not None:audit['finishReason']=choice['finish_reason']
+      if text_released and (delta.get('content') or delta.get('tool_calls')):raise ProviderError('provider_content_after_finish')
+      if delta.get('content'):
+       has_text=True
+       if hold_text:
+        value=delta['content']
+        if not isinstance(value,str):raise ProviderError('invalid_answer')
+        text_size+=len(value)
+        if text_size>8000:raise ProviderError('invalid_answer')
+        buffered.append(value)
+       else:yield {'kind':'text','value':delta['content']}
+      for call in delta.get('tool_calls',[]):
+       has_tool=True
+       yield {'kind':'tool','value':call}
+      if choice.get('finish_reason') is not None:
+       finish=choice['finish_reason']
+       yield {'kind':'finish','value':finish}
+     if hold_text and not has_tool and not text_released and any(c.get('finish_reason')=='stop' for c in packet.get('choices',[])):
+      # stop determines an ordinary answer; accounting/[DONE] can arrive later.
+      text_released=True
+      for value in buffered:yield {'kind':'text','value':value}
+      buffered=[]
+    if hold_text and not has_tool and not text_released:
      for value in buffered:yield {'kind':'text','value':value}
-     buffered=[]
-   if hold_text and not has_tool and not text_released:
-    for value in buffered:yield {'kind':'text','value':value}
-   if (finish=='stop' and has_text or finish=='tool_calls' and has_tool) and hasattr(self.runtime,'provider_succeeded'):
-    await self.runtime.provider_succeeded(response)
+    if (finish=='stop' and has_text or finish=='tool_calls' and has_tool) and hasattr(self.runtime,'provider_succeeded'):
+     await self.runtime.provider_succeeded(response)
+   audit['status']='completed'
+  except BaseException as exc:
+   audit['status']='cancelled' if isinstance(exc,__import__('asyncio').CancelledError) else 'failed'
+   raise
+  finally:
+   from app.request_audit import text
+   audit['visibleText']=text(audit['visibleText'])
+   audit['elapsedMs']=round((time.monotonic()-started)*1000,2)
  async def close(self):pass
 
 class LowLatencyRuntime(AgentRuntime):
@@ -86,6 +115,8 @@ class LowLatencyRuntime(AgentRuntime):
  def model_config(self):
   return self.effective_config(super().model_config)
  def effective_config(self,config):
+  connection=ACTIVE_CONNECTION.get()
+  if connection is not None and connection.kind=='openai-compatible':return config
   if config and config.model=='openai/gpt-6-luna':return replace(config,reasoning={'enabled':True,'effort':'low','exclude':True})
   return config
  def trace_config(self):
