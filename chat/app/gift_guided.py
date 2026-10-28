@@ -8,6 +8,7 @@ import copy
 import json
 import re
 import unicodedata
+from decimal import Decimal, InvalidOperation
 from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Literal
@@ -81,6 +82,24 @@ RECALL_TOOL = sparse_tool('recall_gift', Recall, '직전 추천의 지정 순서
 
 def normalized(value):
     return re.sub(r'\s+', '', unicodedata.normalize('NFKC', value)).casefold()
+
+
+def numeric_facts(value):
+    """Exact quantities, with won notation normalized; adjacent counts stay separate."""
+    pattern = r'[+\-−]?\s*\d+(?:[.,]\d+)*(?:\s*(?:(?:천|만)?\s*원|kg|mg|ml|cm|mm|GB|TB|oz|팩|개|켤레|세트|인치|%|g|m|L))?'
+    facts = set()
+    for match in re.finditer(pattern, unicodedata.normalize('NFKC', value), re.IGNORECASE):
+        token = re.sub(r'(?<=\d),(?=\d)', '', normalized(match[0])).replace('−', '-')
+        if token.endswith('원'):
+            amount = token[:-1]
+            scale = {'천': 1000, '만': 10000}.get(amount[-1], 1)
+            try:
+                facts.add(('won', Decimal(amount[:-1] if scale != 1 else amount) * scale))
+            except InvalidOperation:
+                facts.add(('quantity', token))  # Malformed amounts never alias a real price.
+        else:
+            facts.add(('quantity', token))
+    return facts
 
 
 class BrandResolver:
@@ -229,8 +248,7 @@ STATE_JSON\n'''
                 continue  # The original observed-ID validator reports this.
             if not pick.reason.strip():
                 raise ProviderError('blank_recommendation_reason')
-            source = normalized(' | '.join(str(truth.get(k) or '') for k in ('name', 'brand', 'description')) + f" | {truth['price']}원")
-            source = re.sub(r'(?<=\d),(?=\d)', '', source)
+            source = ' | '.join(str(truth.get(k) or '') for k in ('name', 'brand', 'description')) + f" | {truth['price']}원"
             # P/pcs denotes pieces only in the explicit composition field. Do
             # not interpret product model names or unrelated numbers as counts.
             composition = re.search(r'구성\s*:\s*([^.;\n]+)', truth.get('description') or '')
@@ -239,11 +257,8 @@ STATE_JSON\n'''
                 source += ' | ' + ' | '.join(n + '개' for n in pieces)
             # Permit source-backed quantities while still rejecting unsupported
             # numeric units. This check does not claim semantic entailment of prose.
-            pattern = r'\d+(?:[.,]\d+)*(?:\s*(?:kg|mg|ml|cm|mm|GB|TB|oz|팩|개|켤레|세트|인치|원|%|g|m|L))?'
-            for value in re.findall(pattern, self.numeric_reason(pick.reason, args.filters, truth), re.IGNORECASE):
-                value = re.sub(r'(?<=\d),(?=\d)', '', normalized(value))
-                if not re.search(r'(?<![\d.])' + re.escape(value) + r'(?!\d|\.\d)', source):
-                    raise ProviderError('unsupported_numeric_claim')
+            if not numeric_facts(self.numeric_reason(pick.reason, args.filters, truth)) <= numeric_facts(source):
+                raise ProviderError('unsupported_numeric_claim')
         return super().validate_show(args, s, observed, prior)
 
     def selection_contract(self):

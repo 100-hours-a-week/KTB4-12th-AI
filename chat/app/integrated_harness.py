@@ -14,6 +14,7 @@ from app.card_contract import harness_cards
 from app.gift_clean_io import Listing, Selection
 from app.gift_conversation import ConversationHarness
 from app.gift_core.contracts import Filters, Strict
+from app.gift_core.provider import ProviderError
 from app.gift_guided import GuidedHarness
 from app.limits import MAX_CARD_PRODUCTS, MAX_CARD_REASON_LENGTH
 
@@ -123,6 +124,7 @@ class IntegratedHarness(ConversationHarness):
         label = r'(?:요청(?:하신|한)(?:\s*(?:예산|상한|하한))?|예산|상한|하한)(?:은|는|인|의|이|가)?'
         pattern = (
             r'(?<![\d.,+\-−])(?:(?P<label>' + label + r')\s*|'
+            r'(?P<subject>(?:상품|제품)(?:은|이|는|가|도))?\s*'
             r'(?:(?:상품\s*)?가격(?:은|이|는|도)?\s*)?(?P<price>' + money + r')'
             r'\s*(?:으로|이라|이므로|로)\s*(?:요청(?:하신|한)\s*)?)'
             r'(?P<amount>' + money + r')\s*(?P<direction>이하|이내|이상)'
@@ -142,13 +144,15 @@ class IntegratedHarness(ConversationHarness):
             bound = filters.min_price if lower else filters.max_price
             label_text = match['label'] or ''
             negated = re.match(r'\s*(?:가|는|도)?\s*(?:아니|아닌|아닙)', reason[match.end():])
-            if (not clause_start or value < 0 or bound is None or value != bound or negated
+            if not (clause_start or match['subject']):
+                return match[0]
+            if (value < 0 or bound is None or value != bound or negated
                     or '상한' in label_text and lower or '하한' in label_text and not lower):
-                return match[0]
+                raise ProviderError('unsupported_numeric_claim')
             if match['price'] is not None and amount(match['price']) != truth['price']:
-                return match[0]
+                raise ProviderError('unsupported_numeric_claim')
             if (truth['price'] < bound if lower else truth['price'] > bound):
-                return match[0]
+                raise ProviderError('unsupported_numeric_claim')
             # Preserve the product-price token and all other numbers for normal
             # validation; only this proven current boundary is substituted.
             return match[0][:match.start('amount')-match.start()] + '검증된 요청 예산 범위'
