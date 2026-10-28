@@ -36,8 +36,8 @@ def test_supplied_recommendation_reason_is_not_replaced_by_catalog_description()
     assert cards[0]['reason'] != '상품 정보: ' + fixture.PRODUCT['description']
 
 
-@pytest.mark.parametrize('violation', ['unobserved', 'filtered', 'unsupported-number', 'wrong-brand'])
-def test_model_reason_path_retains_authoritative_selection_guards(violation):
+@pytest.mark.parametrize('violation', ['filtered', 'unsupported-number', 'wrong-brand'])
+def test_model_choices_and_prose_are_not_semantically_reviewed(violation):
     harness = object.__new__(IntegratedHarness)
     harness.catalog = CatalogAdapter(None, fixture.META, {})
     row = view(fixture.PRODUCT)
@@ -52,13 +52,10 @@ def test_model_reason_path_retains_authoritative_selection_guards(violation):
         payload['reasons'][0]['reason'] = '크기가 9999cm라 요청한 독서용으로 골랐어요.'
     elif violation == 'wrong-brand':
         payload['reasons'][0]['reason'] = '별도상표 제품이라 요청한 독서용으로 골랐어요.'
-    expected = {
-        'unobserved': 'unobserved_product_id', 'filtered': 'selected_product_violates_filters',
-        'unsupported-number': 'unsupported_numeric_claim', 'wrong-brand': 'selected_reason_brand_mismatch',
-    }[violation]
     args = harness.show_args(harness.selection_model.model_validate(payload), filters)
-    with pytest.raises((ValueError, ProviderError), match=expected):
-        harness.validate_show(args, SimpleNamespace(filters=filters, profile=Profile()), observed)
+    cards, _ = harness.validate_show(args, SimpleNamespace(filters=filters, profile=Profile()), observed)
+    assert cards[0]['reason'] == payload['reasons'][0]['reason']
+
 
 
 def test_confirmed_numeric_fact_in_model_reason_is_preserved():
@@ -187,17 +184,6 @@ def test_active_schema_requires_per_id_reasons_without_changing_legacy_pc_schema
 INVALID_SELECTIONS = [
     pytest.param({'product_ids': ['101']}, id='missing-reasons'),
     pytest.param({'reasons': [{'product_id': '101', 'reason': REASONS['101']}]}, id='missing-ids'),
-    pytest.param({'product_ids': ['101'], 'reasons': []}, id='missing-id-reason'),
-    pytest.param({'product_ids': ['101'], 'reasons': [
-        {'product_id': '102', 'reason': REASONS['102']}]}, id='wrong-reason-id'),
-    pytest.param({'product_ids': ['101'], 'reasons': selection(['101', '102'])['reasons']},
-                 id='extra-id-reason'),
-    pytest.param({'product_ids': ['101', '102'], 'reasons': selection(['102', '101'])['reasons']},
-                 id='reordered-reasons'),
-    pytest.param(selection(['101', '101']), id='duplicate-selected-id'),
-    pytest.param({'product_ids': ['101', '102'], 'reasons': selection(['101', '101'])['reasons']},
-                 id='duplicate-reason-id'),
-    pytest.param(selection(['101', '102', '103', '104']), id='too-many-products'),
     pytest.param({'product_ids': '["101"]', 'reasons': []}, id='ids-string'),
     pytest.param({'product_ids': [101], 'reasons': selection()['reasons']}, id='nonstring-id'),
     pytest.param({'product_ids': ['101'], 'reasons': {'101': REASONS['101']}}, id='reasons-map'),
@@ -226,8 +212,11 @@ def test_invalid_reason_contract_is_rejected_before_display(payload, operation):
         validate = harness.listing_model.model_validate
     else:
         validate = harness.selection_model.model_validate
-    with pytest.raises(ValidationError):
-        validate(payload)
+    if operation == 'list_gifts' and 'reasons' not in payload:
+        assert validate(payload).reasons == []
+    else:
+        with pytest.raises(ValidationError):
+            validate(payload)
 
 
 @pytest.mark.parametrize('operation', ['show_gifts', 'list_gifts'])
@@ -257,16 +246,15 @@ async def test_two_hundred_character_reason_reaches_public_response_intact(opera
     assert events[-1]['data'] == snapshot
 
 
-def test_name_only_listing_needs_no_reason_and_cannot_carry_hidden_reasons():
+def test_name_only_listing_does_not_require_reason_pair_review():
     harness = object.__new__(IntegratedHarness)
     assert harness.listing_model.model_validate({'product_ids': ['101']}).reasons == []
-    with pytest.raises(ValidationError):
-        harness.listing_model.model_validate(selection())
+    assert harness.listing_model.model_validate(selection()).product_ids == ['101']
 
 
 @pytest.mark.parametrize('operation', ['show_gifts', 'list_gifts'])
 @pytest.mark.parametrize('failure', ['unknown-id', 'unsupported-number', 'other-brand', 'blank', 'overlong'])
-async def test_failed_model_reasons_never_commit_intro_or_cards(
+async def test_prose_passes_and_unknown_or_malformed_payloads_do_not_repair(
         operation, failure, synthetic_catalog, monkeypatch):
     payload = selection(['999'] if failure == 'unknown-id' else ['101'], operation=operation)
     payload['message'] = '이 문장은 검증 실패 시 공개되면 안 됩니다.'
@@ -278,14 +266,20 @@ async def test_failed_model_reasons_never_commit_intro_or_cards(
         }[failure]
     store = fixture.Store()
     monkeypatch.setattr(fixture, 'Store', lambda: store)
-    with pytest.raises(ProviderError):
-        await fixture.run([
-            fixture.tool('gift_context', fixture.context()),
-            fixture.tool(operation, payload), fixture.tool(operation, payload),
-        ])
+    packets = [fixture.tool('gift_context', fixture.context()), fixture.tool(operation, payload), fixture.tool(operation, payload)]
+    if failure in ('blank', 'overlong'):
+        with pytest.raises(ProviderError):
+            await fixture.run(packets)
+    else:
+        await fixture.run(packets)
+    assert len(packets) == 1  # No semantic or malformed-payload repair request.
     tid, state = next(iter(store.states.items()))
-    assert state['blocks'] == []
-    assert not any(e['event'] in ('cards', 'answer.delta') for e in store.events[tid])
+    cards = [p for b in state['blocks'] for p in b.get('products', [])]
+    if failure in ('blank', 'overlong', 'unknown-id'):
+        assert not cards
+    else:
+        assert cards[0]['reason'] == payload['reasons'][0]['reason']
+
 
 
 @pytest.mark.parametrize('operation', ['show_gifts', 'list_gifts'])
@@ -299,14 +293,17 @@ async def test_serving_missing_reason_keeps_two_attempt_limit_and_no_fallback(op
     ]
     store = fixture.Store()
     monkeypatch.setattr(fixture, 'Store', lambda: store)
-    with pytest.raises(ProviderError, match='model_call_budget_exhausted'):
+    if operation == 'show_gifts':
+        with pytest.raises(ProviderError):
+            await fixture.run(packets)
+    else:
         await fixture.run(packets)
     assert len(packets) == 1  # Existing two-transport-attempt ceiling remains in force.
-    assert next(iter(store.states.values()))['blocks'] == []
+    assert not any(b['type'] == 'cards' for b in next(iter(store.states.values()))['blocks'])
 
 
 @pytest.mark.parametrize('operation', ['show_gifts', 'list_gifts'])
-async def test_harness_reason_repair_uses_schema_feedback_when_budget_is_available(operation):
+async def test_missing_reason_never_requests_a_model_repair(operation):
     from test_compact_harness import Recorded, run
     from test_three_gifts import three_setup
 
@@ -321,13 +318,14 @@ async def test_harness_reason_repair_uses_schema_feedback_when_budget_is_availab
         tool_events(operation, invalid), tool_events(operation, valid),
     ])
     harness = IntegratedHarness(old.catalog, old.context, provider, turn_timeout=None)
-    events = await run(harness, session, '양말 하나 보여줘', 'repair')
-    assert harness.metrics['repair'].stages['tool_repairs'] == 1
-    products = [p for kind, value in events if kind in ('cards', 'catalog') for p in value['products']]
-    assert [p['reason'] for p in products] == [valid['reasons'][0]['reason']]
-    assert not any(kind == 'text' for kind, _ in events)
-    feedback = json.loads(provider.calls[-1]['messages'][-1]['content'])
-    assert feedback['error']['code'] == 'invalid_tool_arguments'
+    from app.gift_core.contracts import TurnInput
+    events = []
+    async def emit(kind,value):events.append((kind,value))
+    await harness.run(session, TurnInput(message='양말 하나 보여줘'), 'repair', emit)
+    assert len(provider.calls) == 2
+    assert harness.metrics['repair'].stages.get('tool_repairs', 0) == 0
+    assert not any(kind in ('cards', 'catalog') for kind, _ in events)
+
 
 
 async def test_empty_selection_produces_no_fabricated_reason_or_card():
@@ -440,35 +438,35 @@ def test_current_budget_reference_is_not_a_product_numeric_claim(reason):
     '요청한 6,000원 이하이며 무게는 6,000g입니다.',
     '요청한 6,000원 이하이며 상품 가격은 6,000원입니다.',
 ])
-def test_budget_reference_never_authorizes_unverified_product_facts(reason):
+def test_numeric_reason_text_is_preserved_without_fact_judging(reason):
     harness=object.__new__(IntegratedHarness)
     harness.catalog=CatalogAdapter(None,fixture.META,{})
     row=view({**fixture.PRODUCT,'price':5000});harness.catalog.products={'101':row}
     filters=Filters(max_price=6000)
     payload=selection();payload['reasons'][0]['reason']=reason
     args=harness.show_args(harness.selection_model.model_validate(payload),filters)
-    with pytest.raises(ProviderError,match='unsupported_numeric_claim'):
-        harness.validate_show(args,SimpleNamespace(filters=filters,profile=Profile()),{'101':row})
+    cards, _ = harness.validate_show(args,SimpleNamespace(filters=filters,profile=Profile()),{'101':row})
+    assert cards[0]['reason'] == payload['reasons'][0]['reason']
 
 
 @pytest.mark.parametrize('filters',[Filters(),Filters(max_price=7000),Filters(min_price=6000)])
-def test_old_or_wrong_direction_budget_reference_remains_unverified(filters):
+def test_budget_prose_is_not_compared_to_current_filters(filters):
     harness=object.__new__(IntegratedHarness)
     harness.catalog=CatalogAdapter(None,fixture.META,{})
     row=view({**fixture.PRODUCT,'price':5000});harness.catalog.products={'101':row}
     reason='요청한 6,000 원 이하 예산에 맞는 책받침이에요.'
     payload=selection();payload['reasons'][0]['reason']=reason
     args=harness.show_args(harness.selection_model.model_validate(payload),filters)
-    with pytest.raises(ProviderError,match='unsupported_numeric_claim'):
-        harness.validate_show(args,SimpleNamespace(filters=filters,profile=Profile()),{'101':row})
+    cards, _ = harness.validate_show(args,SimpleNamespace(filters=filters,profile=Profile()),{'101':row})
+    assert cards[0]['reason'] == payload['reasons'][0]['reason']
 
 
-def test_budget_exception_does_not_permit_numeric_efficacy_claim():
+def test_numeric_efficacy_prose_is_not_judged():
     harness=object.__new__(IntegratedHarness)
     harness.catalog=CatalogAdapter(None,fixture.META,{})
     row=view({**fixture.PRODUCT,'price':5000});harness.catalog.products={'101':row}
     filters=Filters(max_price=6000)
     payload=selection();payload['reasons'][0]['reason']='예산 6,000원 이하이고 집중력이 100% 향상돼요.'
     args=harness.show_args(harness.selection_model.model_validate(payload),filters)
-    with pytest.raises(ProviderError,match='unsupported_numeric_claim'):
-        harness.validate_show(args,SimpleNamespace(filters=filters,profile=Profile()),{'101':row})
+    cards, _ = harness.validate_show(args,SimpleNamespace(filters=filters,profile=Profile()),{'101':row})
+    assert cards[0]['reason'] == payload['reasons'][0]['reason']

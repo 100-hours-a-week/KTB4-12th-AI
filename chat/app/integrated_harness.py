@@ -3,20 +3,17 @@
 import copy
 import hashlib
 import json
-import re
-from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
-from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic import Field, field_validator
 
 from app.card_contract import harness_cards
 from app.gift_clean_io import Listing, Selection
 from app.gift_conversation import ConversationHarness
 from app.gift_core.contracts import Filters, Strict
-from app.gift_core.provider import ProviderError
-from app.gift_guided import GuidedHarness
 from app.limits import MAX_CARD_PRODUCTS, MAX_CARD_REASON_LENGTH
+from app.diagnostics import sync_operation
 
 
 class RecommendationReason(Strict):
@@ -34,43 +31,23 @@ class RecommendationReason(Strict):
         return value.strip()
 
 
-def _validate_reason_ids(product_ids, reasons):
-    if len(set(product_ids)) != len(product_ids):
-        raise ValueError("duplicate_selected_id")
-    if [item.product_id for item in reasons] != product_ids:
-        raise ValueError("recommendation_reason_ids_mismatch")
-
-
 class PublicSelection(Selection):
-    # Keep the versioned PC selection model unchanged. Serving requires one
-    # explicit ID/reason pair per selected ID, including [] for no selection.
+    # Bound model payloads; public cards are projected to the existing maximum.
+    product_ids: list[str] = Field(max_length=30)
     reasons: list[RecommendationReason] = Field(
-        max_length=MAX_CARD_PRODUCTS,
+        max_length=30,
         description="product_ids와 같은 ID·순서로 상품마다 추천 이유 하나. 선택이 없으면 [].",
     )
-
-    @model_validator(mode="after")
-    def matched_reasons(self):
-        _validate_reason_ids(self.product_ids, self.reasons)
-        return self
 
 
 class PublicListing(Listing):
     product_ids: list[str] = Field(
-        max_length=MAX_CARD_PRODUCTS, description="요청한 수 이하, 최대 3개 상품 ID"
+        max_length=30, description="요청한 수 이하, 최대 3개 상품 ID"
     )
     reasons: list[RecommendationReason] = Field(
-        default_factory=list, max_length=MAX_CARD_PRODUCTS,
+        default_factory=list, max_length=30,
         description="brief 카드에는 product_ids와 같은 ID·순서로 추천 이유를 작성. names에는 생략.",
     )
-
-    @model_validator(mode="after")
-    def matched_reasons(self):
-        if self.format == "brief":
-            _validate_reason_ids(self.product_ids, self.reasons)
-        elif self.reasons:
-            raise ValueError("names_listing_has_no_reasons")
-        return self
 
 
 def _product_exclusion_sources(session):
@@ -92,7 +69,7 @@ SYSTEM = """한국어 선물 상담 도우미다. 최신 요청과 실제 사용
 [답변과 도구]
 일상 대화·편지·설명·비교·확인 질문은 텍스트로 답한다. 새 추천·조건 변경·나머지 후보 선택은 gift_context로 한 번 조회한다. queries는 종류·용도 하나가 기본이며 서로 다른 종류일 때만 두 개다. 동의어 중복 검색은 하지 않는다.
 실제 상품 표시는 show_gifts 또는 list_gifts를 쓴다. 요청 수 이하, 최대 3개의 적합한 ID를 표시 순서대로 고른다. show_gifts와 list_gifts(format=brief)는 product_ids와 같은 ID·순서의 reasons({product_id,reason})가 필요하다. 각 이유는 1–200자로 사용자 조건과 해당 상품 근거를 연결한다. names는 이름 목록이며 reasons를 생략한다. message는 카드와 중복되지 않는 안내만 쓴다. 사진·상품 사실은 서버가 표시한다.
-직전 상품 재표시는 제공된 list_gifts, 순번의 이름·가격은 recall_gift(position), 최근 조회 현황은 inspect_search를 쓴다. 제공된 도구 하나씩 호출하고 일반 텍스트로 실행을 약속하지 않는다. 거부된 호출은 미실행이며 현재 스키마·오류에 맞게 고치거나 필요한 정보를 묻는다.
+직전 상품 재표시는 제공된 list_gifts, 순번의 이름·가격은 recall_gift(position), 최근 조회 현황은 inspect_search를 쓴다. 제공된 도구 하나씩 호출하고 일반 텍스트로 실행을 약속하지 않는다. 깨진 도구 응답은 오류로 종료되며 자동 수정 요청은 보내지 않는다.
 
 [조건과 선택]
 changes는 바뀐 공개 조건만 보낸다. 생략=유지, 가격 null·목록 []=해제, 0원도 유효하다. 예: 상한에서 하한으로 정정하면 min_price를 지정하고 max_price=null로 지운다. 상한만 해제하면 하한은 유지한다. 브랜드 제한은 사용자 발언에 근거한다. filters는 과거 모델 상태이므로 최신 발언을 우선하되 동의 없이 조건을 넓히지 않는다.
@@ -110,100 +87,106 @@ RECIPIENT_CONTEXT = """recipient_preferences는 서버가 현재 수신자·권�
 
 
 class IntegratedHarness(ConversationHarness):
-    """Keep PC decisions; validate their display at the public transport boundary."""
+    """Render model choices from catalog identities without judging their meaning."""
+
+    max_model_calls = 2
+    max_tool_repairs = 0
 
     selection_model = PublicSelection
     listing_model = PublicListing
 
-    def numeric_reason(self, reason, filters, truth):
-        # Only local, positively sourced budget references or a direct comparison
-        # from the actual product price may omit a boundary number. Other costs,
-        # exact prices and physical claims retain the original numeric guard.
-        number = r'[+\-−]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
-        money = number + r'\s*(?:천|만)?\s*원'
-        label = r'(?:요청(?:하신|한)(?:\s*(?:예산|상한|하한))?|예산|상한|하한)(?:은|는|인|의|이|가)?'
-        pattern = (
-            r'(?<![\d.,+\-−])(?:(?P<label>' + label + r')\s*|'
-            r'(?P<subject>(?:상품|제품)(?:은|이|는|가|도))?\s*'
-            r'(?:(?:상품\s*)?가격(?:은|이|는|도)?\s*)?(?P<price>' + money + r')'
-            r'\s*(?:으로|이라|이므로|로)\s*(?:요청(?:하신|한)\s*)?)'
-            r'(?P<amount>' + money + r')\s*(?P<direction>이하|이내|이상)'
-        )
-        def amount(text):
-            text = re.sub(r'\s+', '', text).replace(',', '').replace('−', '-').removesuffix('원')
-            scale = {'천': 1000, '만': 10000}.get(text[-1], 1)
-            return Decimal(text[:-1] if scale != 1 else text) * scale
-        def checked(match):
-            # A label in another clause must not authorize a shipping/subscription
-            # cost, nor may a match restart inside a signed or unrelated amount.
-            prefix = reason[:match.start()].rstrip()
-            clause_start = (not prefix or prefix[-1] in '.!?;,\n'
-                            or re.search(r'(?:이며|이고|고|며|지만|그리고|또한)$', prefix))
-            value = amount(match['amount'])
-            lower = match['direction'] == '이상'
-            bound = filters.min_price if lower else filters.max_price
-            label_text = match['label'] or ''
-            negated = re.match(r'\s*(?:가|는|도)?\s*(?:아니|아닌|아닙)', reason[match.end():])
-            if not (clause_start or match['subject']):
-                return match[0]
-            if (value < 0 or bound is None or value != bound or negated
-                    or '상한' in label_text and lower or '하한' in label_text and not lower):
-                raise ProviderError('unsupported_numeric_claim')
-            if match['price'] is not None and amount(match['price']) != truth['price']:
-                raise ProviderError('unsupported_numeric_claim')
-            if (truth['price'] < bound if lower else truth['price'] > bound):
-                raise ProviderError('unsupported_numeric_claim')
-            # Preserve the product-price token and all other numbers for normal
-            # validation; only this proven current boundary is substituted.
-            return match[0][:match.start('amount')-match.start()] + '검증된 요청 예산 범위'
-        return re.sub(pattern, checked, reason)
-
     def show_args(self, selection, filters):
-        return SimpleNamespace(
-            message=selection.message, products=selection.reasons, filters=filters,
-            model_dump=lambda: {**selection.model_dump(), "filters": filters.model_dump()},
-        )
+        reasons = {}
+        for reason in selection.reasons:
+            reasons.setdefault(reason.product_id, reason)
+        return SimpleNamespace(message=selection.message,
+            products=[reasons[i] for i in self.product_ids(selection.product_ids) if i in reasons],
+            filters=filters, model_dump=selection.model_dump)
 
-    def validate_show(self, *args, **kwargs):
-        # Model-authored reasons need the original numeric/brand/observed-ID
-        # guards. StableHarness intentionally bypasses them for catalog prose
-        # and overwrites reasons; that legacy rendering is not used in serving.
-        cards, filters = GuidedHarness.validate_show(self, *args, **kwargs)
+    @staticmethod
+    def product_ids(ids):
+        # Canonical public catalog identities only; invalid/missing IDs are not
+        # interpreted as another product, user or recipient.
+        return list(dict.fromkeys(i for i in ids if i.isascii() and i.isdecimal()
+            and str(int(i)) == i and 1 <= int(i) <= 2**53 - 1))
+
+    async def selection_observed(self, session, selection, observed):
+        ids = self.product_ids(selection.product_ids)
+        missing = [i for i in ids if i not in self.catalog.products]
+        if missing:
+            await self.catalog.hydrate(missing)
+        return {i: self.catalog.products[i] for i in ids if i in self.catalog.products}
+
+    def validate_show(self, args, session, observed, prior=None):
+        # Existing hook name retained for the shared loop. This only projects
+        # authoritative product facts and model prose into the public contract.
+        cards = []
+        for pick in args.products:
+            row = observed.get(pick.product_id)
+            if row is not None:
+                cards.append(dict(row, reason=pick.reason, snapshot=self.catalog.snapshot))
+            if len(cards) == MAX_CARD_PRODUCTS:
+                break
         if cards:
-            harness_cards(cards)  # Before the harness emits introductory text.
-        return cards, filters
+            harness_cards(cards)
+        return sync_operation(self.catalog.receipt, 'show_gifts',
+            {'productIds': [p.product_id for p in args.products]},
+            lambda: (cards, args.filters),
+            lambda result: {'productIds': [p['product_id'] for p in result[0]]})
+
+    def answer_tools(self, session):
+        tools = super().answer_tools(session)
+        if self.displayed(session) and not any(t['function']['name'] == 'list_gifts' for t in tools):
+            tools.append(self.list_tool(()))
+        return tools
+
+    def selection_tools(self, session, eligible):
+        return [self.selection_tool(session, eligible), self.list_tool(eligible)]
+
+    def selection_tool(self, session, eligible):
+        tool = super().selection_tool(session, eligible)
+        for field in ('product_ids', 'reasons'):
+            tool['function']['parameters']['properties'][field]['maxItems'] = MAX_CARD_PRODUCTS
+        return tool
+
+    def list_tool(self, eligible):
+        tool = super().list_tool(eligible)
+        for field in ('product_ids', 'reasons'):
+            tool['function']['parameters']['properties'][field]['maxItems'] = MAX_CARD_PRODUCTS
+        return tool
 
     async def prepare_answer_tool(self, name, payload, schema, session):
-        if name != "list_gifts":
+        if name != 'list_gifts':
             return await super().prepare_answer_tool(name, payload, schema, session)
         pending = self._pending.get()
-        pending.pop("gallery", None)
+        pending.pop('gallery', None)
         args = self.listing_model.model_validate(payload)
-        cached, by_id = self.validate_list(args, session)
-        if args.format != "brief" or not args.product_ids:
-            return
-        # Retain the gallery's cache/scope, hydration and filter checks, then
-        # validate the supplied reasons just as for recommendation cards.
-        rows, unknown = await self.catalog.hydrate(args.product_ids)
-        if unknown or {p["product_id"] for p in rows} != set(args.product_ids):
-            raise ValueError("unobserved_product_id")
-        resolved = Filters.model_validate(cached["resolvedFilters"])
-        if any(not self.catalog.allowed(row, resolved) for row in rows):
-            raise ValueError("selected_product_violates_filters")
-        self.validate_brands(args, {row["product_id"]: row for row in rows})
-        filters = Filters.model_validate(cached["filters"])
-        products, _ = self.validate_show(self.show_args(args, filters), session, by_id, filters)
-        pending["gallery"] = products
+        rows = await self.selection_observed(session, args, {})
+        args.product_ids = list(rows)[:MAX_CARD_PRODUCTS]
+        pending['list_args'] = args
+        pending['list_rows'] = [rows[i] for i in args.product_ids]
+        pending['listed'] = list(args.product_ids)
+        if args.format == 'brief':
+            pending['gallery'], _ = self.validate_show(self.show_args(args, session.filters), session, rows)
 
-    def feedback(self, exc):
-        if isinstance(exc, ValidationError):
-            allowed = {"product_ids", "reasons", "product_id", "reason", "message", "format"}
-            if all(all(isinstance(x, int) or x in allowed for x in e["loc"]) for e in exc.errors()):
-                return {"code": "invalid_tool_arguments", "fields": [
-                    {"location": ".".join(map(str, e["loc"])), "type": e["type"]}
-                    for e in exc.errors(include_input=False, include_context=False, include_url=False)[:8]],
-                    "hint": "카드는 요청 수 이하, 최대 3개입니다. product_ids와 같은 ID·순서의 reasons에 각 상품의 근거 있는 이유를 1–200자로 쓰세요. 빈 이유나 상품 설명 대체는 허용되지 않습니다."}
-        return super().feedback(exc)
+    def answer_from_tool(self, name, payload, schema, session):
+        if name != 'list_gifts':
+            return super().answer_from_tool(name, payload, schema, session)
+        pending = self._pending.get();args = pending['list_args'];rows = pending['list_rows']
+        if not rows:
+            return '표시할 상품 정보를 찾지 못했어요.'
+        if args.format == 'brief' and not pending.get('gallery'):
+            return '표시할 상품 설명이 제공되지 않았어요.'
+        return args.message if args.format == 'brief' else '\n'.join(
+            f"{i}. {row['name']}" for i, row in enumerate(rows, 1))
+
+    def answer_result(self, name, payload, text, session):
+        if name != 'list_gifts':
+            return super().answer_result(name, payload, text, session)
+        pending = self._pending.get()
+        return {'text': text, 'source': 'catalog_lookup', 'snapshot': self.catalog.snapshot,
+            'product_ids': pending['listed'], 'products': copy.deepcopy(pending['list_rows']),
+            'serverRendered': True}
 
     def selection_contract(self):
         result = super().selection_contract()
@@ -268,7 +251,7 @@ class IntegratedHarness(ConversationHarness):
             # A successful retrieval has already validated server exclusions.
             # Declare the policy, never the recipient's private category values
             # or whether they have any exclusions. Empty success is still success.
-            result["server_constraints"] = {"recipient_category_policy": "enforced_for_current_scope"}
+            result["server_constraints"] = {"recipient_category_policy": "search_filtered_for_current_scope"}
         return result
 
 
@@ -303,7 +286,7 @@ def _build_protocol_manifest():
         for name in ("models.py", "service.py", "common_api.py")
         if (search / name).is_file()
     }
-    result["integrationAdapter"] = "ai-be-v1/max3/reasons/2"
+    result["integrationAdapter"] = "ai-be-v1/max3/model-choice/3"
     result["retrievalSourceLocation"] = (
         "local-review-checkout"
         if result["retrievalSourceHashes"]
