@@ -59,3 +59,28 @@ async def test_trace_route_requires_admin_and_exact_binding(monkeypatch):
   response=await client.get(path);assert response.status_code==200 and response.json()['publicInput']=='합성 공개 질문'
   assert response.headers['cache-control']=='no-store, no-transform'
   assert (await client.get(path,headers={'Origin':'https://evil.invalid'})).status_code==403
+
+@pytest.mark.parametrize('receipt',[
+ {'prompt_tokens':100,'completion_tokens':20,'cost':.001},
+ {'prompt_tokens':0,'completion_tokens':0,'cost':0},
+ {'prompt_tokens':100,'completion_tokens':20},
+ {'prompt_tokens':True,'completion_tokens':20,'cost':.001},
+ {'prompt_tokens':-1,'completion_tokens':20,'cost':.001},
+ {'prompt_tokens':100,'completion_tokens':None,'cost':.001},
+ {'prompt_tokens':100,'completion_tokens':20,'cost':float('nan')},
+ None,
+])
+@pytest.mark.parametrize('expected',[1,2])
+def test_list_and_detail_share_complete_receipt_totals(receipt,expected):
+ from app.request_audit import list_summary
+ ctx=context();ctx['modelRequests']=[{}]*expected;ctx['requestAudit'][0]['usage']=receipt
+ detailed=trace('cid',state(),ctx)['totals']
+ summary=list_summary({'usage':[receipt],'attemptCount':expected})
+ for key in ('inputTokens','outputTokens','costUsd','usageState'):
+  assert summary[key]==detailed[key]
+
+def test_list_requires_attempt_count_but_legacy_detail_keeps_observed_receipts():
+ from app.request_audit import list_summary
+ ctx=context();ctx.pop('modelRequests')
+ assert trace('cid',state(),ctx)['totals']['inputTokens']==100
+ assert list_summary({'usage':[ctx['requestAudit'][0]['usage']]})['inputTokens'] is None

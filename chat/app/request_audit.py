@@ -29,6 +29,18 @@ def usage(v):
     details=details if isinstance(details,dict) else {};output=output if isinstance(output,dict) else {}
     return {'inputTokens':count(v.get('prompt_tokens')),'outputTokens':count(v.get('completion_tokens')),'cachedReadTokens':count(details.get('cached_tokens')),'cacheWriteTokens':count(details.get('cache_write_tokens')),'reasoningTokens':count(output.get('reasoning_tokens')),'costUsd':numeric(v.get('cost')),'basis':'provider-reported; cache and reasoning are subsets, not additive totals'}
 
+def usage_totals(entries,expected=None):
+    """Use complete provider receipts only; cache/reasoning are subsets."""
+    complete=bool(entries) and (expected is None or len(entries)==expected) and all(
+        isinstance(v,dict) and count(v.get('prompt_tokens')) is not None
+        and count(v.get('completion_tokens')) is not None for v in entries)
+    return {
+        'inputTokens':sum(v['prompt_tokens'] for v in entries) if complete else None,
+        'outputTokens':sum(v['completion_tokens'] for v in entries) if complete else None,
+        'costUsd':sum(v['cost'] for v in entries) if complete and all(numeric(v.get('cost')) is not None for v in entries) else None,
+        'usageState':'complete-observed-records' if complete else 'incomplete-or-not-recorded',
+    }
+
 def capture_request(body):
     """Actual send-time projection. Private fields are discarded before persistence."""
     messages=[]
@@ -76,8 +88,7 @@ def trace(cid,turn,context,*,details=False,created=None):
     result['timeline'].append({'kind':'stored-terminal-state','status':turn['status'],'lastEventId':count(turn.get('lastEventId')),'basis':'stored turn state; not independent proof every client received SSE'})
     entries=[c.get('usage') for c in calls] if calls else context.get('usage',[])
     expected=len(context['modelRequests']) if isinstance(context.get('modelRequests'),list) else None
-    complete=bool(entries) and (expected is None or len(entries)==expected) and all(isinstance(v,dict) and count(v.get('prompt_tokens')) is not None and count(v.get('completion_tokens')) is not None for v in entries)
-    result['totals']={'inputTokens':sum(v['prompt_tokens'] for v in entries) if complete else None,'outputTokens':sum(v['completion_tokens'] for v in entries) if complete else None,'costUsd':sum(v['cost'] for v in entries) if complete and all(numeric(v.get('cost')) is not None for v in entries) else None,'usageState':'complete-observed-records' if complete else 'incomplete-or-not-recorded','attemptsObserved':len(calls) if calls else None}
+    result['totals']={**usage_totals(entries,expected),'attemptsObserved':len(calls) if calls else None}
     if details:
         expired=False
         try:expired=(datetime.now(timezone.utc)-datetime.fromisoformat(created.replace('Z','+00:00'))).total_seconds()>DETAIL_TTL_SECONDS if created else True
@@ -107,5 +118,4 @@ def list_summary(raw):
     if not isinstance(raw,dict):return None
     entries=raw.get('usage') if isinstance(raw.get('usage'),list) else []
     expected=count(raw.get('attemptCount'))
-    complete=expected is not None and expected>0 and len(entries)==expected and all(isinstance(v,dict) and count(v.get('prompt_tokens')) is not None and count(v.get('completion_tokens')) is not None for v in entries)
-    return {'turnId':identifier(raw.get('turnId')),'status':identifier(raw.get('status')),'environment':identifier(raw.get('environment')),'sourceScope':identifier(raw.get('sourceScope')) or 'unclassified-legacy','revision':identifier(raw.get('revision')),'promptVersion':identifier(raw.get('promptVersion')),'model':identifier(raw.get('model')),'elapsedMs':numeric(raw.get('elapsedMs')),'sourceVersion':count(raw.get('sourceVersion')),'inputTokens':sum(v['prompt_tokens'] for v in entries) if complete else None,'outputTokens':sum(v['completion_tokens'] for v in entries) if complete else None,'costUsd':sum(v['cost'] for v in entries) if complete and all(numeric(v.get('cost')) is not None for v in entries) else None,'usageState':'complete-observed-records' if complete else 'incomplete-or-not-recorded'}
+    return {'turnId':identifier(raw.get('turnId')),'status':identifier(raw.get('status')),'environment':identifier(raw.get('environment')),'sourceScope':identifier(raw.get('sourceScope')) or 'unclassified-legacy','revision':identifier(raw.get('revision')),'promptVersion':identifier(raw.get('promptVersion')),'model':identifier(raw.get('model')),'elapsedMs':numeric(raw.get('elapsedMs')),'sourceVersion':count(raw.get('sourceVersion')),**usage_totals(entries,expected if expected is not None else 0)}
