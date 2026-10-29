@@ -1,5 +1,5 @@
 const $ = s => document.querySelector(s), el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
-let next = null, current = null, detailPage = null, detailStart = 0, selectedFocus = null, allTurns = [], selectionVersion = 0, listVersion = 0;
+let next = null, current = null, detailPage = null, detailStart = 0, selectedFocus = null, allTurns = [], selectionVersion = 0, listVersion = 0, sessionVersion = 0;
 const labels = {COMPLETED: '완료', FAILED: '실패', CANCELLED: '취소', PROCESSING: '생성 중'};
 const when = s => new Date(s).toLocaleString('ko-KR');
 function traceMessage(context) {
@@ -41,10 +41,11 @@ function reviewEditor(turn, cid) {
 }
 function clearSelection() { selectionVersion++; current = null; selectedFocus = null; allTurns = []; $('#detail').replaceChildren(); }
 async function api(path, options = {}) {
-  return ChatHTTP.json(path, options, resetSession);
+  const session = sessionVersion;
+  return ChatHTTP.json(path, options, () => { if (session === sessionVersion) resetSession(); });
 }
 function resetSession() {
-  listVersion++; clearSelection(); next = null;
+  sessionVersion++; listVersion++; clearSelection(); next = null;
   connectionVersion++; connectionSnapshot = null; connectionBusy = false;
   if (cf()?.elements) { cf().reset(); $('#connection-capabilities').replaceChildren(); connectionState('로그인이 필요합니다.'); connectionButtons(); }
   $('#items').replaceChildren(); $('#login').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true;
@@ -131,7 +132,7 @@ function render(data) {
 }
 $('#filters').onsubmit = e => { e.preventDefault(); load().catch(report); };
 $('#more').onclick = () => load(false).catch(report);
-$('#login').onsubmit = async e => { e.preventDefault(); try { await api('/admin/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password: $('#password').value})}); await load(); } catch (e) { report(e); } finally { $('#password').value = ''; } };
+$('#login').onsubmit = async e => { e.preventDefault(); try { await api('/admin/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password: $('#password').value})}); resetSession(); await load(); } catch (e) { report(e); } finally { $('#password').value = ''; } };
 $('#logout').onclick = async () => { try { await api('/admin/logout', {method: 'POST'}); resetSession(); $('#status').textContent = '로그아웃했습니다.'; } catch (e) { report(e); } };
 load().catch(report);
 

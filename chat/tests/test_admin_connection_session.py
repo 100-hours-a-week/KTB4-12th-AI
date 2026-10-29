@@ -43,6 +43,30 @@ const reply={revision:1,config:{kind:'openrouter',model:'synthetic'},writable:tr
    assert.equal(get('#connection-save').disabled,true);
   }
  }
+ // Keep the real api wrapper: an old 401 cannot invalidate a new login.
+ const source=fs.readFileSync(process.argv[1],'utf8');
+ run(source.slice(source.indexOf('async function api('),source.indexOf('function resetSession(')));
+ let oldUnauthorized,finishOld;
+ sandbox.ChatHTTP.json=(path,options,onUnauthorized)=>{
+  if(path==='/old-session'){oldUnauthorized=onUnauthorized;return new Promise(resolve=>{finishOld=resolve;});}
+  return Promise.resolve({items:[],nextCursor:null});
+ };
+ const old=run("api('/old-session')");
+ // Log out, then perform the real login handler (which establishes a new epoch).
+ run('resetSession()');
+ await get('#login').onsubmit({preventDefault(){}});
+ run('showConnection(reply)');
+ oldUnauthorized();finishOld({});await old;
+ assert.equal(run('connectionSnapshot.revision'),1);
+ assert.equal(get('#workspace').hidden,false);
+ // Even initial anonymous requests must not invalidate a later successful login.
+ const anonymous=run("api('/old-session')");
+ await get('#login').onsubmit({preventDefault(){}});run('showConnection(reply)');
+ oldUnauthorized();finishOld({});await anonymous;
+ assert.equal(run('connectionSnapshot.revision'),1);
+ // A current-session 401 still signs out and clears state.
+ const active=run("api('/old-session')");oldUnauthorized();finishOld({});await active;
+ assert.equal(run('connectionSnapshot'),null);
  assert.equal(get('#login').hidden,false);assert.equal(get('#workspace').hidden,true);
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''
