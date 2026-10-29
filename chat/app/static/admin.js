@@ -71,8 +71,8 @@ async function load(reset = true) {
     next = data.nextCursor;
     for (const row of data.items) {
       const button = el('button', undefined, 'conversation'); button.dataset.id = row.id; button.setAttribute('aria-pressed', row.id === current);
-      button.append(el('span', '대화 ' + row.id.slice(0, 8), 'title'), el('p', `${when(row.created)} · ${row.turnCount}턴 · 의견 ${row.feedbackCount}`, 'meta'));
-      if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`${t.status||'미기록'} · ${t.model||'모델 미기록'} · ${t.sourceScope} · ${t.environment||'환경 미기록'}`, 'meta'),el('p',`요청 ${t.turnId?.slice(0,8)||'—'} · v${t.sourceVersion??'—'} · 코드 ${t.promptVersion?.slice(0,8)||'미기록'} · 입/출 ${t.inputTokens??'?'}/${t.outputTokens??'?'} · ${t.elapsedMs??'?'}ms · ${t.costUsd??'?'} USD`,'meta'));}
+      button.append(el('span', '대화 ' + row.id.slice(0, 8), 'title'), el('p', `${when(row.created)} · ${row.turnCount}턴`, 'meta'));
+      if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`${t.status||'미기록'} · ${t.model||'모델 미기록'} · ${t.sourceScope}`, 'meta'),el('p',`입/출 ${t.inputTokens??'?'}/${t.outputTokens??'?'} · ${t.elapsedMs??'?'}ms · ${t.costUsd??'?'} USD`,'meta'));}
       if (row.latestFeedbackAt) button.append(el('p', `최근 의견 ${when(row.latestFeedbackAt)} · 미검토 ${row.pendingFeedbackCount}개`, 'meta'));
       if (row.failedCount) button.append(el('span', `실패 ${row.failedCount}건`, 'meta failed'));
       button.onclick = () => select(row.id, false, row.focusTurnId).catch(report); $('#items').append(button);
@@ -104,15 +104,16 @@ function render(data) {
     const article = el('article', undefined, 'turn' + (turn.turnId === selectedFocus ? ' focused-turn' : '')), top = el('div', undefined, 'turn-head');
     article.id = 'turn-' + turn.turnId; article.tabIndex = -1;
     top.append(el('span', when(turn.created)), el('span', labels[turn.state.status], 'badge' + (turn.state.status === 'FAILED' ? ' failed' : '')));
-    article.append(top, el('div', turn.state.message, 'question'), el('span', '선잘알', 'role'));
+    article.append(top);
+    if (!turn.trace) article.append(el('div', turn.state.message, 'question'));
     for (const block of turn.state.blocks) {
       if (block.type === 'text') article.append(el('div', block.text, 'answer'));
       if (block.type === 'cards') { const cards = el('div', undefined, 'cards'); for (const p of block.products) cards.append(el('p', `상품 ${p.productId} · ${p.reason}`)); article.append(cards); }
     }
     if (turn.state.error) article.append(el('p', turn.state.error.message, 'error'));
-    if (!turn.state.blocks.length) article.append(el('p', turn.trace?'답변 원문은 입출력 상세 열람에서 확인합니다.':'저장된 답변이 없습니다.', 'meta'));
+    if (!turn.state.blocks.length && !turn.trace) article.append(el('p', '저장된 답변이 없습니다.', 'meta'));
     const context = turn.context || {};
-    article.append(el('p', `${context.model || '모델 기록 없음'} · ${context.elapsedMs !== undefined ? (context.elapsedMs / 1000).toFixed(2) + '초' : '시간 기록 없음'} · 의견 ${turn.feedback.length}개`, 'meta'));
+    if (!turn.trace) article.append(el('p', `${context.model || '모델 기록 없음'} · ${context.elapsedMs !== undefined ? (context.elapsedMs / 1000).toFixed(2) + '초' : '시간 기록 없음'}`, 'meta'));
     article.append(el('p', traceMessage(context), 'meta' + (context.tracePersistence?.version === 1 && context.tracePersistence.status === 'not_recorded' ? ' failed' : '')));
     for (const feedback of turn.feedback) {
       const note = el('div', `${feedback.payload.reporterName || '익명'} · ${feedback.payload.verdict}\n${feedback.payload.note || ''}`, 'feedback'), button = el('button', feedback.reviewed ? '검토 완료 ✓' : '검토 완료로 표시');
@@ -141,18 +142,19 @@ function tracePanel(cid, turn) {
   if(!trace){box.append(el('p','실행 근거 미수집 · 과거 기록은 재구성하지 않습니다.','meta'));return box;}
   const meta=el('div',undefined,'trace-meta'), totals=trace.totals||{};
   for(const value of [trace.sourceScope,trace.environment||'환경 미기록','코드 '+(trace.sourceIdentity?.promptVersion||trace.sourceIdentity?.integrationSourceSha256||'미기록').slice(0,12),trace.connection?.model||turn.context?.model||'모델 미기록'])meta.append(el('span',value,'chip'));
-  if(trace.executionMode==='mock')meta.prepend(el('span','합성 UI fixture · 실제 모델 미호출','chip'));
-  box.append(meta,el('p',`입력 ${totals.inputTokens??'미확인'} · 출력 ${totals.outputTokens??'미확인'} tokens · 비용 ${totals.costUsd===null?'미확인':totals.costUsd+' USD'}`,'trace-totals'));
-  box.append(el('p',`요청 ${turn.turnId} · ${trace.recording.calls} · 캐시/추론은 총 토큰에 다시 더하지 않습니다.`,'meta'));
+  if(trace.executionMode==='mock')meta.prepend(el('span','합성 기록 · 모델 미호출','chip'));
+  box.append(meta,el('p',`입력 ${totals.inputTokens??'미확인'} · 출력 ${totals.outputTokens??'미확인'} tokens · ${trace.elapsedMs??'미확인'}ms · 비용 ${totals.costUsd==null?'미확인':totals.costUsd+' USD'}`,'trace-totals'));
+  box.append(el('p',`${trace.recording.calls==='not-recorded-legacy'?'모델 입출력 미기록':'마스킹된 모델 기록'} · 캐시/추론은 총 토큰에 포함됩니다.`,'meta'));
   const timeline=el('ol',undefined,'trace-timeline');
   for(const item of trace.timeline){const row=el('li');row.append(el('strong',item.kind==='model'?'모델 호출 '+item.index:item.name||'저장된 최종 상태'),el('span',`${item.status||'미기록'}${item.elapsedMs!==undefined?' · '+item.elapsedMs+' ms':''}`,'meta'));if(item.productIds)row.append(el('p','상품 후보 '+item.productIds.length+'개 · '+item.productIds.join(', '),'meta'));timeline.append(row);}
   box.append(timeline);
-  const sse=trace.sseEvents;box.append(el('p',sse?.events?.length?(sse.basis?.startsWith('stored SSE')?'저장된 SSE: ':'합성/외부 기록 이벤트: ')+sse.events.map(e=>e.id+' '+e.event).join(' → ')+(sse.truncated?' · 앞 100개만 표시':''):'SSE 이벤트 목록 미수집 · 최종 상태로 브라우저 수신을 추정하지 않습니다.','meta'));
+  const technical=el('details'),technicalTitle=el('summary','식별자·SSE 기록');technical.append(technicalTitle,el('p',`대화 ${cid} · 요청 ${turn.turnId} · ${trace.environment||'환경 미기록'} · 모델 ${trace.connection?.baseUrl||'주소 미기록'}`,'meta'));
+  const sse=trace.sseEvents;technical.append(el('p',sse?.events?.length?(sse.basis?.startsWith('stored SSE')?'저장된 SSE: ':'합성/외부 기록 이벤트: ')+sse.events.map(e=>e.id+' '+e.event).join(' → ')+(sse.truncated?' · 앞 100개만 표시':''):'SSE 이벤트 목록 미수집 · 최종 상태로 브라우저 수신을 추정하지 않습니다.','meta'));box.append(technical);
   const action=el('button','입출력 상세 열람'), detail=el('div'), state=el('p','','meta'); let open=false, busy=false;
   action.onclick=async()=>{
     if(busy)return;if(open){detail.replaceChildren();open=false;action.textContent='입출력 상세 열람';return;}
     const generation=selectionVersion;busy=true;action.disabled=true;state.textContent='마스킹된 상세를 불러오는 중…';
-    try{const data=await api(`/admin/api/conversations/${cid}/turns/${turn.turnId}/trace?details=true`);if(generation!==selectionVersion||!box.isConnected)return;detail.append(traceDetail(data));state.textContent=data.recording.detailState==='bounded-redacted'?'실제 저장 기록 · 비공개 취향/비밀/추론 원문 제외':'원문 보존 기간 만료 또는 과거 미기록';open=true;action.textContent='상세 닫기';}
+    try{const data=await api(`/admin/api/conversations/${cid}/turns/${turn.turnId}/trace?details=true`);if(generation!==selectionVersion||!box.isConnected)return;detail.append(traceDetail(data));state.textContent=data.recording.detailState==='bounded-redacted'?(data.executionMode==='mock'?'합성 저장 예시 · 실제 모델 미호출':'실제 저장 기록 · 비공개 취향/비밀/추론 원문 제외'):'원문 보존 기간 만료 또는 과거 미기록';open=true;action.textContent='상세 닫기';}
     catch(e){state.textContent=e.message;}finally{busy=false;action.disabled=false;}
   };box.append(action,state,detail);return box;
 }
@@ -161,15 +163,23 @@ function traceDetail(data){
   if(data.publicInput!==undefined){root.append(el('h3','사용자 입력'),el('p',data.publicInput,'io-message'),el('h3','최종 응답'));
     for(const block of data.publicOutput||[]){if(block.text)root.append(el('p',block.text,'io-message'));for(const card of block.products||[]){const row=el('div',undefined,'io-card');row.append(el('strong','상품 '+card.productId),el('p',card.reason));root.append(row);}}
   }else root.append(el('p','원문 열람 기간이 지났거나 생성 시각이 기록되지 않았습니다.','meta'));
-  for(const call of data.modelCalls||[]){const detail=el('details'),sum=el('summary',`모델 호출 ${call.index} · ${call.status||'미기록'} · ${call.usage?.inputTokens??'?'} → ${call.usage?.outputTokens??'?'} tokens`);detail.append(sum,el('h4','실제 전송 시점의 마스킹 입력'),el('pre',call.input?JSON.stringify(call.input,null,2):'미기록 또는 열람 기간 만료'),el('h4','모델 반환 기록'),el('pre',call.output?JSON.stringify(call.output,null,2):'미기록 또는 열람 기간 만료'));root.append(detail);}
+  for(const call of data.modelCalls||[]){const detail=el('details'),sum=el('summary',`모델 호출 ${call.index} · ${call.status||'미기록'} · ${call.usage?.inputTokens??'?'} → ${call.usage?.outputTokens??'?'} tokens`);detail.append(sum,el('h4',call.input?.capture==='actual-send-time-redacted'?'실제 전송 시점의 마스킹 입력':'저장된 입력 · 실제 전송 여부 미확인'),el('pre',call.input?JSON.stringify(call.input,null,2):'미기록 또는 열람 기간 만료'),el('h4','모델 반환 기록'),el('pre',call.output?JSON.stringify(call.output,null,2):'미기록 또는 열람 기간 만료'));root.append(detail);}
   if(!data.modelCalls?.length)root.append(el('p','과거 모델 입출력은 기록되지 않았습니다. 사용량 영수증만 별도로 확인할 수 있습니다.','meta'));
   root.append(el('p','비공개 취향·비밀·추론 원문과 도구 인자 본문은 이 상세에 포함하지 않습니다.','meta'));return root;
 }
 let connectionSnapshot=null, connectionBusy=false, connectionVersion=0;
 const cf=()=>$('#connection-form');
-function connectionInput(){const form=new FormData(cf());return {kind:form.get('kind'),baseUrl:form.get('baseUrl').trim(),model:form.get('model').trim(),auth:form.get('auth'),secretRef:form.get('secretRef')||null,connectTimeout:Number(form.get('connectTimeout')),readTimeout:Number(form.get('readTimeout'))};}
+function connectionInput(){
+  const value=name=>cf().elements[name].value,auth=value('auth');
+  return {kind:value('kind'),baseUrl:value('baseUrl').trim(),model:value('model').trim(),auth,secretRef:auth==='secret-ref'?(value('secretRef')||null):null,connectTimeout:Number(value('connectTimeout')),readTimeout:Number(value('readTimeout'))};
+}
 function connectionState(message){$('#connection-status').textContent=message;}
-function connectionButtons(){for(const id of ['connection-save','connection-check','connection-rollback','connection-reload'])$('#'+id).disabled=connectionBusy||(id!=='connection-reload'&&!connectionSnapshot?.writable)||(id==='connection-check'&&(!$('#probe-consent').checked||cf().elements.kind.value!=='openai-compatible'))||(id==='connection-rollback'&&!connectionSnapshot?.history?.length);}
+function connectionFields(){
+  const form=cf(),openrouter=form.elements.kind?.value==='openrouter';
+  for(const name of ['kind','baseUrl','model','auth','secretRef','connectTimeout','readTimeout'])if(form.elements[name])form.elements[name].disabled=connectionBusy||!connectionSnapshot?.writable||(name==='auth'&&openrouter)||(name==='secretRef'&&(openrouter||form.elements.auth?.value!=='secret-ref'));
+  if(form.elements.baseUrl)form.elements.baseUrl.readOnly=openrouter;
+}
+function connectionButtons(){connectionFields();for(const id of ['connection-save','connection-check','connection-rollback','connection-reload'])$('#'+id).disabled=connectionBusy||(id!=='connection-reload'&&!connectionSnapshot?.writable)||(id==='connection-check'&&(!$('#probe-consent').checked||cf().elements.kind.value!=='openai-compatible'))||(id==='connection-rollback'&&!connectionSnapshot?.history?.length);}
 function showConnection(data){connectionSnapshot=data;for(const [k,v]of Object.entries(data.config)){if(k==='secretRef')continue;if(cf().elements[k])cf().elements[k].value=v??'';}const refs=cf().elements.secretRef;refs.replaceChildren(new Option('없음',''));for(const name of data.secretReferences||[])refs.append(new Option(name,name));refs.value=data.config.secretRef||'';const caps=$('#connection-capabilities');caps.replaceChildren();for(const [key,label]of [['connection','연결'],['tools','도구 호출'],['sse','SSE 완료'],['jsonSchema','별도 JSON Schema']])caps.append(el('div',label+' · '+(data.verification?.[key]===true?'명시 검증 확인':'미관측'),'capability'));connectionState(`설정 v${data.revision} · ${data.writable?'저장 가능':'읽기 전용'} · ${data.scope}`);connectionButtons();}
 async function loadConnection(){const generation=++connectionVersion;connectionBusy=true;connectionButtons();try{const data=await api('/admin/api/model-connection');if(generation===connectionVersion)showConnection(data);}catch(e){if(generation===connectionVersion)connectionState(e.message);}finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}}
 async function connectionAction(path,body){if(connectionBusy)return;const generation=++connectionVersion;connectionBusy=true;connectionButtons();try{const data=await api(path,{method:path.endsWith('model-connection')?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(generation!==connectionVersion)return;if(data.config)showConnection(data);else connectionState('도구·SSE 호환 확인. 이 설정은 아직 적용하지 않았습니다.');}catch(e){if(generation===connectionVersion)connectionState(e.message+' 기존 적용 설정은 다시 조회해 확인하세요.');}finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}}
@@ -178,6 +188,7 @@ $('#tab-traces').onclick=()=>{$('#traces-view').hidden=false;$('#connection-view
 $('#tab-connection').onclick=()=>{$('#traces-view').hidden=true;$('#connection-view').hidden=false;$('#tab-traces').setAttribute('aria-pressed','false');$('#tab-connection').setAttribute('aria-pressed','true');loadConnection();};
 $('#connection-reload').onclick=loadConnection;
 $('#probe-consent').onchange=connectionButtons;
+cf().elements.auth.onchange=connectionButtons;
 cf().elements.kind.onchange=()=>{cf().elements.auth.value=cf().elements.kind.value==='openrouter'?'existing-openrouter':'none';if(cf().elements.kind.value==='openrouter')cf().elements.baseUrl.value='https://openrouter.ai/api/v1';connectionButtons();};
 cf().onsubmit=e=>{e.preventDefault();if(connectionSnapshot)connectionAction('/admin/api/model-connection',{revision:connectionSnapshot.revision,config:connectionInput()});};
 $('#connection-check').onclick=()=>{if($('#probe-consent').checked)connectionAction('/admin/api/model-connection/check',{config:connectionInput()});};

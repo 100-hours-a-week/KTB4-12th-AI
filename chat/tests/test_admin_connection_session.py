@@ -17,7 +17,7 @@ class Element {
  setAttribute(){} reset(){this.resetCount++;}
 }
 const nodes=new Map(),get=k=>{if(!nodes.has(k))nodes.set(k,new Element());return nodes.get(k);};
-get('#connection-form').elements={kind:{value:'openrouter'},secretRef:new Element()};
+get('#connection-form').elements={kind:{value:'openrouter'},auth:{value:'existing-openrouter'},secretRef:new Element()};
 const sandbox={document:{querySelector:get,querySelectorAll:()=>[],createElement:()=>new Element()},
  URLSearchParams,Date,JSON,Object,setTimeout,FormData:class{get(){return '';}},Option:class{},
  ChatHTTP:{json:async()=>({items:[],nextCursor:null})}};
@@ -28,9 +28,21 @@ const reply={revision:1,config:{kind:'openrouter',model:'synthetic'},writable:tr
  await new Promise(setImmediate);
  sandbox.reply=reply;run('showConnection(reply)');
  assert.equal(run('connectionSnapshot.revision'),1);
+ // Disabled fixed-auth fields must still be serialized when saving OpenRouter.
+ Object.assign(get('#connection-form').elements,{baseUrl:{value:'https://openrouter.ai/api/v1'},model:{value:'synthetic'},connectTimeout:{value:'10'},readTimeout:{value:'75'}});
+ run('connectionButtons()');assert.equal(get('#connection-form').elements.auth.disabled,true);
+ assert.equal(run('connectionInput().auth'),'existing-openrouter');
+ get('#connection-form').elements.secretRef.value='STALE_REFERENCE';
+ assert.equal(run('connectionInput().secretRef'),null);
  run('resetSession()');assert.equal(run('connectionSnapshot'),null);
  assert.equal(get('#connection-capabilities').children.length,0);
  assert.equal(get('#connection-save').disabled,true);
+ // Unknown/synthetic captures must not claim an actual model transmission.
+ const texts=n=>[n.textContent||'',...n.children.flatMap(texts)].join(' ');
+ sandbox.traceFixture={recording:{},modelCalls:[{index:1,input:{capture:'scripted-preview-only'}}]};
+ assert(!texts(run('traceDetail(traceFixture)')).includes('실제 전송 시점'));
+ sandbox.traceFixture.modelCalls[0].input.capture='actual-send-time-redacted';
+ assert(texts(run('traceDetail(traceFixture)')).includes('실제 전송 시점'));
  // Both read and mutation responses (including errors) may arrive after logout.
  for(const expression of ['loadConnection()',"connectionAction('/admin/api/model-connection',{})"]){
   for(const fails of [false,true]){

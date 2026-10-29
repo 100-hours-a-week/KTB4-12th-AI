@@ -125,3 +125,21 @@ async def test_probe_matches_runtime_tool_stream_contract(settings,mode):
   return httpx.Response(200,headers={'content-type':'text/event-stream'},text=raw)
  with pytest.raises(APIError):await settings.check(config(),httpx.MockTransport(reply))
  assert settings.read()['revision']==0
+
+async def test_read_default_and_admit_never_probe_provider(settings):
+ assert settings.public()['revision']==0
+ admitted=await settings.admit()
+ assert admitted.kind=='openrouter' and admitted.client is None
+ assert settings.checks=={} and not settings.path.exists()
+
+@pytest.mark.parametrize('failure',['http','timeout','missing-done','server-error'])
+async def test_compatible_probe_failures_do_not_replace_config(settings,failure):
+ await checked(settings);await settings.publish(config(),0)
+ before=settings.read()
+ def reply(req):
+  if failure=='http':return httpx.Response(503)
+  if failure=='timeout':raise httpx.ReadTimeout('synthetic timeout',request=req)
+  raw=packet().replace('data: [DONE]\n\n','') if failure=='missing-done' else 'data: {"error":{"message":"synthetic"}}\n\ndata: [DONE]\n\n'
+  return httpx.Response(200,headers={'content-type':'text/event-stream'},text=raw)
+ with pytest.raises(APIError):await settings.check(config(),httpx.MockTransport(reply))
+ assert settings.read()==before

@@ -29,3 +29,9 @@ PYTHONPATH=chat:chat/pc_tests:profiling/src:. chat/.venv/bin/python -B -m pytest
 - `CHAT_LLM_SECRET_REFS`: 필요한 경우 **이미 주입된** 인증 환경변수 이름 목록. OpenRouter 키를 Modal로 자동 전달하지 않습니다.
 
 Modal/vLLM 모델은 `/chat/completions`의 자동 도구 선택·도구 JSON 인자·SSE 완료 계약을 지원해야 합니다. 실제 주소와 모델 ID, 인증 방식/기존 참조, 제한 시간을 선택한 뒤 명시적 합성 호환 검증을 실행하고 저장합니다. 검증은 모델 요청 1회를 발생시킬 수 있으며 JSON Schema 전체 지원이나 추천 품질을 증명하지 않습니다. 이 변경의 개발 검증은 로컬 합성 서버만 사용했습니다. 설정은 revision 비교·파일 잠금·원자적 교체로 발행하고 기존 요청은 기존 연결로 끝납니다. 최근 5개 설정으로 되돌리기는 새 revision을 발행합니다. 검증 결과는 해당 시점의 관측이며 이후 제공자 가용성을 보장하지 않습니다.
+
+Modal 준비 시 대시보드에는 `https://<배포 endpoint>/v1`, vLLM의 `--served-model-name`에 지정한 모델 ID, `none` 또는 기존 Bearer 비밀 참조를 넣습니다. 서버는 모델에 맞는 chat template, `--enable-auto-tool-choice`와 `--tool-call-parser`를 준비해야 합니다. Modal 프록시의 `Modal-Key`/`Modal-Secret` 이중 헤더 인증은 현재 클라이언트가 지원하지 않으므로 해당 인증 배포를 URL만 바꿔 연결할 수는 없습니다. 기존 OpenRouter 키를 재사용해 다른 호스트로 보내지 않습니다.
+
+설정 조회·저장은 모델을 호출하지 않습니다. 별도 동의 후 **합성 호출로 호환 확인**을 눌렀을 때만 최대 64 출력 토큰의 도구/SSE 시험을 실행합니다. 시험의 전체 제한은 15초이므로 cold start가 긴 서버는 먼저 준비되어 있어야 합니다. 서비스 요청은 연결 1–30초·읽기 1–120초와 기존 턴 전체 제한(180초)을 따릅니다. 실패·취소는 설정을 바꾸지 않고 자동 재시도하지 않습니다. 호환 확인은 추천 품질이나 실제 Modal 운영 검증이 아닙니다.
+
+근거: [Modal OpenAI 호환 vLLM 예제](https://modal.com/docs/examples/llm_inference), [vLLM 자동 도구 호출](https://docs.vllm.ai/en/latest/features/tool_calling/).
