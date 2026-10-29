@@ -153,7 +153,7 @@ class Connections:
                             if packet.get('error'):raise APIError(400,'모델이 오류를 반환했습니다.')
                             if isinstance(packet.get('usage'),dict):usage=packet['usage']
                             for choice in packet.get('choices',[]):
-                                if choice.get('delta',{}).get('content'):raise APIError(400,'도구 호출 전에 일반 텍스트를 반환했습니다.')
+                                # Narration is legal in a tool stream; it is not probe output.
                                 if choice.get('finish_reason')=='tool_calls':finished=True
                                 for f in choice.get('delta',{}).get('tool_calls',[]):
                                     call=fragments.setdefault(f.get('index',0),{'name':'','arguments':''});fun=f.get('function',{})

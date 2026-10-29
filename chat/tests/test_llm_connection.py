@@ -115,12 +115,11 @@ async def test_real_chat_runtime_uses_compatible_snapshot_for_entire_turn(settin
   summary=trace(cid,store.public(store.states[tid]),receipt);assert summary['totals']['inputTokens']==20 and summary['totals']['outputTokens']==20
   # Same terminal turn retry is a read, never a new request/config admission.
   again=await runtime.accept(cid,tid,'합성 책받침 하나 추천');assert again['status']=='COMPLETED' and len(sent)==2
-@pytest.mark.parametrize('mode',['text-before-tool','missing-finish','malformed-details'])
+@pytest.mark.parametrize('mode',['missing-finish','malformed-details'])
 async def test_probe_matches_runtime_tool_stream_contract(settings,mode):
  def reply(req):
   raw=packet()
   if mode=='missing-finish':raw=raw.replace('"tool_calls"}', 'null}')
-  elif mode=='text-before-tool':raw='data: '+json.dumps({'choices':[{'delta':{'content':'narration'}}]})+'\n\n'+raw
   else:raw='data: []\n\ndata: [DONE]\n\n'
   return httpx.Response(200,headers={'content-type':'text/event-stream'},text=raw)
  with pytest.raises(APIError):await settings.check(config(),httpx.MockTransport(reply))
@@ -143,3 +142,37 @@ async def test_compatible_probe_failures_do_not_replace_config(settings,failure)
   return httpx.Response(200,headers={'content-type':'text/event-stream'},text=raw)
  with pytest.raises(APIError):await settings.check(config(),httpx.MockTransport(reply))
  assert settings.read()==before
+
+async def test_probe_accepts_bounded_narration_before_valid_tool(settings):
+ prefix='data: '+json.dumps({'choices':[{'delta':{'content':'확인하겠습니다.'}}]})+'\n\n'
+ result=await settings.check(config(),httpx.MockTransport(lambda req:httpx.Response(200,headers={'content-type':'text/event-stream'},text=prefix+packet())))
+ assert result['tools'] and result['sse']
+
+@pytest.mark.parametrize('tool_response',[True,False])
+async def test_compatible_runtime_resolves_text_or_tool_before_publishing(settings,tool_response):
+ import time
+ from app.llm_connection import AdmittedConnection
+ from app.model_config import ModelConfig
+ from app.low_latency import ProviderAdapter
+ from types import SimpleNamespace
+ packets=[{'choices':[{'delta':{'content':'조회하겠습니다.'}}]}]
+ if tool_response:
+  packets.append({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'one','function':{'name':'gift_context','arguments':'{"queries":["책"]}'}}]},'finish_reason':'tool_calls'}]})
+ else:packets.append({'choices':[{'delta':{'content':' 안녕하세요.'},'finish_reason':'stop'}]})
+ packets.append({'choices':[],'usage':{'prompt_tokens':12,'completion_tokens':8}})
+ wire=''.join('data: '+json.dumps(p,ensure_ascii=False)+'\n\n' for p in packets)+'data: [DONE]\n\n'
+ async with httpx.AsyncClient(base_url=BASE,transport=httpx.MockTransport(lambda req:httpx.Response(200,headers={'content-type':'text/event-stream'},text=wire))) as client:
+  connection=AdmittedConnection('openai-compatible',BASE,'synthetic-vllm',1,client)
+  config_model=connection.model_config()
+  class Runtime:
+   model_config=config_model
+   def request_body(self,*args):return {'model':'synthetic-vllm','max_tokens':1200,'messages':[]}
+  receipt={'startedMonotonic':time.monotonic()};token=ACTIVE_CONNECTION.set(connection)
+  try:events=[v async for v in ProviderAdapter(Runtime(),receipt).stream([], [{'type':'function','function':{'name':'gift_context'}}], 'synthetic-vllm')]
+  finally:ACTIVE_CONNECTION.reset(token)
+  assert receipt['requestAudit'][0]['status']=='completed'
+  assert receipt['requestAudit'][0]['usage']['completion_tokens']==8
+  assert [e for e in events if e['kind']=='usage']
+  text=''.join(e['value'] for e in events if e['kind']=='text')
+  assert text==('' if tool_response else '조회하겠습니다. 안녕하세요.')
+  assert bool([e for e in events if e['kind']=='tool'])==tool_response

@@ -53,9 +53,9 @@ class ProviderAdapter:
   try:
    async with http.stream('POST','chat/completions',json=body,**({'timeout':__import__('httpx').Timeout(connection.read_timeout,connect=connection.connect_timeout)} if connection is not None else {})) as response:
     if response.status_code!=200:raise ProviderError('provider_http_'+str(response.status_code))
-    # Claude can stream a narration block before a valid tool_use block.
+    # OpenAI-compatible servers and Claude may narrate before a valid tool call.
     # Keep that narration out of durable answers, then consume usage to settle cost.
-    hold_text=body['model']=='anthropic/claude-haiku-5.5' and bool(tools)
+    hold_text=bool(tools) and (compatible or body['model']=='anthropic/claude-haiku-5.5')
     buffered=[];text_size=0;has_tool=False;text_released=False;finish=None;has_text=False
     async for packet in sse_json(response):
      if not isinstance(packet,dict) or packet.get('error'):raise ProviderError('provider_packet_error')
