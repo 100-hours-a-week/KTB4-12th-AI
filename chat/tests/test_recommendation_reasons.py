@@ -23,7 +23,7 @@ def test_supplied_recommendation_reason_is_not_replaced_by_catalog_description()
     harness.catalog = CatalogAdapter(None, fixture.META, {})
     row = view(fixture.PRODUCT)
     harness.catalog.products[row['product_id']] = row
-    reason = '책을 받쳐 두고 읽으려는 요청에 맞는 후보예요.'
+    reason = '책을 세워 두고 편안하게 읽을 수 있는 받침대예요.'
     filters = Filters()
     args = SimpleNamespace(
         products=[SimpleNamespace(product_id='101', reason=reason)],
@@ -73,9 +73,9 @@ def test_confirmed_numeric_fact_in_model_reason_is_preserved():
 
 
 REASONS = {
-    '101': '책을 받쳐 두고 읽으려는 요청에 맞아 골랐어요.',
-    '102': '읽던 쪽을 표시하려는 요청에 맞는 책갈피예요.',
-    '103': '독서 중 메모를 남기려는 요청에 맞는 수첩이에요.',
+    '101': '책을 세워 두고 읽을 수 있는 받침대예요.',
+    '102': '읽던 쪽에 끼워 두고 다시 펼칠 곳을 표시해요.',
+    '103': '책을 읽으며 떠오른 생각을 짧게 적어 두기 좋아요.',
 }
 
 
@@ -179,6 +179,21 @@ def test_active_schema_requires_per_id_reasons_without_changing_legacy_pc_schema
     with pytest.raises(ValidationError):
         harness.parse_selection({'product_ids': ['101']}, schema)
     assert harness.parse_selection(selection([]), schema).product_ids == []
+
+
+def test_card_intro_instructions_keep_personalization_and_price_conversation_separate():
+    from app.integrated_harness import SYSTEM, RECIPIENT_CONTEXT
+    harness = object.__new__(IntegratedHarness)
+    for tool in (harness.selection_tool(None, ()), harness.list_tool(())):
+        item = tool['function']['parameters']['properties']['reasons']['items']
+        assert '상품 자체의 특징·용도·사용 느낌' in item['properties']['reason']['description']
+        assert '추천 이유' not in item['properties']['reason']['description']
+    assert '상품명·가격·수신자 취향·예산 적합성은 반복하지 않는다' in SYSTEM
+    assert '조회 근거 안에서 상품 자체의 특징·용도·사용 느낌' in SYSTEM
+    assert '확인되지 않은 특성은 만들지 않는다' in SYSTEM
+    assert 'giftPreference 자연어·dislikedCategories·태그를 검색과 선택에 활용' in RECIPIENT_CONTEXT
+    assert '순번의 이름·가격은 recall_gift(position)' in SYSTEM
+    assert '수신자 비선호 카테고리는 서버가 별도 적용' in SYSTEM
 
 
 INVALID_SELECTIONS = [
