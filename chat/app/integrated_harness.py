@@ -20,7 +20,7 @@ class RecommendationReason(Strict):
     product_id: str = Field(min_length=1, max_length=100)
     reason: str = Field(
         min_length=1, max_length=MAX_CARD_REASON_LENGTH,
-        description="조회 근거에 있는 상품 자체의 특징·용도·사용 느낌을 소개하는 짧은 한국어 한 문장.",
+        description="상품 설명: 카탈로그 근거로 확인한 특징·용도·사용 느낌을 짧은 한국어 한 문장으로 소개.",
     )
 
     @field_validator("reason")
@@ -32,11 +32,15 @@ class RecommendationReason(Strict):
 
 
 class PublicSelection(Selection):
+    message: str = Field(
+        default='', max_length=300,
+        description="추가 확인·조회 한계 등 카드 밖에서 꼭 필요한 안내만. 상품 설명만으로 충분하면 생략.",
+    )
     # Bound model payloads; public cards are projected to the existing maximum.
     product_ids: list[str] = Field(max_length=30)
     reasons: list[RecommendationReason] = Field(
         max_length=30,
-        description="product_ids와 같은 ID·순서로 상품마다 짧은 소개 하나. 선택이 없으면 [].",
+        description="product_ids와 같은 ID·순서로 상품마다 짧은 상품 설명 하나. 선택이 없으면 [].",
     )
 
 
@@ -46,7 +50,7 @@ class PublicListing(Listing):
     )
     reasons: list[RecommendationReason] = Field(
         default_factory=list, max_length=30,
-        description="brief 카드에는 product_ids와 같은 ID·순서로 짧은 상품 소개를 작성. names에는 생략.",
+        description="brief 카드에는 product_ids와 같은 ID·순서로 짧은 상품 설명을 작성. names에는 생략.",
     )
 
 
@@ -68,7 +72,7 @@ SYSTEM = """한국어 선물 상담 도우미다. 최신 요청과 실제 사용
 
 [답변과 도구]
 일상 대화·편지·설명·비교·확인 질문은 텍스트로 답한다. 새 추천·조건 변경·나머지 후보 선택은 gift_context로 한 번 조회한다. queries는 종류·용도 하나가 기본이며 서로 다른 종류일 때만 두 개다. 동의어 중복 검색은 하지 않는다.
-실제 상품 표시는 show_gifts 또는 list_gifts를 쓴다. 요청 수 이하, 최대 3개의 적합한 ID를 표시 순서대로 고른다. show_gifts와 list_gifts(format=brief)는 product_ids와 같은 ID·순서의 reasons({product_id,reason})가 필요하다. reason은 조회 근거 안에서 상품 자체의 특징·용도·사용 느낌을 소개하는 1–200자의 자연스러운 한국어 한 문장이다. 상품명·가격·수신자 취향·예산 적합성은 반복하지 않는다. 확인되지 않은 특성은 만들지 않는다. names는 이름 목록이며 reasons를 생략한다. message는 카드와 중복되지 않는 안내만 쓴다. 사진·상품 사실은 서버가 표시한다.
+실제 상품 표시는 show_gifts 또는 list_gifts를 쓴다. 요청 수 이하, 최대 3개의 적합한 ID를 표시 순서대로 고른다. show_gifts와 list_gifts(format=brief)는 product_ids와 같은 ID·순서의 reasons({product_id,reason})가 필요하다. 기존 필드명 reason에는 상품 설명을 쓴다. 카탈로그 근거로 확인한 특징·용도·사용 느낌을 짧은 한국어 한 문장(1–200자)으로 소개한다. 상품명·가격·수신자 취향·예산 적합성은 반복하지 않는다. 확인되지 않은 특성은 만들지 않는다. names는 이름 목록이며 reasons를 생략한다. message는 추가 확인·조회 한계 등 꼭 필요한 안내만 쓰고, 상품 설명만으로 충분하면 생략한다. 사진·상품 사실은 서버가 표시한다.
 직전 상품 재표시는 제공된 list_gifts, 순번의 이름·가격은 recall_gift(position), 최근 조회 현황은 inspect_search를 쓴다. 제공된 도구 하나씩 호출하고 일반 텍스트로 실행을 약속하지 않는다. 깨진 도구 응답은 오류로 종료되며 자동 수정 요청은 보내지 않는다.
 
 [조건과 선택]

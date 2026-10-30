@@ -181,19 +181,33 @@ def test_active_schema_requires_per_id_reasons_without_changing_legacy_pc_schema
     assert harness.parse_selection(selection([]), schema).product_ids == []
 
 
-def test_card_intro_instructions_keep_personalization_and_price_conversation_separate():
-    from app.integrated_harness import SYSTEM, RECIPIENT_CONTEXT
-    harness = object.__new__(IntegratedHarness)
-    for tool in (harness.selection_tool(None, ()), harness.list_tool(())):
-        item = tool['function']['parameters']['properties']['reasons']['items']
-        assert '상품 자체의 특징·용도·사용 느낌' in item['properties']['reason']['description']
-        assert '추천 이유' not in item['properties']['reason']['description']
-    assert '상품명·가격·수신자 취향·예산 적합성은 반복하지 않는다' in SYSTEM
-    assert '조회 근거 안에서 상품 자체의 특징·용도·사용 느낌' in SYSTEM
-    assert '확인되지 않은 특성은 만들지 않는다' in SYSTEM
-    assert 'giftPreference 자연어·dislikedCategories·태그를 검색과 선택에 활용' in RECIPIENT_CONTEXT
-    assert '순번의 이름·가격은 recall_gift(position)' in SYSTEM
-    assert '수신자 비선호 카테고리는 서버가 별도 적용' in SYSTEM
+async def test_sent_card_description_role_keeps_personalized_choice_and_price_conversation():
+    from test_ai_stored_preferences import snapshot
+    raw = '합성 취향: 독서할 때 사용할 받침대를 좋아해요.'
+    receipt, sent, store, search, _, tid = await fixture.run([
+        fixture.tool('gift_context', fixture.context()),
+        fixture.tool('show_gifts', selection()),
+    ], stored=snapshot(raw), message='5만원 이하 선물을 하나만 보여줘')
+    assert len(sent) == 2
+    for request in sent:
+        system = '\n'.join(m['content'] for m in request['messages'] if m['role'] == 'system')
+        assert '기존 필드명 reason에는 상품 설명을 쓴다' in system
+        assert '카탈로그 근거로 확인한 특징·용도·사용 느낌' in system
+        assert '상품명·가격·수신자 취향·예산 적합성은 반복하지 않는다' in system
+        assert raw in system
+        assert '순번의 이름·가격은 recall_gift(position)' in system
+    display_tools = [t['function'] for t in sent[1]['tools']
+                     if t['function']['name'] in ('show_gifts', 'list_gifts')]
+    assert {t['name'] for t in display_tools} == {'show_gifts', 'list_gifts'}
+    for tool in display_tools:
+        properties = tool['parameters']['properties']
+        description = properties['reasons']['items']['properties']['reason']['description']
+        assert description.startswith('상품 설명:')
+        assert '선택 이유' not in properties['message']['description']
+    assert all(20 in r['filters']['excludeCategoryIds'] for r in search.queries)
+    assert receipt['selectedProducts'][0]['productId'] == 101
+    assert store.states[tid]['blocks'] == [
+        {'type': 'cards', 'products': [{'productId': 101, 'reason': REASONS['101']}]}]
 
 
 INVALID_SELECTIONS = [
