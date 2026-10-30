@@ -172,6 +172,7 @@ class IntegratedHarness(ConversationHarness):
         pending['listed'] = list(args.product_ids)
         if args.format == 'brief':
             pending['gallery'], _ = self.validate_show(self.show_args(args, session.filters), session, rows)
+            pending['listed'] = [row['product_id'] for row in pending['gallery']]
 
     def answer_from_tool(self, name, payload, schema, session):
         if name != 'list_gifts':
@@ -188,8 +189,9 @@ class IntegratedHarness(ConversationHarness):
         if name != 'list_gifts':
             return super().answer_result(name, payload, text, session)
         pending = self._pending.get()
+        rows = pending['gallery'] if pending['list_args'].format == 'brief' else pending['list_rows']
         return {'text': text, 'source': 'catalog_lookup', 'snapshot': self.catalog.snapshot,
-            'product_ids': pending['listed'], 'products': copy.deepcopy(pending['list_rows']),
+            'product_ids': [row['product_id'] for row in rows], 'products': copy.deepcopy(rows),
             'serverRendered': True}
 
     def selection_contract(self):

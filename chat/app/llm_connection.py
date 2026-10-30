@@ -15,6 +15,7 @@ DEFAULT_URL = 'https://openrouter.ai/api/v1'
 
 def canonical_url(value):
     try:
+        if not isinstance(value,str):raise ValueError()
         p=urlsplit(value)
         if p.scheme not in {'https','http'} or not p.hostname or p.username is not None or p.password is not None or p.query or p.fragment or p.port==0 or '%' in p.netloc or '\\' in value:raise ValueError()
         if p.path.rstrip('/')!='/v1' and not (p.hostname=='openrouter.ai' and p.path.rstrip('/')=='/api/v1'):raise ValueError()
@@ -30,7 +31,7 @@ def destination(url,*,resolve=True) -> tuple[str, ...]:
     local=p.hostname in {'127.0.0.1','::1'}
     if local:
         if os.getenv('AI_ENVIRONMENT') not in {'local','develop'}:raise APIError(400,'로컬 시험 주소는 운영에서 사용할 수 없습니다.')
-        return (p.hostname,)
+        return (str(p.hostname),)
     if p.scheme!='https':raise APIError(400,'원격 모델은 HTTPS가 필요합니다.')
     if not resolve:return ()
     try:addresses={str(x[4][0]) for x in socket.getaddrinfo(p.hostname,p.port or 443,type=socket.SOCK_STREAM)}
@@ -41,7 +42,7 @@ def destination(url,*,resolve=True) -> tuple[str, ...]:
 def validate(value):
     if not isinstance(value,dict) or set(value)-FIELDS:raise APIError(400,'알 수 없는 연결 설정입니다.')
     c=copy.deepcopy(value)
-    if c.get('kind') not in {'openrouter','openai-compatible'}:raise APIError(400,'지원하지 않는 연결 방식입니다.')
+    if not isinstance(c.get('kind'),str) or c['kind'] not in {'openrouter','openai-compatible'}:raise APIError(400,'지원하지 않는 연결 방식입니다.')
     c['baseUrl']=canonical_url(c.get('baseUrl',''))
     if c['kind']=='openrouter':
         if c['baseUrl']!=DEFAULT_URL or c.get('auth')!='existing-openrouter' or c.get('secretRef'):raise APIError(400,'OpenRouter는 기존 역할별 인증 경로를 사용합니다.')
@@ -51,8 +52,10 @@ def validate(value):
         if c['baseUrl']==DEFAULT_URL:raise APIError(400,'공식 OpenRouter 주소는 OpenRouter 연결 방식을 사용하세요.')
         destination(c['baseUrl'],resolve=False)
         if not isinstance(c.get('model'),str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}',c['model']):raise APIError(400,'모델 ID를 확인하세요.')
-        if c.get('auth') not in {'none','secret-ref'}:raise APIError(400,'인증 방식은 none 또는 등록된 비밀 참조입니다.')
-        ref=c.get('secretRef') or None
+        if not isinstance(c.get('auth'),str) or c['auth'] not in {'none','secret-ref'}:raise APIError(400,'인증 방식은 none 또는 등록된 비밀 참조입니다.')
+        ref=c.get('secretRef')
+        if ref is not None and not isinstance(ref,str):raise APIError(400,'비밀 참조 이름을 확인하세요.')
+        ref=ref or None
         allowed={x.strip() for x in os.getenv('CHAT_LLM_SECRET_REFS','').split(',') if x.strip()}
         if c['auth']=='secret-ref' and (not ref or ref not in allowed or not os.getenv(ref)):raise APIError(400,'기존 배포 환경의 등록된 비밀 참조가 필요합니다.')
         if c['auth']=='none' and ref:raise APIError(400,'인증 없음에는 비밀 참조를 지정하지 않습니다.')
@@ -110,9 +113,14 @@ class Connections:
         if self.path is None or not self.path.exists():return {'revision':0,'config':copy.deepcopy(self.default),'history':[],'verification':{'state':'existing-openrouter-path','connection':None,'tools':None,'sse':None}}
         try:
             if self.path.is_symlink() or self.path.stat().st_size>32000:raise ValueError()
-            v=json.loads(self.path.read_text());assert type(v['revision']) is int and v['revision']>0 and isinstance(v['history'],list)
+            v=json.loads(self.path.read_text())
+            if not isinstance(v,dict) or type(v['revision']) is not int or v['revision']<=0 or not isinstance(v['history'],list):raise ValueError()
+            if not isinstance(v.get('verification',{}),dict):raise ValueError()
+            for entry in v['history']:
+                if not isinstance(entry,dict) or not isinstance(entry.get('config'),dict):raise ValueError()
+                if entry.get('verification') is not None and not isinstance(entry['verification'],dict):raise ValueError()
             validate(v['config']);return v
-        except (OSError,ValueError,AssertionError,KeyError):raise APIError(503,'모델 연결 설정을 읽을 수 없습니다. 기존 파일을 보존하고 확인하세요.') from None
+        except (OSError,ValueError,TypeError,KeyError,APIError):raise APIError(503,'모델 연결 설정을 읽을 수 없습니다. 기존 파일을 보존하고 확인하세요.') from None
     def public(self):
         value=self.read();return {**value,'writable':self.path is not None,'allowedBaseUrls':sorted({DEFAULT_URL,*[s.strip() for s in os.getenv('CHAT_LLM_ALLOWED_BASE_URLS','').split(',') if s.strip()]}),'secretReferences':[x.strip() for x in os.getenv('CHAT_LLM_SECRET_REFS','').split(',') if x.strip()],'scope':'chat-only; profiler unchanged','verificationNotice':'도구·SSE 검증과 실제 추천 품질·JSON Schema 지원·배포 성공은 별개입니다.'}
     async def client(self,c,transport=None):
@@ -170,26 +178,26 @@ class Connections:
             with publication_lock(self.path):
                 return await self._publish_locked(c,expected_revision)
     async def _publish_locked(self,c,expected_revision):
-            old=self.read()
-            if type(expected_revision) is not int or old['revision']!=expected_revision:raise APIError(409,'다른 관리자가 설정을 변경했습니다. 다시 조회하세요.')
-            proof=self.checks.get(fingerprint(c))
-            if c['kind']=='openai-compatible' and (not proof or time.time()-proof['checkedAt']>300):raise APIError(409,'이 설정으로 최근 도구·SSE 호환 시험을 먼저 실행하세요.')
-            value={'revision':old['revision']+1,'config':c,'verification':proof or {'state':'existing-openrouter-path'},'history':([{'config':old['config'],'verification':old.get('verification')}]+old['history'])[:5]}
-            path=self.path
-            if path is None:raise APIError(409,'모델 연결 설정은 읽기 전용입니다.')
-            directory=path.parent
-            if not directory.is_dir() or directory.is_symlink() or path.is_symlink():raise APIError(409,'기존 비공개 설정 폴더가 필요합니다.')
-            fd,name=tempfile.mkstemp(dir=directory,prefix='.chat-connection-')
-            try:
-                with os.fdopen(fd,'w') as output:json.dump(value,output);output.flush();os.fsync(output.fileno())
-                os.replace(name,path)
-            except OSError:raise APIError(503,'설정 저장 실패입니다. 상태를 다시 조회하세요.') from None
-            finally:
-                if os.path.exists(name):os.unlink(name)
-            return self.public()
+        old=self.read()
+        if type(expected_revision) is not int or old['revision']!=expected_revision:raise APIError(409,'다른 관리자가 설정을 변경했습니다. 다시 조회하세요.')
+        proof=self.checks.get(fingerprint(c))
+        if c['kind']=='openai-compatible' and (not proof or time.time()-proof.get('rollbackAt',proof['checkedAt'])>300):raise APIError(409,'이 설정으로 최근 도구·SSE 호환 시험을 먼저 실행하세요.')
+        value={'revision':old['revision']+1,'config':c,'verification':proof or {'state':'existing-openrouter-path'},'history':([{'config':old['config'],'verification':old.get('verification')}]+old['history'])[:5]}
+        path=self.path
+        if path is None:raise APIError(409,'모델 연결 설정은 읽기 전용입니다.')
+        directory=path.parent
+        if not directory.is_dir() or directory.is_symlink() or path.is_symlink():raise APIError(409,'기존 비공개 설정 폴더가 필요합니다.')
+        fd,name=tempfile.mkstemp(dir=directory,prefix='.chat-connection-')
+        try:
+            with os.fdopen(fd,'w') as output:json.dump(value,output);output.flush();os.fsync(output.fileno())
+            os.replace(name,path)
+        except OSError:raise APIError(503,'설정 저장 실패입니다. 상태를 다시 조회하세요.') from None
+        finally:
+            if os.path.exists(name):os.unlink(name)
+        return self.public()
     async def rollback(self,expected_revision):
         old=self.read()
         if not old['history']:raise APIError(409,'되돌릴 이전 설정이 없습니다.')
         previous=old['history'][0];proof=previous.get('verification')
-        if proof and proof.get('state')=='verified':self.checks[fingerprint(previous['config'])]={**proof,'checkedAt':time.time()}
+        if proof and proof.get('state')=='verified':self.checks[fingerprint(previous['config'])]={**proof,'rollbackAt':time.time()}
         return await self.publish(previous['config'],expected_revision)

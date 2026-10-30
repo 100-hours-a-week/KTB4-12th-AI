@@ -96,3 +96,24 @@ def test_notes_require_explicit_unexpired_detail_and_mask_secrets():
  assert out['feedbackNotes']==[{'verdict':'helpful','note':'합성 의견'}]
  old=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()
  assert 'reviewNotes' not in trace('cid',state(),context(),details=True,created=old,reviews=notes)
+
+
+def test_registered_neutral_credential_is_masked_without_active_connection(monkeypatch):
+ monkeypatch.setenv('CHAT_LLM_SECRET_REFS','NEUTRAL_CREDENTIAL')
+ monkeypatch.setenv('NEUTRAL_CREDENTIAL','synthetic-neutral-credential')
+ token=ACTIVE_CONNECTION.set(None)
+ try:
+  result=trace('cid',state(),context(),details=True,created=NOW,
+    reviews=[{'note':'echo synthetic-neutral-credential'}],
+    feedback=[{'payload':{'note':'synthetic-neutral-credential'}}])
+  assert 'synthetic-neutral-credential' not in json.dumps(result)
+  assert result['reviewNotes'][0]['note']=='echo [REDACTED]'
+ finally:ACTIVE_CONNECTION.reset(token)
+
+def test_bounded_note_details_show_latest_records_and_signal_incomplete_view():
+ notes=[{'note':f'합성 메모 {i}'} for i in range(41)]
+ out=trace('cid',state(),context(),details=True,created=NOW,reviews=notes)
+ assert len(out['reviewNotes'])==40
+ assert out['reviewNotes'][0]['note']=='합성 메모 1'
+ assert out['reviewNotes'][-1]['note']=='합성 메모 40'
+ assert out['noteRecords']=={'reviewsTotal':41,'feedbackTotal':0,'limitPerKind':40,'truncated':True,'order':'latest retained records in stored order'}

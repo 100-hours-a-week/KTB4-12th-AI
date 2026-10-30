@@ -499,3 +499,19 @@ def test_numeric_efficacy_prose_is_not_judged():
     args=harness.show_args(harness.selection_model.model_validate(payload),filters)
     cards, _ = harness.validate_show(args,SimpleNamespace(filters=filters,profile=Profile()),{'101':row})
     assert cards[0]['reason'] == payload['reasons'][0]['reason']
+
+
+@pytest.mark.parametrize('reason_ids',[['101'],[]])
+async def test_brief_listing_remembers_only_the_cards_actually_displayed(reason_ids,synthetic_catalog):
+ payload=selection(['101','102'],operation='list_gifts')
+ payload['reasons']=[r for r in payload['reasons'] if r['product_id'] in reason_ids]
+ receipt,_,store,_,_,tid=await fixture.run([
+  fixture.tool('gift_context',fixture.context()),fixture.tool('list_gifts',payload)])
+ cards=[p for b in store.states[tid]['blocks'] for p in b.get('products',[])]
+ assert [str(p['productId']) for p in cards]==reason_ids
+ assert [p['product_id'] for p in receipt['lowLatencyState']['lastDisplayedProducts']]==reason_ids
+ assert receipt['lowLatencyState']['lastSearch']['last_listed_product_ids']==reason_ids
+ # Follow-up context must not invent an ordinal for a product never shown.
+ _,sent,*_=await fixture.run([fixture.text('이전에 표시한 상품 정보를 확인했어요.')],old=receipt,message='아까 보여준 상품을 알려줘')
+ state=json.loads(sent[0]['messages'][0]['content'].split('STATE_JSON\n',1)[1])
+ assert [p['product_id'] for p in state.get('last_displayed_products',[])]==reason_ids

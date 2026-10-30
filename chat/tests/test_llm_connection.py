@@ -176,3 +176,41 @@ async def test_compatible_runtime_resolves_text_or_tool_before_publishing(settin
   text=''.join(e['value'] for e in events if e['kind']=='text')
   assert text==('' if tool_response else '조회하겠습니다. 안녕하세요.')
   assert bool([e for e in events if e['kind']=='tool'])==tool_response
+
+@pytest.mark.parametrize('field,value',[
+ ('kind',[]),('baseUrl',{'invalid':'url'}),('baseUrl',True),('auth',[]),('secretRef',['BAD_REF']),
+])
+def test_malformed_connection_field_types_return_safe_validation_errors(settings,field,value):
+ c=config();c[field]=value
+ if field=='secretRef':c['auth']='secret-ref'
+ with pytest.raises(APIError) as error:validate(c)
+ assert error.value.status==400
+ assert settings.read()['revision']==0
+
+@pytest.mark.parametrize('document',[
+ [],None,{'revision':1,'config':{},'history':[]},
+ {'revision':1,'config':'not a config','history':[]},
+ {'revision':1,'config':config(),'history':[None]},
+ {'revision':1,'config':config(),'history':[{}]},
+ {'revision':1,'config':config(),'history':[],'verification':[]},
+ {'revision':1,'config':config(),'history':[{'config':config(),'verification':['invalid']}]},
+])
+def test_malformed_settings_file_fails_safely_without_replacing_it(settings,document):
+ raw=json.dumps(document);settings.path.write_text(raw)
+ with pytest.raises(APIError) as error:settings.read()
+ assert error.value.status==503
+ assert settings.path.read_text()==raw
+
+
+async def test_rollback_preserves_actual_probe_time_without_new_model_call(settings):
+ await checked(settings);await settings.publish(config(),0)
+ await settings.publish(copy.deepcopy(settings.default),1)
+ stored=settings.read();stored['history'][0]['verification']['checkedAt']=1
+ settings.path.write_text(json.dumps(stored))
+ async def no_probe(*args,**kwargs):raise AssertionError('Rollback must not generate a provider request')
+ settings.client=no_probe
+ restored=await settings.rollback(2)
+ assert restored['verification']['checkedAt']==1
+ assert restored['verification']['rollbackAt']>1
+ assert restored['verification']['basis']=='explicit-synthetic-tool-stream-probe'
+ assert restored['revision']==3

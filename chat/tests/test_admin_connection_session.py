@@ -55,6 +55,23 @@ const reply={revision:1,config:{kind:'openrouter',model:'synthetic'},writable:tr
    assert.equal(get('#connection-save').disabled,true);
   }
  }
+ // Reopening the model tab must not replace an in-flight explicit probe.
+ run('showConnection(reply)');
+ get('#connection-form').elements.kind.value='openai-compatible';
+ get('#probe-consent').checked=true;
+ let finishProbe;const probePaths=[];
+ sandbox.probeApi=path=>{probePaths.push(path);return new Promise(resolve=>{finishProbe=resolve;});};
+ run('api=probeApi');
+ const probe=run("connectionAction('/admin/api/model-connection/check',{})");
+ const probeGeneration=run('connectionVersion');
+ await run('loadConnection()');
+ assert.equal(probePaths.length,1);
+ assert.equal(run('connectionVersion'),probeGeneration);
+ assert.equal(run('connectionBusy'),true);
+ assert.equal(get('#connection-check').disabled,true);
+ finishProbe({state:'verified'});await probe;
+ assert.equal(run('connectionBusy'),false);
+ assert.equal(get('#connection-status').textContent,'도구·SSE 호환 확인. 이 설정은 아직 적용하지 않았습니다.');
  // Keep the real api wrapper: an old 401 cannot invalidate a new login.
  const source=fs.readFileSync(process.argv[1],'utf8');
  run(source.slice(source.indexOf('async function api('),source.indexOf('function resetSession(')));

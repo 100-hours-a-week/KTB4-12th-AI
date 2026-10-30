@@ -100,8 +100,9 @@ def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
         else:
             result['recording']['detailState']='bounded-redacted'
             result['publicInput']=text(turn.get('message'))
-            result['reviewNotes']=[{'note':text(r.get('note'))} for r in reviews[:40]]
-            result['feedbackNotes']=[{'verdict':text((f.get('payload') or {}).get('verdict'),100),'note':text((f.get('payload') or {}).get('note'))} for f in feedback[:40]]
+            result['noteRecords']={'reviewsTotal':len(reviews),'feedbackTotal':len(feedback),'limitPerKind':40,'truncated':len(reviews)>40 or len(feedback)>40,'order':'latest retained records in stored order'}
+            result['reviewNotes']=[{'note':text(r.get('note'))} for r in reviews[-40:]]
+            result['feedbackNotes']=[{'verdict':text((f.get('payload') or {}).get('verdict'),100),'note':text((f.get('payload') or {}).get('note'))} for f in feedback[-40:]]
             result['publicOutput']=[{'type':b.get('type'),'text':text(b.get('text')),'products':[{'productId':p.get('productId'),'reason':text(p.get('reason'),200)} for p in b.get('products',[])[:3]]} for b in turn.get('blocks',[])[:20]]
     return clean(result)
 
