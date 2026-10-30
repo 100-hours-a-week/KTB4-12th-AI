@@ -50,7 +50,7 @@ async def test_trace_route_requires_admin_and_exact_binding(monkeypatch):
  class Store:
   async def call(self,method,**args):
    assert method=='admin_conversation' and args['cid']==cid and args['focus_tid']==tid
-   return {'conversationId':cid,'turns':[{'turnId':tid,'state':turn,'context':context(),'created':NOW}]}
+   return {'conversationId':cid,'turns':[{'turnId':tid,'state':turn,'context':context(),'created':NOW,'reviews':[{'note':'다시 읽을 합성 메모'}],'feedback':[{'payload':{'note':'합성 피드백'}}]}]}
  monkeypatch.setattr(main.app.state,'store',Store(),raising=False);security.rate.clear()
  async with httpx.AsyncClient(base_url='https://synthetic',transport=httpx.ASGITransport(app=main.app)) as client:
   path=f'/admin/api/conversations/{cid}/turns/{tid}/trace?details=true'
@@ -58,6 +58,8 @@ async def test_trace_route_requires_admin_and_exact_binding(monkeypatch):
   assert (await client.post('/admin/login',json={'password':os.environ['QA_ADMIN_PASSWORD']})).status_code==200
   response=await client.get(path);assert response.status_code==200 and response.json()['publicInput']=='합성 공개 질문'
   assert response.headers['cache-control']=='no-store, no-transform'
+  assert response.json()['reviewNotes']==[{'note':'다시 읽을 합성 메모'}]
+  assert response.json()['feedbackNotes'][0]['note']=='합성 피드백'
   assert (await client.get(path,headers={'Origin':'https://evil.invalid'})).status_code==403
 
 @pytest.mark.parametrize('receipt',[
@@ -84,3 +86,13 @@ def test_list_requires_attempt_count_but_legacy_detail_keeps_observed_receipts()
  ctx=context();ctx.pop('modelRequests')
  assert trace('cid',state(),ctx)['totals']['inputTokens']==100
  assert list_summary({'usage':[ctx['requestAudit'][0]['usage']]})['inputTokens'] is None
+
+
+def test_notes_require_explicit_unexpired_detail_and_mask_secrets():
+ notes=[{'note':'검토 메모 token=synthetic-secret'}];feedback=[{'payload':{'verdict':'helpful','note':'합성 의견'}}]
+ assert 'reviewNotes' not in trace('cid',state(),context(),reviews=notes,feedback=feedback)
+ out=trace('cid',state(),context(),details=True,created=NOW,reviews=notes,feedback=feedback)
+ assert out['reviewNotes']==[{'note':'검토 메모 [redacted]'}]
+ assert out['feedbackNotes']==[{'verdict':'helpful','note':'합성 의견'}]
+ old=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()
+ assert 'reviewNotes' not in trace('cid',state(),context(),details=True,created=old,reviews=notes)

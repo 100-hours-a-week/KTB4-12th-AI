@@ -22,7 +22,7 @@ def canonical_url(value):
         return value.rstrip('/')
     except (ValueError,TypeError):raise APIError(400,'base URL은 인증정보·query가 없는 정확한 /v1 주소여야 합니다.') from None
 
-def destination(url,*,resolve=True):
+def destination(url,*,resolve=True) -> tuple[str, ...]:
     """Only deployment-approved destinations; no dashboard-editable network policy."""
     p=urlsplit(canonical_url(url));allowed={x.strip().rstrip('/') for x in os.getenv('CHAT_LLM_ALLOWED_BASE_URLS','').split(',') if x.strip()}
     if url==DEFAULT_URL:return ()
@@ -33,7 +33,7 @@ def destination(url,*,resolve=True):
         return (p.hostname,)
     if p.scheme!='https':raise APIError(400,'원격 모델은 HTTPS가 필요합니다.')
     if not resolve:return ()
-    try:addresses={x[4][0] for x in socket.getaddrinfo(p.hostname,p.port or 443,type=socket.SOCK_STREAM)}
+    try:addresses={str(x[4][0]) for x in socket.getaddrinfo(p.hostname,p.port or 443,type=socket.SOCK_STREAM)}
     except OSError:raise APIError(503,'모델 주소의 DNS를 확인할 수 없습니다.') from None
     if not addresses or any(not ipaddress.ip_address(x).is_global for x in addresses):raise APIError(400,'사설·메타데이터·로컬 네트워크 모델 주소는 허용되지 않습니다.')
     return tuple(sorted(addresses))
@@ -72,7 +72,7 @@ class AdmittedConnection:
     base_url:str
     model:str
     revision:int
-    client:object=field(default=None,repr=False,compare=False)
+    client:httpx.AsyncClient | None=field(default=None,repr=False,compare=False)
     connect_timeout:int=10
     read_timeout:int=75
     async def close(self):
@@ -175,12 +175,14 @@ class Connections:
             proof=self.checks.get(fingerprint(c))
             if c['kind']=='openai-compatible' and (not proof or time.time()-proof['checkedAt']>300):raise APIError(409,'이 설정으로 최근 도구·SSE 호환 시험을 먼저 실행하세요.')
             value={'revision':old['revision']+1,'config':c,'verification':proof or {'state':'existing-openrouter-path'},'history':([{'config':old['config'],'verification':old.get('verification')}]+old['history'])[:5]}
-            directory=self.path.parent
-            if not directory.is_dir() or directory.is_symlink() or self.path.is_symlink():raise APIError(409,'기존 비공개 설정 폴더가 필요합니다.')
+            path=self.path
+            if path is None:raise APIError(409,'모델 연결 설정은 읽기 전용입니다.')
+            directory=path.parent
+            if not directory.is_dir() or directory.is_symlink() or path.is_symlink():raise APIError(409,'기존 비공개 설정 폴더가 필요합니다.')
             fd,name=tempfile.mkstemp(dir=directory,prefix='.chat-connection-')
             try:
                 with os.fdopen(fd,'w') as output:json.dump(value,output);output.flush();os.fsync(output.fileno())
-                os.replace(name,self.path)
+                os.replace(name,path)
             except OSError:raise APIError(503,'설정 저장 실패입니다. 상태를 다시 조회하세요.') from None
             finally:
                 if os.path.exists(name):os.unlink(name)

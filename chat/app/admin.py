@@ -96,6 +96,6 @@ async def request_trace(cid:UUID4,tid:UUID4,request:Request,auth:Admin,details:b
  data=await request.app.state.store.call('admin_conversation',cid=str(cid),limit=1,focus_tid=str(tid))
  turn=next((t for t in data['turns'] if t['turnId']==str(tid)),None)
  if turn is None:raise APIError(404,'해당 대화의 질문을 찾을 수 없습니다.')
- result=trace(str(cid),turn['state'],turn.get('context') or {},details=details,created=turn.get('created'))
+ result=trace(str(cid),turn['state'],turn.get('context') or {},details=details,created=turn.get('created'),reviews=turn.get('reviews',[]),feedback=turn.get('feedback',[]))
  result['sseEvents']=turn.get('eventSummary',{'events':[],'basis':'not-recorded-in-this-projection','truncated':None})
  return result

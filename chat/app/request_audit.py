@@ -1,6 +1,7 @@
 """Bounded administrator projection. No credentials, private profile or reasoning export."""
 import copy, json, math, re, time
 from datetime import datetime, timezone
+from typing import cast
 from app.diagnostics import clean
 
 DETAIL_TTL_SECONDS=86400
@@ -13,7 +14,7 @@ def identifier(v):return v if isinstance(v,str) and re.fullmatch(r'[A-Za-z0-9][A
 
 def text(v,limit=TEXT_LIMIT):
     if not isinstance(v,str):return None
-    value=clean(v)
+    value=cast(str,clean(v))
     from app.llm_connection import ACTIVE_CONNECTION
     connection=ACTIVE_CONNECTION.get()
     if connection is not None and connection.client is not None:
@@ -69,7 +70,7 @@ def capture_request(body):
     if len(raw)>TRACE_LIMIT:return {'capture':'actual-send-time-redacted','model':value['model'],'messages':[{'role':m['role'],'originalChars':m['originalChars']} for m in messages],'truncated':True,'reason':'trace-preview-size-limit'}
     return value
 
-def trace(cid,turn,context,*,details=False,created=None):
+def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
     calls=context.get('requestAudit') or [];diagnostics=context.get('diagnostics') or {};operations=diagnostics.get('operations') or []
     result={'schema':'request-trace-v1','conversationId':cid,'turnId':turn['turnId'],'sourceScope':context.get('sourceScope','unclassified-legacy'),'synthetic':True if context.get('sourceScope')=='synthetic-local' or context.get('mode')=='mock' or context.get('externalCalls')==0 else None,'environment':identifier(context.get('environment')),'revision':identifier(context.get('revision')),'sourceIdentity':{'releaseLabel':identifier(context.get('revision')),'promptVersion':identifier(context.get('promptVersion')),'integrationSourceSha256':identifier((context.get('harnessProtocol') or {}).get('integrationSourceSha256')),'basis':'recorded release label and loaded-code fingerprints; not inferred Git HEAD'},'connection':context.get('connection') if isinstance(context.get('connection'),dict) else None,'status':turn['status'],'executionMode':context.get('executionMode','mock' if context.get('mode')=='mock' or context.get('externalCalls')==0 else 'unknown'),'elapsedMs':numeric(context.get('elapsedMs')),'lastEventId':count(turn.get('lastEventId')),'persistence':context.get('tracePersistence'),'modelCalls':[],'timeline':[],'recording':{'calls':'recorded-redacted' if calls else 'not-recorded-legacy','detailsRequested':details,'detailAccessWindowSeconds':DETAIL_TTL_SECONDS,'storedRecordRetention':'existing Chat store policy; no new deletion job','maxPreviewCharsPerCall':TRACE_LIMIT,'rawPrivatePrompts':False,'hiddenReasoning':False}}
     for c in calls[:8]:
@@ -99,6 +100,8 @@ def trace(cid,turn,context,*,details=False,created=None):
         else:
             result['recording']['detailState']='bounded-redacted'
             result['publicInput']=text(turn.get('message'))
+            result['reviewNotes']=[{'note':text(r.get('note'))} for r in reviews[:40]]
+            result['feedbackNotes']=[{'verdict':text((f.get('payload') or {}).get('verdict'),100),'note':text((f.get('payload') or {}).get('note'))} for f in feedback[:40]]
             result['publicOutput']=[{'type':b.get('type'),'text':text(b.get('text')),'products':[{'productId':p.get('productId'),'reason':text(p.get('reason'),200)} for p in b.get('products',[])[:3]]} for b in turn.get('blocks',[])[:20]]
     return clean(result)
 
