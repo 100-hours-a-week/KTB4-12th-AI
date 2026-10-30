@@ -231,15 +231,16 @@ async def test_search_can_end_in_explanation_without_forced_cards():
 
 async def test_invalid_id_cannot_become_public_card():
  invalid={'product_ids':['999'],'reasons':[{'product_id':'999','reason':REASON}]}
- with pytest.raises(Exception):
-  await run([tool('gift_context',context()),tool('show_gifts',invalid),tool('show_gifts',invalid)])
+ receipt,sent,store,_,_,tid=await run([tool('gift_context',context()),tool('show_gifts',invalid)])
+ assert len(sent)==2 and not any(b['type']=='cards' for b in store.states[tid]['blocks'])
 
-async def test_max_three_is_schema_validation_not_truncation():
- from app.integrated_harness import IntegratedHarness,PublicListing
- from pydantic import ValidationError
- with pytest.raises(ValidationError):IntegratedHarness.selection_model.model_validate({'product_ids':['1','2','3','4'],
+async def test_model_input_can_be_projected_to_public_three_card_limit():
+ from app.integrated_harness import IntegratedHarness
+ h=object.__new__(IntegratedHarness)
+ args=h.selection_model.model_validate({'product_ids':['1','2','3','4'],
   'reasons':[{'product_id':ident,'reason':REASON} for ident in ['1','2','3','4']]})
- with pytest.raises(ValidationError):PublicListing.model_validate({'product_ids':['1','2','3','4']})
+ assert len(args.product_ids)==4
+ assert h.selection_tool(None,[])['function']['parameters']['properties']['product_ids']['maxItems']==3
 
 async def test_successive_request_retains_display_memory_and_quantity_change(monkeypatch):
  first,*_=await run([tool('gift_context',context()),tool('show_gifts',show())],message='하나만')

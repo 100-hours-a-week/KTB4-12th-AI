@@ -60,6 +60,14 @@ def runtime_info():
   from app.mock_runtime import SCENARIOS
   result['scenarios']=SCENARIOS
  elif getattr(app.state.runtime,'model_config',None):result.update(app.state.runtime.model_config.public())
+ connections=getattr(app.state.runtime,'connections',None)
+ if mode!='mock' and connections is not None:
+  saved=connections.read()
+  if saved['revision']>0:
+   config=saved['config'];result.update(model=config['model'],backendKind=config['kind'],connectionRevision=saved['revision'])
+   if config['kind']=='openai-compatible':
+    for key in ('reasoning','reasoningMandatory','reasoningLabel','structuredOutput','provider'):result.pop(key,None)
+    result['capabilityVerification']=saved.get('verification',{}).get('state','not-observed')
  return result
 
 async def provider_key_request(request):
@@ -208,7 +216,11 @@ def live():return {'alive':True,'revision':app_revision(),'mode':getattr(app.sta
 @app.get('/readyz',dependencies=[Depends(service)])
 async def ready():
  if not app.state.runtime.healthy:raise APIError(503,'실행 서버가 준비되지 않았습니다.')
- if hasattr(app.state.runtime,'provider_key') and not (await asyncio.to_thread(app.state.runtime.provider_key.status))['configured']:raise APIError(503,'LLM 키가 설정되지 않았거나 읽을 수 없습니다.')
+ connections=getattr(app.state.runtime,'connections',None)
+ compatible=connections is not None and connections.read()['config']['kind']=='openai-compatible'
+ if compatible:
+  connection=await connections.admit();await connection.close()
+ elif hasattr(app.state.runtime,'provider_key') and not (await asyncio.to_thread(app.state.runtime.provider_key.status))['configured']:raise APIError(503,'LLM 키가 설정되지 않았거나 읽을 수 없습니다.')
  try:
   async with asyncio.timeout(5):await app.state.store.call('health')
  except (APIError,httpx.HTTPError,TimeoutError,DatabaseUnavailable):raise APIError(503,'대화 저장소 연결을 복구하고 있습니다.',headers={'Retry-After':'5'}) from None

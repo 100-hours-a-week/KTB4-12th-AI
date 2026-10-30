@@ -79,7 +79,7 @@ class ConversationHarness(CleanIOHarness):
         else:
             for item in reversed(executed):
                 if item['call']['name'] == 'list_gifts' and item['result'].get('products'):
-                    by_id = {p['product_id']: p for p in self.cached_search(s)['products']}
+                    by_id = self.catalog.products
                     s.last_displayed_products = [copy.deepcopy(by_id[p['product_id']])
                                                  for p in item['result']['products']]
                     break

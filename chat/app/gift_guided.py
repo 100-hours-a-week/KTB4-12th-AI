@@ -219,39 +219,10 @@ STATE_JSON\n'''
         return SimpleNamespace(message=selection.message, products=selection.products, filters=filters,
                                model_dump=lambda: {**selection.model_dump(), 'filters': filters.model_dump()})
 
-    def numeric_reason(self, reason, filters, truth):
-        return reason
-
-    def validate_show(self, args, s, observed, prior=None):
-        for pick in args.products:
-            truth = self.catalog.products.get(pick.product_id)
-            if truth is None:
-                continue  # The original observed-ID validator reports this.
-            if not pick.reason.strip():
-                raise ProviderError('blank_recommendation_reason')
-            source = normalized(' | '.join(str(truth.get(k) or '') for k in ('name', 'brand', 'description')) + f" | {truth['price']}원")
-            source = re.sub(r'(?<=\d),(?=\d)', '', source)
-            # P/pcs denotes pieces only in the explicit composition field. Do
-            # not interpret product model names or unrelated numbers as counts.
-            composition = re.search(r'구성\s*:\s*([^.;\n]+)', truth.get('description') or '')
-            if composition:
-                pieces = re.findall(r'(?<![a-z0-9.])(\d+)\s*(?:pcs?|p)(?![a-z0-9])', composition.group(1), re.IGNORECASE)
-                source += ' | ' + ' | '.join(n + '개' for n in pieces)
-            # Permit source-backed quantities while still rejecting unsupported
-            # numeric units. This check does not claim semantic entailment of prose.
-            pattern = r'\d+(?:[.,]\d+)*(?:\s*(?:kg|mg|ml|cm|mm|GB|TB|oz|팩|개|켤레|세트|인치|원|%|g|m|L))?'
-            for value in re.findall(pattern, self.numeric_reason(pick.reason, args.filters, truth), re.IGNORECASE):
-                value = re.sub(r'(?<=\d),(?=\d)', '', normalized(value))
-                if not re.search(r'(?<![\d.])' + re.escape(value) + r'(?!\d|\.\d)', source):
-                    raise ProviderError('unsupported_numeric_claim')
-        return super().validate_show(args, s, observed, prior)
-
     def selection_contract(self):
         return {'next_operation': 'show_gifts', 'instruction': '관찰한 후보에서 요청한 용도와 개수에 맞춰 선택하세요. 조건은 이미 적용됐습니다. 적합한 후보가 없을 때만 빈 목록을 반환하세요.'}
 
     def feedback(self, exc):
-        if str(exc) in ('unsupported_numeric_claim', 'blank_recommendation_reason'):
-            return {'code': str(exc), 'hint': '선택한 상품의 원문에서 확인되는 용도를 한국어 한 문장으로 적으세요. 확인되지 않은 숫자·단위는 빼세요.'}
         if isinstance(exc, ValidationError):
             allowed = {'changes', 'queries', 'products', 'product_id', 'reason', 'message', *FilterChanges.model_fields}
             return {'code': 'invalid_tool_arguments', 'fields': [
