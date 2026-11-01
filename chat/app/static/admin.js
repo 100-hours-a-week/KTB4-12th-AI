@@ -46,8 +46,8 @@ async function api(path, options = {}) {
 }
 function resetSession() {
   sessionVersion++; listVersion++; clearSelection(); next = null;
-  connectionVersion++; connectionSnapshot = null; connectionBusy = false;
-  if (cf()?.elements) { cf().reset(); $('#connection-capabilities').replaceChildren(); connectionState('로그인이 필요합니다.'); connectionButtons(); }
+  connectionVersion++; connectionSnapshot = null; connectionBusy = false; $('#connection-active').textContent='';
+  if (cf()?.elements) { cf().reset(); $('#connection-profile').replaceChildren(new Option('새 연결 만들기','')); $('#connection-profile-name').value=''; $('#connection-capabilities').replaceChildren(); connectionState('로그인이 필요합니다.'); connectionButtons(); }
   $('#items').replaceChildren(); $('#login').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true;
 }
 function report(e) { $('#status').textContent = e.message; $('#status').className = 'error'; }
@@ -181,10 +181,30 @@ function connectionFields(){
   for(const name of ['kind','baseUrl','model','auth','secretRef','connectTimeout','readTimeout'])if(form.elements[name])form.elements[name].disabled=connectionBusy||!connectionSnapshot?.writable||(name==='auth'&&openrouter)||(name==='secretRef'&&(openrouter||form.elements.auth?.value!=='secret-ref'));
   if(form.elements.baseUrl)form.elements.baseUrl.readOnly=openrouter;
 }
-function connectionButtons(){connectionFields();for(const id of ['connection-save','connection-check','connection-rollback','connection-reload'])$('#'+id).disabled=connectionBusy||(id!=='connection-reload'&&!connectionSnapshot?.writable)||(id==='connection-check'&&(!$('#probe-consent').checked||cf().elements.kind.value!=='openai-compatible'))||(id==='connection-rollback'&&!connectionSnapshot?.history?.length);}
-function showConnection(data){connectionSnapshot=data;for(const [k,v]of Object.entries(data.config)){if(k==='secretRef')continue;if(cf().elements[k])cf().elements[k].value=v??'';}const refs=cf().elements.secretRef;refs.replaceChildren(new Option('없음',''));for(const name of data.secretReferences||[])refs.append(new Option(name,name));refs.value=data.config.secretRef||'';const caps=$('#connection-capabilities');caps.replaceChildren();for(const [key,label]of [['connection','연결'],['tools','도구 호출'],['sse','SSE 완료'],['jsonSchema','별도 JSON Schema']])caps.append(el('div',label+' · '+(data.verification?.[key]===true?'명시 검증 확인':'미관측'),'capability'));connectionState(`설정 v${data.revision} · ${data.writable?'저장 가능':'읽기 전용'} · ${data.scope}`);connectionButtons();}
+function selectedProfile(){return connectionSnapshot?.profiles?.find(p=>p.id===$('#connection-profile').value);}
+function profileEdited(){const profile=selectedProfile();return !profile||profile.name!==$('#connection-profile-name').value.trim()||Object.entries(connectionInput()).some(([key,value])=>value!==(profile.config[key]??null));}
+function connectionButtons(){
+ connectionFields();for(const id of ['connection-profile','connection-profile-name'])$('#'+id).disabled=connectionBusy||!connectionSnapshot?.writable;
+ for(const id of ['connection-save','connection-check','connection-rollback','connection-reload','connection-apply'])$('#'+id).disabled=connectionBusy||(id!=='connection-reload'&&!connectionSnapshot?.writable)||(id==='connection-check'&&(!$('#probe-consent').checked||cf().elements.kind.value!=='openai-compatible'))||(id==='connection-rollback'&&!connectionSnapshot?.history?.length)||(id==='connection-apply'&&(profileEdited()||(selectedProfile()?.config.kind==='openai-compatible'&&selectedProfile()?.verification?.state!=='verified')));
+}
+function fillConnection(config,verification){
+ for(const [key,value] of Object.entries(config)){if(key!=='secretRef'&&cf().elements[key])cf().elements[key].value=value??'';}
+ const refs=cf().elements.secretRef;refs.replaceChildren(new Option('없음',''));for(const name of connectionSnapshot.secretReferences||[])refs.append(new Option(name,name));refs.value=config.secretRef||'';
+ const caps=$('#connection-capabilities');caps.replaceChildren();for(const [key,label] of [['connection','연결'],['tools','도구 호출'],['sse','SSE 완료']])caps.append(el('div',label+' · '+(verification?.[key]===true?'이 설정의 과거 명시 검증 확인':'미관측'),'capability'));
+}
+function chooseProfile(){
+ const profile=selectedProfile();$('#connection-profile-name').value=profile?.name||'';
+ fillConnection(profile?.config||connectionSnapshot.defaultConfig||connectionSnapshot.config,profile?.verification);
+ const active=connectionSnapshot.profiles?.find(p=>p.id===connectionSnapshot.activeProfileId);
+ connectionState(`현재 적용: ${active?.name||'기존 직접 설정'} · 선택: ${profile?.name||'새 연결'} · 설정 v${connectionSnapshot.revision} · ${connectionSnapshot.writable?'저장 가능':'읽기 전용'}`);connectionButtons();
+}
+function showConnection(data,preferredId){
+ connectionSnapshot=data;const active=data.profiles?.find(p=>p.id===data.activeProfileId);$('#connection-active').textContent=`현재 적용: ${active?.name||'기존 직접 설정'} · ${data.config.kind} · ${data.config.model} · ${data.config.baseUrl}`;const select=$('#connection-profile');select.replaceChildren(new Option('새 연결 만들기',''));
+ for(const profile of data.profiles||[])select.append(new Option(profile.name,profile.id));select.value=preferredId??data.activeProfileId??'';
+ if(data.profiles?.length)chooseProfile();else{fillConnection(data.config,data.verification);connectionState(`설정 v${data.revision} · ${data.writable?'저장 가능':'읽기 전용'} · ${data.scope}`);connectionButtons();}
+}
 async function loadConnection(){if(connectionBusy)return;const generation=++connectionVersion;connectionBusy=true;connectionButtons();try{const data=await api('/admin/api/model-connection');if(generation===connectionVersion)showConnection(data);}catch(e){if(generation===connectionVersion)connectionState(e.message);}finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}}
-async function connectionAction(path,body){if(connectionBusy)return;const generation=++connectionVersion;connectionBusy=true;connectionButtons();try{const data=await api(path,{method:path.endsWith('model-connection')?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(generation!==connectionVersion)return;if(data.config)showConnection(data);else connectionState('도구·SSE 호환 확인. 이 설정은 아직 적용하지 않았습니다.');}catch(e){if(generation===connectionVersion)connectionState(e.message+' 기존 적용 설정은 다시 조회해 확인하세요.');}finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}}
+async function connectionAction(path,body,preferredId){if(connectionBusy)return;const generation=++connectionVersion;connectionBusy=true;connectionButtons();try{const data=await api(path,{method:/\/(apply|check|rollback)$/.test(path)?'POST':'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(generation!==connectionVersion)return;if(data.config)showConnection(data,preferredId);else connectionState('도구·SSE 호환 확인. 이 설정은 아직 적용하지 않았습니다.');}catch(e){if(generation===connectionVersion)connectionState(e.message+' 기존 적용 설정은 다시 조회해 확인하세요.');}finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}}
 if (cf()?.elements && $('#tab-traces')) {
 $('#tab-traces').onclick=()=>{$('#traces-view').hidden=false;$('#connection-view').hidden=true;$('#tab-traces').setAttribute('aria-pressed','true');$('#tab-connection').setAttribute('aria-pressed','false');};
 $('#tab-connection').onclick=()=>{$('#traces-view').hidden=true;$('#connection-view').hidden=false;$('#tab-traces').setAttribute('aria-pressed','false');$('#tab-connection').setAttribute('aria-pressed','true');loadConnection();};
@@ -192,7 +212,10 @@ $('#connection-reload').onclick=loadConnection;
 $('#probe-consent').onchange=connectionButtons;
 cf().elements.auth.onchange=connectionButtons;
 cf().elements.kind.onchange=()=>{cf().elements.auth.value=cf().elements.kind.value==='openrouter'?'existing-openrouter':'none';if(cf().elements.kind.value==='openrouter')cf().elements.baseUrl.value='https://openrouter.ai/api/v1';connectionButtons();};
-cf().onsubmit=e=>{e.preventDefault();if(connectionSnapshot)connectionAction('/admin/api/model-connection',{revision:connectionSnapshot.revision,config:connectionInput()});};
+cf().onsubmit=e=>{e.preventDefault();if(!connectionSnapshot)return;const id=$('#connection-profile').value||crypto.randomUUID();connectionAction('/admin/api/model-connection/profiles/'+id,{revision:connectionSnapshot.revision,name:$('#connection-profile-name').value.trim(),config:connectionInput()},id);};
+$('#connection-profile').onchange=()=>{if(!connectionBusy)chooseProfile();};
+cf().oninput=()=>{connectionButtons();$('#connection-capabilities').replaceChildren(el('p','편집한 설정은 저장·적용 전입니다. 호환 확인은 정확히 같은 설정에만 유효합니다.','meta'));};
+$('#connection-apply').onclick=()=>{const profile=selectedProfile();if(profile&&!profileEdited())connectionAction('/admin/api/model-connection/profiles/'+profile.id+'/apply',{revision:connectionSnapshot.revision},profile.id);};
 $('#connection-check').onclick=()=>{if($('#probe-consent').checked)connectionAction('/admin/api/model-connection/check',{config:connectionInput()});};
 $('#connection-rollback').onclick=()=>{if(connectionSnapshot)connectionAction('/admin/api/model-connection/rollback',{revision:connectionSnapshot.revision,config:{}});};
 

@@ -39,7 +39,7 @@ def destination(url,*,resolve=True) -> tuple[str, ...]:
     if not addresses or any(not ipaddress.ip_address(x).is_global for x in addresses):raise APIError(400,'사설·메타데이터·로컬 네트워크 모델 주소는 허용되지 않습니다.')
     return tuple(sorted(addresses))
 
-def validate(value):
+def validate(value, *, available=True):
     if not isinstance(value,dict) or set(value)-FIELDS:raise APIError(400,'알 수 없는 연결 설정입니다.')
     c=copy.deepcopy(value)
     if not isinstance(c.get('kind'),str) or c['kind'] not in {'openrouter','openai-compatible'}:raise APIError(400,'지원하지 않는 연결 방식입니다.')
@@ -50,14 +50,14 @@ def validate(value):
         except (ValueError,KeyError):raise APIError(400,'OpenRouter 모델 ID를 확인하세요.') from None
     else:
         if c['baseUrl']==DEFAULT_URL:raise APIError(400,'공식 OpenRouter 주소는 OpenRouter 연결 방식을 사용하세요.')
-        destination(c['baseUrl'],resolve=False)
+        if available:destination(c['baseUrl'],resolve=False)
         if not isinstance(c.get('model'),str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}',c['model']):raise APIError(400,'모델 ID를 확인하세요.')
         if not isinstance(c.get('auth'),str) or c['auth'] not in {'none','secret-ref'}:raise APIError(400,'인증 방식은 none 또는 등록된 비밀 참조입니다.')
         ref=c.get('secretRef')
         if ref is not None and not isinstance(ref,str):raise APIError(400,'비밀 참조 이름을 확인하세요.')
         ref=ref or None
         allowed={x.strip() for x in os.getenv('CHAT_LLM_SECRET_REFS','').split(',') if x.strip()}
-        if c['auth']=='secret-ref' and (not ref or ref not in allowed or not os.getenv(ref)):raise APIError(400,'기존 배포 환경의 등록된 비밀 참조가 필요합니다.')
+        if c['auth']=='secret-ref' and (not ref or available and (ref not in allowed or not os.getenv(ref))):raise APIError(400,'기존 배포 환경의 등록된 비밀 참조가 필요합니다.')
         if c['auth']=='none' and ref:raise APIError(400,'인증 없음에는 비밀 참조를 지정하지 않습니다.')
         c['secretRef']=ref
     for key,default,maximum in [('connectTimeout',10,30),('readTimeout',75,120)]:
@@ -110,7 +110,7 @@ class Connections:
         self.lock=asyncio.Lock();self.checks={}
         self.default={'kind':'openrouter','baseUrl':DEFAULT_URL,'model':os.getenv('CHAT_MODEL','openai/gpt-6-luna'),'auth':'existing-openrouter','secretRef':None,'connectTimeout':10,'readTimeout':75}
     def read(self):
-        if self.path is None or not self.path.exists():return {'revision':0,'config':copy.deepcopy(self.default),'history':[],'verification':{'state':'existing-openrouter-path','connection':None,'tools':None,'sse':None}}
+        if self.path is None or not self.path.exists():return self.with_profiles({'revision':0,'config':copy.deepcopy(self.default),'history':[],'verification':{'state':'existing-openrouter-path','connection':None,'tools':None,'sse':None}})
         try:
             if self.path.is_symlink() or self.path.stat().st_size>32000:raise ValueError()
             v=json.loads(self.path.read_text())
@@ -119,10 +119,68 @@ class Connections:
             for entry in v['history']:
                 if not isinstance(entry,dict) or not isinstance(entry.get('config'),dict):raise ValueError()
                 if entry.get('verification') is not None and not isinstance(entry['verification'],dict):raise ValueError()
-            validate(v['config']);return v
+            validate(v['config'],available=False);return self.with_profiles(v)
         except (OSError,ValueError,TypeError,KeyError,APIError):raise APIError(503,'모델 연결 설정을 읽을 수 없습니다. 기존 파일을 보존하고 확인하세요.') from None
+    def with_profiles(self,value):
+        # Older files stay readable; materialize names only on the next explicit save.
+        if 'profiles' not in value:
+            value['profiles']=[{'id':'openrouter','name':'OpenRouter','config':copy.deepcopy(self.default),'verification':{'state':'existing-openrouter-path'}}]
+            value['activeProfileId']='openrouter'
+            if fingerprint(value['config'])!=fingerprint(self.default):
+                value['profiles'].append({'id':'legacy-active','name':'기존 연결','config':copy.deepcopy(value['config']),'verification':copy.deepcopy(value.get('verification',{}))})
+                value['activeProfileId']='legacy-active'
+        profiles=value['profiles']
+        if not isinstance(profiles,list) or len(profiles)>10:raise ValueError('profiles')
+        ids=set();names=set()
+        for profile in profiles:
+            if not isinstance(profile,dict):raise ValueError('profile')
+            self.profile_identity(profile.get('id'),profile.get('name'))
+            if profile['id'] in ids or profile['name'] in names:raise ValueError('duplicate profile')
+            ids.add(profile['id']);names.add(profile['name'])
+            validate(profile['config'],available=False)
+            if not isinstance(profile.get('verification',{}),dict):raise ValueError('profile proof')
+        if value.get('activeProfileId') is not None and value['activeProfileId'] not in ids:raise ValueError('active profile')
+        return value
+    @staticmethod
+    def profile_identity(profile_id,name):
+        if not isinstance(profile_id,str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}',profile_id):raise APIError(400,'프로필 식별자를 확인하세요.')
+        if not isinstance(name,str) or not name.strip() or name!=name.strip() or len(name)>60:raise APIError(400,'프로필 이름은 공백 없이 시작·끝나는 1–60자입니다.')
+    @staticmethod
+    def same_revision(old,expected):
+        if type(expected) is not int or old['revision']!=expected:raise APIError(409,'다른 관리자가 설정을 변경했습니다. 다시 조회하세요.')
+    async def save_profile(self,profile_id,name,c,expected_revision):
+        if self.path is None:raise APIError(409,'설정 저장 경로가 없는 읽기 전용 배포입니다.')
+        self.profile_identity(profile_id,name);c=validate(c)
+        async with self.lock:
+            with publication_lock(self.path):
+                value=self.read();self.same_revision(value,expected_revision)
+                previous=next((p for p in value['profiles'] if p['id']==profile_id),None)
+                if any(p['name']==name and p['id']!=profile_id for p in value['profiles']):raise APIError(409,'같은 이름의 프로필이 있습니다.')
+                if previous is None and len(value['profiles'])>=10:raise APIError(409,'프로필은 최대 10개입니다. 기존 프로필을 편집하세요.')
+                proof=self.checks.get(fingerprint(c))
+                if not proof or time.time()-proof['checkedAt']>300:proof=None
+                if previous and fingerprint(previous['config'])==fingerprint(c):proof=proof or previous.get('verification')
+                if c['kind']=='openrouter':proof={'state':'existing-openrouter-path'}
+                profile={'id':profile_id,'name':name,'config':c,'verification':proof or {'state':'needs-check'}}
+                value['profiles']=[profile if p['id']==profile_id else p for p in value['profiles']]
+                if previous is None:value['profiles'].append(profile)
+                # Editing a saved profile never changes the active connection.
+                if value.get('activeProfileId')==profile_id and fingerprint(c)!=fingerprint(value['config']):value['activeProfileId']=None
+                value['revision']+=1;self.write(value)
+                return self.public()
+    async def apply_profile(self,profile_id,expected_revision):
+        if self.path is None:raise APIError(409,'설정 저장 경로가 없는 읽기 전용 배포입니다.')
+        async with self.lock:
+            with publication_lock(self.path):
+                old=self.read();self.same_revision(old,expected_revision)
+                profile=next((p for p in old['profiles'] if p['id']==profile_id),None)
+                if profile is None:raise APIError(404,'저장된 프로필을 찾을 수 없습니다.')
+                c=validate(profile['config']);proof=profile.get('verification',{})
+                if c['kind']=='openai-compatible' and (proof.get('state')!='verified' or proof.get('fingerprint')!=fingerprint(c)):raise APIError(409,'이 프로필의 설정으로 명시적 호환 확인 후 저장하세요.')
+                if old.get('activeProfileId')==profile_id and fingerprint(c)==fingerprint(old['config']):return self.public()
+                return await self._publish_locked(c,expected_revision,profile=profile)
     def public(self):
-        value=self.read();return {**value,'writable':self.path is not None,'allowedBaseUrls':sorted({DEFAULT_URL,*[s.strip() for s in os.getenv('CHAT_LLM_ALLOWED_BASE_URLS','').split(',') if s.strip()]}),'secretReferences':[x.strip() for x in os.getenv('CHAT_LLM_SECRET_REFS','').split(',') if x.strip()],'scope':'chat-only; profiler unchanged','verificationNotice':'도구·SSE 검증과 실제 추천 품질·JSON Schema 지원·배포 성공은 별개입니다.'}
+        value=self.read();return {**value,'defaultConfig':copy.deepcopy(self.default),'writable':self.path is not None,'allowedBaseUrls':sorted({DEFAULT_URL,*[s.strip() for s in os.getenv('CHAT_LLM_ALLOWED_BASE_URLS','').split(',') if s.strip()]}),'secretReferences':[x.strip() for x in os.getenv('CHAT_LLM_SECRET_REFS','').split(',') if x.strip()],'scope':'chat-only; profiler unchanged','verificationNotice':'도구·SSE 검증과 실제 추천 품질·JSON Schema 지원·배포 성공은 별개입니다.'}
     async def client(self,c,transport=None):
         try:addresses=await asyncio.wait_for(asyncio.to_thread(destination,c['baseUrl']),c['connectTimeout'])
         except TimeoutError:raise APIError(503,'모델 DNS 확인 시간이 초과됐습니다.') from None
@@ -177,24 +235,28 @@ class Connections:
         async with self.lock:
             with publication_lock(self.path):
                 return await self._publish_locked(c,expected_revision)
-    async def _publish_locked(self,c,expected_revision):
+    async def _publish_locked(self,c,expected_revision,*,profile=None):
         old=self.read()
-        if type(expected_revision) is not int or old['revision']!=expected_revision:raise APIError(409,'다른 관리자가 설정을 변경했습니다. 다시 조회하세요.')
-        proof=self.checks.get(fingerprint(c))
-        if c['kind']=='openai-compatible' and (not proof or time.time()-proof.get('rollbackAt',proof['checkedAt'])>300):raise APIError(409,'이 설정으로 최근 도구·SSE 호환 시험을 먼저 실행하세요.')
-        value={'revision':old['revision']+1,'config':c,'verification':proof or {'state':'existing-openrouter-path'},'history':([{'config':old['config'],'verification':old.get('verification')}]+old['history'])[:5]}
+        self.same_revision(old,expected_revision)
+        proof=profile.get('verification') if profile is not None else self.checks.get(fingerprint(c))
+        if profile is None and c['kind']=='openai-compatible' and (not proof or time.time()-proof.get('rollbackAt',proof['checkedAt'])>300):raise APIError(409,'이 설정으로 최근 도구·SSE 호환 시험을 먼저 실행하세요.')
+        value={'revision':old['revision']+1,'config':c,'verification':proof or {'state':'existing-openrouter-path'},'history':([{'config':old['config'],'verification':old.get('verification')}]+old['history'])[:5],'profiles':old['profiles'],'activeProfileId':profile['id'] if profile is not None else None}
+        self.write(value)
+        return self.public()
+    def write(self,value):
+        wire=json.dumps(value,ensure_ascii=False)
+        if len(wire.encode())>32000:raise APIError(409,'설정 저장 크기를 초과했습니다. 프로필 내용을 줄이세요.')
         path=self.path
         if path is None:raise APIError(409,'모델 연결 설정은 읽기 전용입니다.')
         directory=path.parent
         if not directory.is_dir() or directory.is_symlink() or path.is_symlink():raise APIError(409,'기존 비공개 설정 폴더가 필요합니다.')
         fd,name=tempfile.mkstemp(dir=directory,prefix='.chat-connection-')
         try:
-            with os.fdopen(fd,'w') as output:json.dump(value,output);output.flush();os.fsync(output.fileno())
+            with os.fdopen(fd,'w',encoding='utf-8') as output:output.write(wire);output.flush();os.fsync(output.fileno())
             os.replace(name,path)
         except OSError:raise APIError(503,'설정 저장 실패입니다. 상태를 다시 조회하세요.') from None
         finally:
             if os.path.exists(name):os.unlink(name)
-        return self.public()
     async def rollback(self,expected_revision):
         old=self.read()
         if not old['history']:raise APIError(409,'되돌릴 이전 설정이 없습니다.')

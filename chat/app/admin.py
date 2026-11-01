@@ -89,6 +89,17 @@ async def connection_probe(body:ConnectionProbe,request:Request,auth:Admin):
 @router.post('/admin/api/model-connection/rollback')
 async def connection_rollback(body:ConnectionChange,request:Request,auth:Admin):
  return await request.app.state.runtime.connections.rollback(body.revision)
+class ProfileChange(ConnectionChange):
+ name:str=Field(min_length=1,max_length=60)
+class ProfileApply(BaseModel):
+ model_config={'extra':'forbid'}
+ revision:int=Field(ge=0)
+@router.put('/admin/api/model-connection/profiles/{profile_id}')
+async def profile_save(profile_id:str,body:ProfileChange,request:Request,auth:Admin):
+ return await request.app.state.runtime.connections.save_profile(profile_id,body.name,body.config,body.revision)
+@router.post('/admin/api/model-connection/profiles/{profile_id}/apply')
+async def profile_apply(profile_id:str,body:ProfileApply,request:Request,auth:Admin):
+ return await request.app.state.runtime.connections.apply_profile(profile_id,body.revision)
 @router.get('/admin/api/conversations/{cid}/turns/{tid}/trace')
 async def request_trace(cid:UUID4,tid:UUID4,request:Request,auth:Admin,details:bool=False):
  from app.request_audit import trace

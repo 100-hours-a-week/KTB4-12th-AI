@@ -84,13 +84,18 @@ async def test_https_default_port_and_pinned_transport_host_sni(settings,monkeyp
    return httpx.Response(200)
  transport=PinnedTransport('model.example','8.8.8.8');await transport.inner.aclose();transport.inner=Inner()
  async with httpx.AsyncClient(transport=transport) as client:assert (await client.get('https://model.example/v1/chat/completions')).status_code==200
-async def test_real_chat_runtime_uses_compatible_snapshot_for_entire_turn(settings,monkeypatch):
+@pytest.mark.parametrize('named_profile',[False,True])
+async def test_real_chat_runtime_uses_compatible_snapshot_for_entire_turn(settings,monkeypatch,named_profile):
  import uuid
  import test_low_latency as fixture
  from app.low_latency import LowLatencyRuntime
  from app.model_config import ModelCatalog
  from app.request_audit import trace
- await checked(settings);await settings.publish(config(),0)
+ await checked(settings)
+ if named_profile:
+  await settings.save_profile('modal','Modal',config(),0);await settings.apply_profile('modal',1)
+ else:await settings.publish(config(),0)
+ admitted_revision=settings.read()['revision']
  entered=asyncio.Event();release=asyncio.Event();sent=[]
  packets=[fixture.tool('gift_context',fixture.context(budget=20000)),fixture.tool('show_gifts',fixture.show())]
  async def reply(req):
@@ -107,11 +112,14 @@ async def test_real_chat_runtime_uses_compatible_snapshot_for_entire_turn(settin
   runtime.http=original_http;runtime.catalog=ModelCatalog(original_http)
   cid,tid=str(uuid.uuid4()),str(uuid.uuid4());await store.call('conversation',cid=cid,sender=7,recipient=42,protocol_fixture=False,demo_profile=None)
   accepted=await runtime.accept(cid,tid,'합성 책받침 하나 추천');assert accepted['status']=='PROCESSING'
-  await entered.wait();old=settings.read();await settings.publish(copy.deepcopy(settings.default),old['revision']);release.set()
+  await entered.wait();old=settings.read()
+  if named_profile:await settings.apply_profile('openrouter',old['revision'])
+  else:await settings.publish(copy.deepcopy(settings.default),old['revision'])
+  release.set()
   await asyncio.gather(*list(runtime.jobs.values()))
   assert store.states[tid]['status']=='COMPLETED' and len(sent)==2 and all(b['model']=='synthetic-vllm' for b in sent)
   assert store.events[tid][-1]['event']=='turn.finished'
-  receipt=store.traces[tid];assert receipt['connection']['revision']==1
+  receipt=store.traces[tid];assert receipt['connection']['revision']==admitted_revision
   summary=trace(cid,store.public(store.states[tid]),receipt);assert summary['totals']['inputTokens']==20 and summary['totals']['outputTokens']==20
   # Same terminal turn retry is a read, never a new request/config admission.
   again=await runtime.accept(cid,tid,'합성 책받침 하나 추천');assert again['status']=='COMPLETED' and len(sent)==2

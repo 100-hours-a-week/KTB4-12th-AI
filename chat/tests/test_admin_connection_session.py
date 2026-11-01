@@ -19,7 +19,7 @@ class Element {
 const nodes=new Map(),get=k=>{if(!nodes.has(k))nodes.set(k,new Element());return nodes.get(k);};
 get('#connection-form').elements={kind:{value:'openrouter'},auth:{value:'existing-openrouter'},secretRef:new Element()};
 const sandbox={document:{querySelector:get,querySelectorAll:()=>[],createElement:()=>new Element()},
- URLSearchParams,Date,JSON,Object,setTimeout,FormData:class{get(){return '';}},Option:class{},
+ crypto:{randomUUID:()=> 'new-profile'},URLSearchParams,Date,JSON,Object,setTimeout,FormData:class{get(){return '';}},Option:class{},
  ChatHTTP:{json:async()=>({items:[],nextCursor:null})}};
 vm.createContext(sandbox);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),sandbox);
 const run=x=>vm.runInContext(x,sandbox);
@@ -43,6 +43,27 @@ const reply={revision:1,config:{kind:'openrouter',model:'synthetic'},writable:tr
  assert(!texts(run('traceDetail(traceFixture)')).includes('실제 전송 시점'));
  sandbox.traceFixture.modelCalls[0].input.capture='actual-send-time-redacted';
  assert(texts(run('traceDetail(traceFixture)')).includes('실제 전송 시점'));
+ // Named profiles: choosing/editing never applies or probes a model.
+ const router={kind:'openrouter',baseUrl:'https://openrouter.ai/api/v1',model:'openai/gpt-6-luna',auth:'existing-openrouter',secretRef:null,connectTimeout:10,readTimeout:75};
+ const modal={...router,kind:'openai-compatible',baseUrl:'https://modal.example/v1',model:'served-model',auth:'none'};
+ sandbox.named={revision:2,config:router,defaultConfig:router,activeProfileId:'openrouter',writable:true,history:[],secretReferences:[],profiles:[{id:'openrouter',name:'OpenRouter',config:router,verification:{}},{id:'modal',name:'Modal Qwen',config:modal,verification:{state:'verified',tools:true,sse:true}}]};
+ const profileWrites=[];sandbox.profileApi=async(path,options)=>{profileWrites.push({path,...options});return sandbox.named;};run('api=profileApi');
+ run('showConnection(named)');get('#connection-profile').value='modal';run('chooseProfile()');
+ assert.equal(profileWrites.length,0);assert.equal(run('connectionSnapshot.activeProfileId'),'openrouter');
+ assert.equal(get('#connection-apply').disabled,false);
+ get('#connection-form').elements.model.value='edited-model';get('#connection-form').oninput();
+ assert.equal(get('#connection-apply').disabled,true);
+ run('chooseProfile()');await get('#connection-apply').onclick();await new Promise(setImmediate);
+ assert.equal(profileWrites.length,1);assert.equal(profileWrites[0].method,'POST');assert(profileWrites[0].path.endsWith('/profiles/modal/apply'));
+ get('#connection-profile').value='';run('chooseProfile()');get('#connection-profile-name').value='New Modal';
+ get('#connection-form').onsubmit({preventDefault(){}});await new Promise(setImmediate);
+ assert.equal(profileWrites.length,2);assert.equal(profileWrites[1].method,'PUT');assert(profileWrites[1].path.endsWith('/profiles/new-profile'));
+ assert.equal(JSON.parse(profileWrites[1].body).name,'New Modal');
+ assert(!profileWrites.some(r=>r.path.endsWith('/check')));
+ sandbox.detached={...sandbox.named,config:modal,activeProfileId:null};run('showConnection(detached)');
+ assert(get('#connection-active').textContent.includes('served-model'));assert(get('#connection-active').textContent.includes('https://modal.example/v1'));
+ get('#connection-profile').value='openrouter';run('chooseProfile()');assert(get('#connection-active').textContent.includes('served-model'));
+ run('resetSession()');assert.equal(get('#connection-profile-name').value,'');assert.equal(get('#connection-active').textContent,'');assert.equal(run('connectionSnapshot'),null);
  // Both read and mutation responses (including errors) may arrive after logout.
  for(const expression of ['loadConnection()',"connectionAction('/admin/api/model-connection',{})"]){
   for(const fails of [false,true]){
