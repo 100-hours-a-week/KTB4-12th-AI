@@ -94,6 +94,24 @@ class ProfileChange(ConnectionChange):
 class ProfileApply(BaseModel):
  model_config={'extra':'forbid'}
  revision:int=Field(ge=0)
+@router.post('/admin/api/model-connection/modal-key')
+async def modal_key(request:Request,auth:Admin):
+ # Do not put a secret in a validation model or an error detail.
+ raw=bytearray()
+ async for chunk in request.stream():
+  raw.extend(chunk)
+  if len(raw)>4096:raise APIError(413,'키 입력 요청이 너무 큽니다.')
+ try:
+  import json
+  body=json.loads(raw)
+  if not isinstance(body,dict) or set(body)!={'config','key','revision'}:raise ValueError()
+ except (ValueError,TypeError):raise APIError(400,'키 입력 요청 형식을 확인하세요.') from None
+ finally:raw.clear()
+ try:return await request.app.state.runtime.connections.submit_key(body['config'],body['key'],body['revision'])
+ finally:body.clear()
+@router.post('/admin/api/model-connection/modal-off')
+async def modal_off(body:ProfileApply,request:Request,auth:Admin):
+ return await request.app.state.runtime.connections.disable(body.revision)
 @router.put('/admin/api/model-connection/profiles/{profile_id}')
 async def profile_save(profile_id:str,body:ProfileChange,request:Request,auth:Admin):
  return await request.app.state.runtime.connections.save_profile(profile_id,body.name,body.config,body.revision)

@@ -6,21 +6,21 @@
 <div class="split"><aside aria-label="대화 목록"><div id="items"></div><button id="more" hidden>대화 더 보기</button></aside><section id="detail" aria-label="대화 상세"><div class="empty">왼쪽에서 대화를 선택해 주세요.<br>요청 흐름과 기록된 입출력을 확인합니다.</div></section></div></section><section id="connection-view">
 <div class="connection-heading"><div class="eyebrow">MODEL CONNECTION</div><h2>지금 사용하는 모델</h2><p>원하는 연결을 선택하고 적용하세요. 진행 중인 요청은 기존 모델로 끝납니다.</p></div>
 <div class="active-connection"><p id="connection-active"></p><p id="connection-status" role="status" aria-live="polite">설정을 불러오는 중…</p></div>
-<div class="connection-switch"><label>저장된 연결<select id="connection-profile"><option value="">새 연결 만들기</option></select></label><button type="button" id="connection-apply">선택한 연결 적용</button><button type="button" id="connection-openrouter">OpenRouter로 복귀</button><button type="button" id="connection-reload">현재 설정 다시 조회</button></div>
-<p id="connection-draft" class="meta" role="status"></p>
+<div class="connection-switch"><label>저장된 연결<select id="connection-profile"><option value="">새 연결 만들기</option></select></label><button type="button" id="connection-apply">선택한 연결 적용</button><button type="button" id="connection-openrouter">Modal 끄기 · OpenRouter</button><button type="button" id="connection-reload">현재 설정 다시 조회</button></div>
+<p id="modal-state" class="meta"></p><form id="modal-key-form" class="connection-actions"><label>Modal 추론 Proxy Token<input id="modal-key" type="password" autocomplete="off" maxlength="520" placeholder="wk-….ws-…"></label><button id="modal-key-submit" type="submit">키만 전달</button></form><p class="meta">서버 메모리에만 보관합니다. AWS 키·Modal 계정 관리 키는 입력하지 마세요. 키 전달 후 연결을 별도로 적용하세요. 끄기·서버 재시작 후에는 OpenRouter를 사용하며 키를 다시 입력해야 합니다. 끄기는 진행 중 호출이나 Modal GPU 호스팅 요금을 중지하지 않습니다.</p><p id="connection-draft" class="meta" role="status"></p>
 <details id="connection-editor" class="connection-editor"><summary>연결 추가·편집</summary>
 <form id="connection-form" class="connection-grid">
 <label>프로필 이름<input id="connection-profile-name" maxlength="60" placeholder="예: Modal Qwen" required></label>
 <label>Backend<select name="kind"><option value="openrouter">OpenRouter</option><option value="openai-compatible">Modal / vLLM · OpenAI 호환</option></select></label>
 <label>Base URL<input name="baseUrl" type="url" required placeholder="https://your-app.modal.run/v1"></label>
 <label>모델 ID<input name="model" required maxlength="160"></label>
-<label>인증 방식<select name="auth"><option value="existing-openrouter">기존 OpenRouter 역할별 키</option><option value="none">인증 없음 · 허용된 endpoint</option><option value="secret-ref">기존 배포 비밀 참조</option></select></label>
-<label>비밀 참조 이름<select name="secretRef"><option value="">없음</option></select></label>
+<label>인증 방식<select name="auth"><option value="existing-openrouter">기존 OpenRouter 역할별 키</option><option value="session-key">대시보드 메모리 키</option></select></label>
+<label hidden>비밀 참조 이름<select name="secretRef"><option value="">없음</option></select></label>
 <details class="connection-advanced"><summary>시간 제한</summary><div class="filter-options"><label>연결 제한(초)<input name="connectTimeout" type="number" min="1" max="30" value="10"></label><label>읽기 제한(초)<input name="readTimeout" type="number" min="1" max="120" value="75"></label></div></details>
 <div id="connection-capabilities" class="capability-grid"></div>
 <div class="connection-actions"><label class="probe-consent"><input id="probe-consent" type="checkbox"> 합성 모델 호출 1회에 비용이 발생할 수 있음을 확인했습니다.</label><button type="button" id="connection-check">명시적으로 호환 확인</button><button type="submit" id="connection-save">프로필 저장</button><button type="button" id="connection-cancel">편집 취소</button></div>
 <p class="meta">저장만으로 현재 모델은 바뀌지 않습니다. 호환 확인은 준비된 서버에서 실행하세요. 콜드 스타트가 길면 15초 시험이 만료될 수 있습니다.</p>
 </form></details>
-<details class="deployment-note"><summary>준비 상태·복구</summary><p id="connection-readiness"></p><p>인증 값은 이 화면에 입력하거나 표시하지 않습니다. 설정 경로 지정 여부와 영속 저장 보장은 별개입니다.</p><button type="button" id="connection-rollback">이전 적용 설정으로 되돌리기</button></details>
+<details class="deployment-note"><summary>준비 상태·복구</summary><p id="connection-readiness"></p><p>Modal 키는 입력 직후 화면에서 비우며 저장 파일과 조회 응답에 포함하지 않습니다. 설정 경로 지정 여부와 영속 저장 보장은 별개입니다.</p><button type="button" id="connection-rollback">이전 적용 설정으로 되돌리기</button></details>
 </section></section>
 </main></body></html>

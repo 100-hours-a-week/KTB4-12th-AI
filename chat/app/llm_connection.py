@@ -52,13 +52,13 @@ def validate(value, *, available=True):
         if c['baseUrl']==DEFAULT_URL:raise APIError(400,'공식 OpenRouter 주소는 OpenRouter 연결 방식을 사용하세요.')
         if available:destination(c['baseUrl'],resolve=False)
         if not isinstance(c.get('model'),str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}',c['model']):raise APIError(400,'모델 ID를 확인하세요.')
-        if not isinstance(c.get('auth'),str) or c['auth'] not in {'none','secret-ref'}:raise APIError(400,'인증 방식은 none 또는 등록된 비밀 참조입니다.')
+        if not isinstance(c.get('auth'),str) or c['auth'] not in {'none','secret-ref','session-key'}:raise APIError(400,'인증 방식은 none 또는 등록된 비밀 참조입니다.')
         ref=c.get('secretRef')
         if ref is not None and not isinstance(ref,str):raise APIError(400,'비밀 참조 이름을 확인하세요.')
         ref=ref or None
         allowed={x.strip() for x in os.getenv('CHAT_LLM_SECRET_REFS','').split(',') if x.strip()}
         if c['auth']=='secret-ref' and (not ref or available and (ref not in allowed or not os.getenv(ref))):raise APIError(400,'기존 배포 환경의 등록된 비밀 참조가 필요합니다.')
-        if c['auth']=='none' and ref:raise APIError(400,'인증 없음에는 비밀 참조를 지정하지 않습니다.')
+        if c['auth'] in {'none','session-key'} and ref:raise APIError(400,'인증 없음에는 비밀 참조를 지정하지 않습니다.')
         c['secretRef']=ref
     for key,default,maximum in [('connectTimeout',10,30),('readTimeout',75,120)]:
         value=c.get(key,default)
@@ -79,7 +79,9 @@ class AdmittedConnection:
     connect_timeout:int=10
     read_timeout:int=75
     async def close(self):
-        if self.client is not None:await self.client.aclose()
+        if self.client is not None:
+            try:await self.client.aclose()
+            finally:self.client.headers.pop('Authorization',None)
     def public(self):return {'kind':self.kind,'baseUrl':self.base_url,'model':self.model,'revision':self.revision}
     def model_config(self):return ModelConfig(self.model,frozenset({'tools','tool_choice','temperature','max_tokens'}),{},False,1200)
 
@@ -108,7 +110,44 @@ class Connections:
     def __init__(self,path=None):
         self.path=Path(path or os.environ['CHAT_LLM_CONFIG_FILE']) if path or os.getenv('CHAT_LLM_CONFIG_FILE') else None
         self.lock=asyncio.Lock();self.checks={}
+        self._active=None;self._credential=None
         self.default={'kind':'openrouter','baseUrl':DEFAULT_URL,'model':os.getenv('CHAT_MODEL','openai/gpt-6-luna'),'auth':'existing-openrouter','secretRef':None,'connectTimeout':10,'readTimeout':75}
+    def openrouter(self,value):
+        candidates=[value['config'],value.get('openrouterConfig',{}),*[h['config'] for h in value['history']],*[p['config'] for p in value.get('profiles',[])],self.default]
+        for c in candidates:
+            if c.get('kind')=='openrouter':return validate(c)
+        raise APIError(503,'OpenRouter 기본 설정을 확인하세요.')
+    def openrouter_ready(self,value):
+        try:
+            self.openrouter(value)
+            from integration.provider_key import ProviderKey
+            ProviderKey.from_environment('chat').snapshot()
+            return True
+        except Exception:return False
+    def require_openrouter(self,value):
+        if not self.openrouter_ready(value):raise APIError(503,'OpenRouter 기본 모델과 기존 역할별 키 설정을 먼저 준비하세요.')
+    async def submit_key(self,c,token,expected_revision):
+        c=validate(c)
+        if c['kind']!='openai-compatible' or c['auth']!='session-key':raise APIError(400,'Modal 메모리 키 연결을 선택하세요.')
+        if not isinstance(token,str) or not re.fullmatch(r'wk-[A-Za-z0-9_-]{4,200}\.ws-[A-Za-z0-9_-]{4,300}',token):raise APIError(400,'추론 endpoint의 Proxy TokenID.TokenSecret만 입력하세요. 계정 관리 키나 AWS 키는 사용할 수 없습니다.')
+        async with self.lock:
+            old=self.read();self.same_revision(old,expected_revision)
+            if self._active is not None:raise APIError(409,'새 키를 입력하려면 먼저 Modal을 끄세요.')
+            self.require_openrouter(old)
+            self.write({**old,'revision':old['revision']+1})
+            self._credential=(fingerprint(c),token)
+            return self.public()
+    async def disable(self,expected_revision):
+        async with self.lock:
+            old=self.read();self.same_revision(old,expected_revision)
+            self._active=None;self._credential=None;self.checks.clear()
+            c=self.openrouter(old)
+            self.write({**old,'revision':old['revision']+1,'config':c,'activeProfileId':None})
+            return self.public()
+    def credential_for(self,c):
+        if c['auth']!='session-key':raise APIError(409,'Modal 연결은 대시보드 메모리 키 방식으로 다시 저장하세요.')
+        if self._credential is None or self._credential[0]!=fingerprint(c):raise APIError(409,'이 연결 설정의 추론 키를 먼저 입력하세요. 끄기·재시작 후에는 다시 입력해야 합니다.')
+        return self._credential[1]
     def read(self):
         if self.path is None or not self.path.exists():return self.with_profiles({'revision':0,'config':copy.deepcopy(self.default),'history':[],'verification':{'state':'existing-openrouter-path','connection':None,'tools':None,'sse':None}})
         try:
@@ -119,7 +158,11 @@ class Connections:
             for entry in v['history']:
                 if not isinstance(entry,dict) or not isinstance(entry.get('config'),dict):raise ValueError()
                 if entry.get('verification') is not None and not isinstance(entry['verification'],dict):raise ValueError()
-            validate(v['config'],available=False);return self.with_profiles(v)
+            validate(v['config'],available=False)
+            if 'openrouterConfig' in v:
+                if not isinstance(v['openrouterConfig'],dict) or v['openrouterConfig'].get('kind')!='openrouter':raise ValueError()
+                validate(v['openrouterConfig'],available=False)
+            return self.with_profiles(v)
         except (OSError,ValueError,TypeError,KeyError,APIError):raise APIError(503,'모델 연결 설정을 읽을 수 없습니다. 기존 파일을 보존하고 확인하세요.') from None
     def with_profiles(self,value):
         # Older files stay readable; materialize names only on the next explicit save.
@@ -176,12 +219,15 @@ class Connections:
                 profile=next((p for p in old['profiles'] if p['id']==profile_id),None)
                 if profile is None:raise APIError(404,'저장된 프로필을 찾을 수 없습니다.')
                 c=validate(profile['config']);proof=profile.get('verification',{})
-                if c['kind']=='openai-compatible' and (proof.get('state')!='verified' or proof.get('fingerprint')!=fingerprint(c)):raise APIError(409,'이 프로필의 설정으로 명시적 호환 확인 후 저장하세요.')
-                if old.get('activeProfileId')==profile_id and fingerprint(c)==fingerprint(old['config']):return self.public()
+                if c['kind']=='openai-compatible':self.credential_for(c)
+                if self._active and old.get('activeProfileId')==profile_id and fingerprint(c)==fingerprint(self._active):return self.public()
                 return await self._publish_locked(c,expected_revision,profile=profile)
     def public(self):
-        value=self.read();return {**value,'defaultConfig':copy.deepcopy(self.default),'writable':self.path is not None,'allowedBaseUrls':sorted({DEFAULT_URL,*[s.strip() for s in os.getenv('CHAT_LLM_ALLOWED_BASE_URLS','').split(',') if s.strip()]}),'secretReferences':[x.strip() for x in os.getenv('CHAT_LLM_SECRET_REFS','').split(',') if x.strip()],'scope':'chat-only; profiler unchanged','verificationNotice':'도구·SSE 검증과 실제 추천 품질·JSON Schema 지원·배포 성공은 별개입니다.'}
-    async def client(self,c,transport=None):
+        value=self.read();c=self._active or self.openrouter(value)
+        active_id=next((p['id'] for p in value['profiles'] if p['id']==value.get('activeProfileId') and fingerprint(p['config'])==fingerprint(c)),None)
+        if active_id is None and self._active is None:active_id=next((p['id'] for p in value['profiles'] if fingerprint(p['config'])==fingerprint(c)),None)
+        return {**value,'config':copy.deepcopy(c),'activeProfileId':active_id,'defaultConfig':copy.deepcopy(self.openrouter(value)),'writable':self.path is not None,'allowedBaseUrls':sorted({DEFAULT_URL,*[s.strip() for s in os.getenv('CHAT_LLM_ALLOWED_BASE_URLS','').split(',') if s.strip()]}),'secretReferences':[],'modal':{'active':self._active is not None,'keyPresent':self._credential is not None,'readyProfiles':[p['id'] for p in value['profiles'] if self._credential and self._credential[0]==fingerprint(p['config'])],'openrouterReady':self.openrouter_ready(value)},'scope':'chat-only; single instance/worker; profiler unchanged','verificationNotice':'과거 호환 확인은 현재 가용성을 보장하지 않습니다.'}
+    async def client(self,c,transport=None,*,token=None):
         try:addresses=await asyncio.wait_for(asyncio.to_thread(destination,c['baseUrl']),c['connectTimeout'])
         except TimeoutError:raise APIError(503,'모델 DNS 확인 시간이 초과됐습니다.') from None
         origin=urlsplit(c['baseUrl']);path=origin.path+'/chat/completions'
@@ -189,13 +235,17 @@ class Connections:
             if request.method!='POST' or request.url.scheme!=origin.scheme or request.url.host!=origin.hostname or (request.url.port or (443 if request.url.scheme=='https' else 80))!=(origin.port or (443 if origin.scheme=='https' else 80)) or request.url.path!=path or request.url.query or request.url.fragment:raise APIError(503,'허용된 모델 completion 경로만 사용할 수 있습니다.')
             await asyncio.to_thread(destination,c['baseUrl'],resolve=False)
         headers={}
-        if c['auth']=='secret-ref':headers['Authorization']='Bearer '+os.environ[c['secretRef']]
+        if c['auth']=='session-key':headers['Authorization']='Bearer '+(token if token is not None else self.credential_for(c))
+        elif c['auth']=='secret-ref':headers['Authorization']='Bearer '+os.environ[c['secretRef']]
         return httpx.AsyncClient(base_url=c['baseUrl'],headers=headers,timeout=httpx.Timeout(c['readTimeout'],connect=c['connectTimeout']),trust_env=False,follow_redirects=False,event_hooks={'request':[guard]},transport=transport or PinnedTransport(origin.hostname,addresses[0]))
     async def admit(self):
-        v=self.read();c=validate(v['config'])
-        if c['kind']=='openrouter':return AdmittedConnection('openrouter',c['baseUrl'],c['model'],v['revision'],connect_timeout=c['connectTimeout'],read_timeout=c['readTimeout'])
-        if v.get('verification',{}).get('fingerprint')!=fingerprint(c) or v['verification'].get('state')!='verified':raise APIError(503,'저장된 모델의 도구·SSE 호환 검증이 필요합니다.')
-        return AdmittedConnection(c['kind'],c['baseUrl'],c['model'],v['revision'],await self.client(c),c['connectTimeout'],c['readTimeout'])
+        # Capture before the first await: already admitted calls retain their provider.
+        v=self.read();c=copy.deepcopy(self._active or self.openrouter(v))
+        if c['kind']=='openrouter':
+            self.require_openrouter(v)
+            return AdmittedConnection('openrouter',c['baseUrl'],c['model'],v['revision'],connect_timeout=c['connectTimeout'],read_timeout=c['readTimeout'])
+        token=self.credential_for(c)
+        return AdmittedConnection(c['kind'],c['baseUrl'],c['model'],v['revision'],await self.client(c,token=token),c['connectTimeout'],c['readTimeout'])
     async def check(self,c,transport=None):
         c=validate(c)
         if c['kind']=='openrouter':raise APIError(400,'이 호환 시험은 OpenAI 호환 backend 전용입니다. OpenRouter 기본 경로는 유지됩니다.')
@@ -239,9 +289,12 @@ class Connections:
         old=self.read()
         self.same_revision(old,expected_revision)
         proof=profile.get('verification') if profile is not None else self.checks.get(fingerprint(c))
-        if profile is None and c['kind']=='openai-compatible' and (not proof or time.time()-proof.get('rollbackAt',proof['checkedAt'])>300):raise APIError(409,'이 설정으로 최근 도구·SSE 호환 시험을 먼저 실행하세요.')
-        value={'revision':old['revision']+1,'config':c,'verification':proof or {'state':'existing-openrouter-path'},'history':([{'config':old['config'],'verification':old.get('verification')}]+old['history'])[:5],'profiles':old['profiles'],'activeProfileId':profile['id'] if profile is not None else None}
+        self.require_openrouter(old)
+        if c['kind']=='openai-compatible':self.credential_for(c)
+        value={'revision':old['revision']+1,'openrouterConfig':copy.deepcopy(c if c['kind']=='openrouter' else self.openrouter(old)),'config':c,'verification':proof or {'state':'existing-openrouter-path'},'history':([{'config':old['config'],'verification':old.get('verification')}]+old['history'])[:5],'profiles':old['profiles'],'activeProfileId':profile['id'] if profile is not None else None}
         self.write(value)
+        self._active=copy.deepcopy(c) if c['kind']=='openai-compatible' else None
+        if c['kind']=='openrouter':self._credential=None
         return self.public()
     def write(self,value):
         wire=json.dumps(value,ensure_ascii=False)
@@ -261,5 +314,6 @@ class Connections:
         old=self.read()
         if not old['history']:raise APIError(409,'되돌릴 이전 설정이 없습니다.')
         previous=old['history'][0];proof=previous.get('verification')
+        if previous['config']['kind']!='openrouter':raise APIError(409,'Modal은 이전 설정 복구로 활성화하지 않습니다. 연결을 선택하고 키 입력 후 명시적으로 적용하세요.')
         if proof and proof.get('state')=='verified':self.checks[fingerprint(previous['config'])]={**proof,'rollbackAt':time.time()}
         return await self.publish(previous['config'],expected_revision)
