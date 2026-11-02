@@ -236,7 +236,7 @@ class Harness:
                     metrics.stages['prepare_ms']=round((time.monotonic()-t)*1000,2)
                 state=self.state(s,request,context)
                 history=self.prompt_history(s)
-                messages=[{'role':'system','content':self.system_prompt(s,request)+json.dumps(state,ensure_ascii=False)}]+history+[{'role':'user','content':request.message}]
+                messages=[{'role':'system','content':self.system_prompt(s,request)+json.dumps(state,ensure_ascii=False,separators=(',',':'))}]+history+[{'role':'user','content':request.message}]
                 tools=([self.context_tool(s)]+self.answer_tools(s) if context is None else [])
                 if context is not None:
                     tools.extend(self.selection_tools(s,[pid for pid,p in observed.items() if self.catalog.allowed(p,working_filters)]))
@@ -355,7 +355,7 @@ class Harness:
                         text=empty_answer;await send('text',{'delta':text});completed=True;break
                     context['selection_contract']=self.selection_contract()
                     messages += [assistant,
-                                 {'role':'tool','tool_call_id':call['id'],'content':json.dumps(self.model_context(context),ensure_ascii=False)}]
+                                 {'role':'tool','tool_call_id':call['id'],'content':json.dumps(self.model_context(context),ensure_ascii=False,separators=(',',':'))}]
                     eligible=[pid for pid,p in observed.items() if self.catalog.allowed(p,working_filters)]
                     tools=self.selection_tools(s,eligible)
                 if not completed:raise ProviderError('model_call_budget_exhausted')

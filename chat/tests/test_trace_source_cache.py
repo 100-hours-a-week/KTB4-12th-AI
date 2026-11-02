@@ -32,7 +32,7 @@ def runtime(kind=Runtime, config=None):
 def test_source_fingerprints_keep_existing_byte_order_and_digest_formula():
     names = ["runtime.py", "agent.py", "turn_report.py",
              "model_config.py", "profile.py", "public_answer.py",
-             "conversation_memory.py", "streaming.py", "demo_profiles.py"]
+             "conversation_memory.py", "streaming.py", "demo_profiles.py", "llm_connection.py", "request_audit.py"]
     base = hashlib.sha256(b"".join((APP / name).read_bytes() for name in names)).hexdigest()[:16]
     low_paths = [APP / "low_latency.py", APP / "gift_adapter.py", APP / "model_trace.py",
                  *sorted((APP / "gift_core").glob("*.py"))]
@@ -141,7 +141,7 @@ from app.mock_runtime import MockRuntime
 from app.integrated_harness import protocol_manifest
 from app.release import revision
 root=Path(sys.argv[1])
-names=['runtime.py','agent.py','turn_report.py','model_config.py','profile.py','public_answer.py','conversation_memory.py','streaming.py','demo_profiles.py']
+names=['runtime.py','agent.py','turn_report.py','model_config.py','profile.py','public_answer.py','conversation_memory.py','streaming.py','demo_profiles.py','llm_connection.py','request_audit.py']
 base=hashlib.sha256(b''.join((root/name).read_bytes() for name in names)).hexdigest()[:16]
 low=hashlib.sha256(base.encode()+b''.join(p.read_bytes() for p in [root/'low_latency.py',root/'gift_adapter.py',root/'model_trace.py',*sorted((root/'gift_core').glob('*.py'))])).hexdigest()[:16]
 mock=hashlib.sha256((root/'mock_runtime.py').read_bytes()).hexdigest()[:16]

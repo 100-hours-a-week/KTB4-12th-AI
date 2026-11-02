@@ -596,7 +596,9 @@ async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_i
             assert admitted["analysisCurrent"] is True
             search, sent = Search(), []
             packets = [("gift_context", {"queries": ["선물"], "changes": {}}),
-                       ("show_gifts", {"product_ids": ["101"]})]
+                       ("show_gifts", {"product_ids": ["101"], "reasons": [{
+                           "product_id": "101",
+                           "reason": "선물 후보로 조회된 상품이라 골랐으며, 구체적인 용도는 추가 확인이 필요해요."}]})]
 
             def respond(request):
                 assert request.url.host == "synthetic.invalid"

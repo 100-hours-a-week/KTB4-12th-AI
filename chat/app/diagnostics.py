@@ -21,6 +21,9 @@ def clean(value):
     """Remove credentials, including ones accidentally echoed in provider output."""
     secrets = [v for k, v in os.environ.items() if len(v) >= 8 and
                any(word in k.upper() for word in ('TOKEN', 'PASSWORD', 'SECRET', 'API_KEY'))]
+    # Explicit connection references may use names without TOKEN/SECRET markers.
+    secrets.extend(credential for name in os.getenv('CHAT_LLM_SECRET_REFS','').split(',')
+                   if (credential := os.getenv(name.strip())))
     try:
         from integration.provider_key import ACTIVE_KEY
         current = ACTIVE_KEY.get()
@@ -34,6 +37,7 @@ def clean(value):
         if isinstance(v, str):
             for secret in secrets: v = v.replace(secret, '[REDACTED]')
             v = re.sub(r'\bsk-or-v1-[A-Za-z0-9_-]{20,200}', '[REDACTED]', v)
+            v = re.sub(r'\bwk-[A-Za-z0-9_-]{4,200}\.ws-[A-Za-z0-9_-]{4,300}', '[REDACTED]', v)
         return v
     return visit(copy.deepcopy(value))
 

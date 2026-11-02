@@ -134,7 +134,7 @@ async def test_empty_retrieval_commits_filter_without_another_model_decision():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('composition, expected_repairs', [('구성: 머그2P. 소재: 도자기.', 0), ('구성: 머그 13P.', 1), ('구성: 모델X2P.', 1), ('규격: 2P.', 1)])
-async def test_piece_count_equivalence_requires_explicit_composition(composition, expected_repairs):
+async def test_numeric_prose_does_not_trigger_repair(composition, expected_repairs):
     h, s, search, p, events, run = setup([
         tool_events('gift_context', {'queries': ['머그컵']}), select('머그 2개 구성입니다.'), select('도자기 머그입니다.')])
     async def mugs(request, snapshot_id):
@@ -142,7 +142,7 @@ async def test_piece_count_equivalence_requires_explicit_composition(composition
     search.search = mugs
     metrics = await run('머그컵을 골라줘')
     assert metrics.status == 'completed'
-    assert metrics.stages.get('tool_repairs', 0) == expected_repairs
+    assert metrics.stages.get('tool_repairs', 0) == 0
 
 
 @pytest.mark.asyncio
@@ -165,12 +165,12 @@ def test_brand_resolution_is_unique_and_not_fuzzy():
 
 
 @pytest.mark.asyncio
-async def test_unverified_numeric_claim_still_requires_correction():
+async def test_numeric_claim_is_not_a_separate_judging_stage():
     h, s, search, p, events, run = setup([
         tool_events('gift_context', {'queries': ['양말']}), select('30팩 구성입니다.'), select('면 혼방 소재로 만든 양말입니다.')])
     metrics = await run()
-    assert metrics.status == 'completed' and metrics.stages['tool_repairs'] == 1
-    assert all('30팩' not in str(v) for k, v in events if k in ('cards', 'text'))
+    assert metrics.status == 'completed' and metrics.stages.get('tool_repairs',0) == 0
+    assert any('30팩' in str(v) for k,v in events if k in ('cards','text'))
 
 
 @pytest.mark.asyncio
