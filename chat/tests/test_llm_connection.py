@@ -5,13 +5,17 @@ from app.llm_connection import Connections, validate, destination, ACTIVE_CONNEC
 from app.low_latency import ProviderAdapter
 
 BASE='http://127.0.0.1:18999/v1'
-def config():return {'kind':'openai-compatible','baseUrl':BASE,'model':'synthetic-vllm','auth':'none','secretRef':None,'connectTimeout':2,'readTimeout':5}
+def config():return {'kind':'openai-compatible','baseUrl':BASE,'model':'synthetic-vllm','auth':'session-key','secretRef':None,'connectTimeout':2,'readTimeout':5}
 def packet(name='connection_probe',arguments='{"probe":"ok"}'):
  return 'data: '+json.dumps({'choices':[{'delta':{'tool_calls':[{'index':0,'function':{'name':name,'arguments':arguments}}]},'finish_reason':'tool_calls'}]})+'\n\ndata: [DONE]\n\n'
 @pytest.fixture
 def settings(tmp_path,monkeypatch):
  monkeypatch.setenv('AI_ENVIRONMENT','local');monkeypatch.setenv('CHAT_LLM_ALLOWED_BASE_URLS',BASE)
- return Connections(tmp_path/'model.json')
+ monkeypatch.setenv('OPENROUTER_API_KEY','synthetic-openrouter')
+ value=Connections(tmp_path/'model.json')
+ from app.llm_connection import fingerprint
+ value._credential=(fingerprint(config()),'wk-synthetic.ws-synthetic')
+ return value
 async def checked(settings,c=None):
  c=c or config()
  return await settings.check(c,httpx.MockTransport(lambda req:httpx.Response(200,headers={'content-type':'text/event-stream'},text=packet())))
@@ -27,22 +31,23 @@ def test_remote_dns_private_ip_is_rejected(monkeypatch):
 def test_production_never_accepts_local_mock(settings,monkeypatch):
  monkeypatch.setenv('AI_ENVIRONMENT','production')
  with pytest.raises(APIError):validate(config())
-async def test_save_requires_checked_exact_settings_and_preserves_previous_on_error(settings):
- old=settings.public()
+async def test_activation_requires_exact_memory_key_not_a_paid_check(settings):
+ old=settings.public();settings._credential=None
  with pytest.raises(APIError):await settings.publish(config(),0)
- assert settings.public()==old and not settings.path.exists()
- await checked(settings);saved=await settings.publish(config(),0);assert saved['revision']==1
+ assert settings.read()['revision']==0
+ await settings.submit_key(config(),'wk-synthetic.ws-synthetic',0)
+ assert settings.public()['config']['kind']=='openrouter'
+ saved=await settings.publish(config(),1);assert saved['revision']==2
  c=config();c['model']='different'
- with pytest.raises(APIError):await settings.publish(c,1)
+ with pytest.raises(APIError):await settings.publish(c,2)
  assert settings.read()['config']['model']=='synthetic-vllm'
  with pytest.raises(APIError):await settings.publish(config(),0)
- assert settings.read()['revision']==1
-async def test_snapshot_and_rollback_publish_new_revision(settings):
- await checked(settings);await settings.publish(config(),0);admitted=await settings.admit()
+async def test_snapshot_and_disable_preserve_inflight_provider(settings):
+ await settings.publish(config(),0);admitted=await settings.admit()
  try:
-  other=config();other['model']='new-model';await checked(settings,other);await settings.publish(other,1)
+  off=await settings.disable(1)
   assert admitted.model=='synthetic-vllm' and admitted.revision==1
-  restored=await settings.rollback(2);assert restored['revision']==3 and restored['config']['model']=='synthetic-vllm'
+  assert off['config']['kind']=='openrouter' and not off['modal']['keyPresent']
  finally:await admitted.close()
 @pytest.mark.parametrize('mode',['http','json','tool','incomplete'])
 async def test_invalid_capabilities_never_replace_settings(settings,mode):
@@ -56,7 +61,8 @@ async def test_secret_reference_never_returns_or_reuses_openrouter_key(settings,
  monkeypatch.setenv('CHAT_LLM_SECRET_REFS','SYNTHETIC_MODAL_KEY');monkeypatch.setenv('SYNTHETIC_MODAL_KEY','synthetic-modal-only');monkeypatch.setenv('OPENROUTER_API_KEY_CHAT','synthetic-openrouter-never-forward')
  c=config();c.update(auth='secret-ref',secretRef='SYNTHETIC_MODAL_KEY');seen=[]
  def reply(req):seen.append(req.headers.get('Authorization'));return httpx.Response(200,headers={'content-type':'text/event-stream'},text=packet())
- await settings.check(c,httpx.MockTransport(reply));await settings.publish(c,0)
+ await settings.check(c,httpx.MockTransport(reply))
+ with pytest.raises(APIError):await settings.publish(c,0)
  assert seen==['Bearer synthetic-modal-only']
  assert 'synthetic-modal-only' not in json.dumps(settings.public())
  assert 'synthetic-openrouter' not in json.dumps(settings.public())
@@ -75,7 +81,7 @@ async def test_https_default_port_and_pinned_transport_host_sni(settings,monkeyp
  from app.llm_connection import PinnedTransport
  monkeypatch.setenv('CHAT_LLM_ALLOWED_BASE_URLS','https://model.example/v1')
  monkeypatch.setattr('socket.getaddrinfo',lambda *a,**k:[(2,1,6,'',('8.8.8.8',443))])
- c=config();c['baseUrl']='https://model.example/v1';seen=[]
+ c=config();c.update(baseUrl='https://model.example/v1',auth='none');seen=[]
  def reply(req):seen.append(req.url);return httpx.Response(200,headers={'content-type':'text/event-stream'},text=packet())
  await settings.check(c,httpx.MockTransport(reply));assert seen[0].host=='model.example'
  class Inner(httpx.AsyncBaseTransport):
@@ -101,11 +107,11 @@ async def test_real_chat_runtime_uses_compatible_snapshot_for_entire_turn(settin
  async def reply(req):
   sent.append(json.loads(req.content))
   if len(sent)==1:entered.set();await release.wait()
-  assert req.url==BASE+'/chat/completions' and 'authorization' not in req.headers
+  assert req.url==BASE+'/chat/completions' and req.headers['authorization']=='Bearer wk-synthetic.ws-synthetic'
   assert 'provider' not in sent[-1] and 'reasoning' not in sent[-1]
   return httpx.Response(200,headers={'content-type':'text/event-stream'},text='data: '+json.dumps(packets.pop(0))+'\n\ndata: [DONE]\n\n')
  original=settings.client
- async def client(c,transport=None):return await original(c,transport or httpx.MockTransport(reply))
+ async def client(c,transport=None,**kwargs):return await original(c,transport or httpx.MockTransport(reply),**kwargs)
  monkeypatch.setattr(settings,'client',client)
  store=fixture.Store();search=fixture.Search();runtime=object.__new__(LowLatencyRuntime);runtime.init_state(store,search,'owner');runtime.connections=settings;runtime.model='unused/openrouter'
  async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: (_ for _ in ()).throw(AssertionError('OpenRouter must not be called')))) as original_http:
@@ -210,15 +216,9 @@ def test_malformed_settings_file_fails_safely_without_replacing_it(settings,docu
  assert settings.path.read_text()==raw
 
 
-async def test_rollback_preserves_actual_probe_time_without_new_model_call(settings):
+async def test_rollback_cannot_reactivate_modal_after_off(settings):
  await checked(settings);await settings.publish(config(),0)
- await settings.publish(copy.deepcopy(settings.default),1)
- stored=settings.read();stored['history'][0]['verification']['checkedAt']=1
- settings.path.write_text(json.dumps(stored))
- async def no_probe(*args,**kwargs):raise AssertionError('Rollback must not generate a provider request')
- settings.client=no_probe
- restored=await settings.rollback(2)
- assert restored['verification']['checkedAt']==1
- assert restored['verification']['rollbackAt']>1
- assert restored['verification']['basis']=='explicit-synthetic-tool-stream-probe'
- assert restored['revision']==3
+ await settings.disable(1)
+ raw=settings.path.read_text()
+ assert (await settings.rollback(2))['config']['kind']=='openrouter'
+ assert not settings.public()['modal']['keyPresent']

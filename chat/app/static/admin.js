@@ -46,6 +46,7 @@ async function api(path, options = {}) {
 }
 function resetSession(message='관리자 로그인이 필요합니다.') {
   sessionVersion++; listVersion++; clearSelection(); next = null;
+  $('#modal-key').value='';$('#modal-state').textContent='';
   connectionVersion++; connectionSnapshot = null; connectionBusy = false; connectionUncertain=false; $('#connection-active').textContent='';
   if (cf()?.elements) { cf().reset(); $('#connection-profile').replaceChildren(new Option('새 연결 만들기','')); $('#connection-profile-name').value=''; $('#connection-capabilities').replaceChildren(); connectionState('로그인이 필요합니다.'); connectionButtons(); }
   $('#items').replaceChildren(); $('#login').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true; $('#status').textContent=message;
@@ -184,11 +185,13 @@ function connectionFields(){
 function selectedProfile(){return connectionSnapshot?.profiles?.find(p=>p.id===$('#connection-profile').value);}
 function profileEdited(){const profile=selectedProfile();return !profile||profile.name!==$('#connection-profile-name').value.trim()||Object.entries(connectionInput()).some(([key,value])=>value!==(profile.config[key]??null));}
 function connectionButtons(){
+ const key=$('#modal-key-submit');if(key)key.disabled=connectionBusy||connectionUncertain||!connectionSnapshot?.writable||connectionSnapshot?.modal?.active||cf().elements.kind.value!=='openai-compatible';
  connectionFields();for(const id of ['connection-profile','connection-profile-name'])$('#'+id).disabled=connectionBusy||connectionUncertain||!connectionSnapshot?.writable;
- for(const id of ['connection-save','connection-check','connection-rollback','connection-reload','connection-apply','connection-openrouter','connection-cancel'])$('#'+id).disabled=connectionBusy||(connectionUncertain&&id!=='connection-reload')||(id!=='connection-reload'&&!connectionSnapshot?.writable)||(id==='connection-check'&&(!$('#probe-consent').checked||cf().elements.kind.value!=='openai-compatible'))||(id==='connection-rollback'&&!connectionSnapshot?.history?.length)||(id==='connection-apply'&&(profileEdited()||(selectedProfile()?.config.kind==='openai-compatible'&&selectedProfile()?.verification?.state!=='verified')));
+ for(const id of ['connection-save','connection-check','connection-rollback','connection-reload','connection-apply','connection-openrouter','connection-cancel'])$('#'+id).disabled=connectionBusy||(connectionUncertain&&id!=='connection-reload')||(id!=='connection-reload'&&!connectionSnapshot?.writable)||(id==='connection-check'&&(!$('#probe-consent').checked||cf().elements.kind.value!=='openai-compatible'))||(id==='connection-rollback'&&!connectionSnapshot?.history?.length)||(id==='connection-apply'&&(profileEdited()||(selectedProfile()?.config.kind==='openai-compatible'&&!connectionSnapshot?.modal?.readyProfiles?.includes(selectedProfile()?.id))));
 }
 function compatibilityLabel(verification){return verification?.state==='verified'?`과거 호환 확인: ${(Number.isFinite(verification.checkedAt)?when(new Date(verification.checkedAt*1000)):'시각 미기록')} · 현재 연결 상태를 보장하지 않습니다.`:'이 설정은 명시적 호환 확인 기록이 없습니다.';}
 function fillConnection(config,verification){
+ if(config.kind==='openai-compatible'&&config.auth!=='session-key')config={...config,auth:'session-key',secretRef:null};
  for(const [key,value] of Object.entries(config)){if(key!=='secretRef'&&cf().elements[key])cf().elements[key].value=value??'';}
  const refs=cf().elements.secretRef;refs.replaceChildren(new Option('없음',''));for(const name of connectionSnapshot.secretReferences||[])refs.append(new Option(name,name));refs.value=config.secretRef||'';
  const caps=$('#connection-capabilities');caps.replaceChildren(el('p',compatibilityLabel(verification),'meta'));
@@ -201,7 +204,7 @@ function chooseProfile(){
 }
 function showConnection(data,preferredId){
  if(!data||!Number.isInteger(data.revision)||!data.config||typeof data.config!=='object'||Array.isArray(data.config))throw new Error('설정 응답 형식을 확인하지 못했습니다. 다시 조회하세요.');
- connectionUncertain=false;connectionSnapshot=data;$('#connection-readiness').textContent=`설정 저장: ${data.writable?'경로 지정됨 (영속 마운트는 운영 확인 필요)':'읽기 전용'} · 허용 URL: ${(data.allowedBaseUrls||[]).join(', ')||'미기록'} · 인증 참조: ${(data.secretReferences||[]).join(', ')||'없음'}`;const active=data.profiles?.find(p=>p.id===data.activeProfileId);$('#connection-active').textContent=`현재 적용: ${active?.name||'기존 직접 설정'} · ${data.config.kind} · ${data.config.model} · ${data.config.baseUrl}`;const select=$('#connection-profile');select.replaceChildren(new Option('새 연결 만들기',''));
+ connectionUncertain=false;connectionSnapshot=data;$('#modal-state').textContent=data.modal?`Modal ${data.modal.active?'켜짐':'꺼짐'} · 메모리 키 ${data.modal.keyPresent?'입력됨':'없음'} · ${data.modal.openrouterReady?'OpenRouter 기본 준비됨':'차단: OpenRouter 기본 모델·역할별 키를 준비하세요'}`:'';$('#connection-readiness').textContent=`설정 저장: ${data.writable?'경로 지정됨 (영속 마운트는 운영 확인 필요)':'읽기 전용'} · 허용 URL: ${(data.allowedBaseUrls||[]).join(', ')||'미기록'} · 인증 참조: ${(data.secretReferences||[]).join(', ')||'없음'}`;const active=data.profiles?.find(p=>p.id===data.activeProfileId);$('#connection-active').textContent=`현재 적용: ${active?.name||'기존 직접 설정'} · ${data.config.kind} · ${data.config.model} · ${data.config.baseUrl}`;const select=$('#connection-profile');select.replaceChildren(new Option('새 연결 만들기',''));
  for(const profile of data.profiles||[])select.append(new Option(profile.name,profile.id));select.value=preferredId??data.activeProfileId??'';
  if(data.profiles?.length)chooseProfile();else{fillConnection(data.config,data.verification);connectionState(`설정 v${data.revision} · ${data.writable?'저장 가능':'읽기 전용'} · ${data.scope}`);connectionButtons();}
 }
@@ -210,13 +213,13 @@ async function connectionAction(path,body,preferredId){
  if(connectionBusy||connectionUncertain)return;
  const generation=++connectionVersion,probe=path.endsWith('/check');connectionBusy=true;connectionButtons();connectionState(probe?'명시적 호환 확인 중…':'설정 처리 중…');
  try{
-  const data=await api(path,{method:/\/(apply|check|rollback)$/.test(path)?'POST':'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const data=await api(path,{method:/\/(apply|check|rollback|modal-key|modal-off)$/.test(path)?'POST':'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(generation!==connectionVersion)return;
   if(!probe)showConnection(data,preferredId);
   else{if(data?.state!=='verified'||!Number.isFinite(data.checkedAt))throw new Error('호환 확인 응답을 확인하지 못했습니다. 현재 적용 모델은 유지됩니다.');connectionState('호환 확인 완료 · 아직 저장하거나 적용하지 않았습니다.');$('#connection-capabilities').replaceChildren(el('p',compatibilityLabel(data),'meta'));}
  }catch(e){
   if(generation!==connectionVersion)return;
-  if(!probe&&(!e.status||e.status>=500)){connectionUncertain=true;$('#connection-active').textContent=$('#connection-active').textContent.replace(/^현재 적용:/,'마지막 확인:');connectionState('처리 응답을 확인하지 못했습니다. 적용 여부 미확정 · 자동 재전송하지 않습니다. 현재 설정을 다시 조회하세요.');}
+  if(!probe&&(!e.status||e.status>=500)){connectionUncertain=true;$('#connection-active').textContent=$('#connection-active').textContent.replace(/^현재 적용:/,'마지막 확인:');$('#modal-state').textContent='마지막 확인 상태입니다. 현재 설정을 다시 조회하세요.';connectionState('처리 응답을 확인하지 못했습니다. 적용 여부 미확정 · 자동 재전송하지 않습니다. 현재 설정을 다시 조회하세요.');}
   else connectionState(e.message+' 현재 적용 모델은 다시 조회해 확인할 수 있습니다.');
  }finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}
 }
@@ -225,14 +228,15 @@ $('#tab-traces').onclick=()=>{$('#traces-view').hidden=false;$('#connection-view
 $('#tab-connection').onclick=()=>{$('#traces-view').hidden=true;$('#connection-view').hidden=false;$('#tab-traces').setAttribute('aria-pressed','false');$('#tab-connection').setAttribute('aria-pressed','true');loadConnection();};
 $('#connection-reload').onclick=loadConnection;
 $('#connection-cancel').onclick=()=>{if(!connectionBusy&&!connectionUncertain)chooseProfile();};
-$('#connection-openrouter').onclick=()=>{if(connectionSnapshot?.defaultConfig?.kind==='openrouter')connectionAction('/admin/api/model-connection',{revision:connectionSnapshot.revision,config:connectionSnapshot.defaultConfig});};
+$('#connection-openrouter').onclick=()=>{if(connectionSnapshot)connectionAction('/admin/api/model-connection/modal-off',{revision:connectionSnapshot.revision});};
+$('#modal-key-form').onsubmit=async e=>{e.preventDefault();if(connectionBusy||connectionUncertain)return;const input=$('#modal-key'),key=input.value;input.value='';try{await connectionAction('/admin/api/model-connection/modal-key',{revision:connectionSnapshot.revision,config:connectionInput(),key},$('#connection-profile').value);}finally{input.value='';}};
 for(const [id,status] of [['requests-failed','FAILED'],['requests-cancelled','CANCELLED'],['requests-all','']])$('#'+id).onclick=()=>{$('#filters').elements.status.value=status;load().catch(report);};
 $('#probe-consent').onchange=connectionButtons;
 cf().elements.auth.onchange=connectionButtons;
-cf().elements.kind.onchange=()=>{cf().elements.auth.value=cf().elements.kind.value==='openrouter'?'existing-openrouter':'none';if(cf().elements.kind.value==='openrouter')cf().elements.baseUrl.value='https://openrouter.ai/api/v1';connectionButtons();};
+cf().elements.kind.onchange=()=>{cf().elements.auth.value=cf().elements.kind.value==='openrouter'?'existing-openrouter':'session-key';if(cf().elements.kind.value==='openrouter')cf().elements.baseUrl.value='https://openrouter.ai/api/v1';connectionButtons();};
 cf().onsubmit=e=>{e.preventDefault();if(!connectionSnapshot)return;const id=$('#connection-profile').value||crypto.randomUUID();connectionAction('/admin/api/model-connection/profiles/'+id,{revision:connectionSnapshot.revision,name:$('#connection-profile-name').value.trim(),config:connectionInput()},id);};
 $('#connection-profile').onchange=()=>{if(!connectionBusy)chooseProfile();};
-cf().oninput=()=>{connectionButtons();$('#connection-draft').textContent=profileEdited()?'미저장 편집 · 적용하려면 같은 설정의 호환 확인과 저장이 필요합니다.':'저장된 설정과 같습니다.';$('#connection-capabilities').replaceChildren(el('p','편집한 설정은 저장·적용 전입니다. 호환 확인은 정확히 같은 설정에만 유효합니다.','meta'));};
+cf().oninput=()=>{connectionButtons();$('#connection-draft').textContent=profileEdited()?'미저장 편집 · 저장 후 이 설정의 메모리 키를 입력하고 별도로 적용하세요.':'저장된 설정과 같습니다.';$('#connection-capabilities').replaceChildren(el('p','편집한 설정은 저장·적용 전입니다. 호환 확인은 정확히 같은 설정에만 유효합니다.','meta'));};
 $('#connection-apply').onclick=()=>{const profile=selectedProfile();if(profile&&!profileEdited())connectionAction('/admin/api/model-connection/profiles/'+profile.id+'/apply',{revision:connectionSnapshot.revision},profile.id);};
 $('#connection-check').onclick=()=>{if($('#probe-consent').checked)connectionAction('/admin/api/model-connection/check',{config:connectionInput()});};
 $('#connection-rollback').onclick=()=>{if(connectionSnapshot)connectionAction('/admin/api/model-connection/rollback',{revision:connectionSnapshot.revision,config:{}});};

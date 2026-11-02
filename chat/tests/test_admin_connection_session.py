@@ -46,8 +46,8 @@ const reply={revision:1,config:{kind:'openrouter',model:'synthetic'},writable:tr
  assert(texts(run('traceDetail(traceFixture)')).includes('실제 전송 시점'));
  // Named profiles: choosing/editing never applies or probes a model.
  const router={kind:'openrouter',baseUrl:'https://openrouter.ai/api/v1',model:'openai/gpt-6-luna',auth:'existing-openrouter',secretRef:null,connectTimeout:10,readTimeout:75};
- const modal={...router,kind:'openai-compatible',baseUrl:'https://modal.example/v1',model:'served-model',auth:'none'};
- sandbox.named={revision:2,config:router,defaultConfig:router,activeProfileId:'openrouter',writable:true,history:[],secretReferences:[],profiles:[{id:'openrouter',name:'OpenRouter',config:router,verification:{}},{id:'modal',name:'Modal Qwen',config:modal,verification:{state:'verified',tools:true,sse:true}}]};
+ const modal={...router,kind:'openai-compatible',baseUrl:'https://modal.example/v1',model:'served-model',auth:'session-key'};
+ sandbox.named={modal:{active:false,keyPresent:true,readyProfiles:['modal'],openrouterReady:true},revision:2,config:router,defaultConfig:router,activeProfileId:'openrouter',writable:true,history:[],secretReferences:[],profiles:[{id:'openrouter',name:'OpenRouter',config:router,verification:{}},{id:'modal',name:'Modal Qwen',config:modal,verification:{state:'verified',tools:true,sse:true}}]};
  const profileWrites=[];sandbox.profileApi=async(path,options)=>{profileWrites.push({path,...options});return sandbox.named;};run('api=profileApi');
  run('showConnection(named)');get('#connection-profile').value='modal';run('chooseProfile()');
  assert.equal(profileWrites.length,0);assert.equal(run('connectionSnapshot.activeProfileId'),'openrouter');
@@ -120,7 +120,21 @@ const reply={revision:1,config:{kind:'openrouter',model:'synthetic'},writable:tr
  // Manual native recovery uses server default config, not an editable profile id.
  const recoverWrites=[];sandbox.recoveryApi=async(path,options)=>{recoverWrites.push({path,...options});return sandbox.named;};run('api=recoveryApi');
  get('#connection-openrouter').onclick();await new Promise(setImmediate);
- assert.equal(JSON.parse(recoverWrites[0].body).config.kind,'openrouter');assert.equal(recoverWrites[0].path,'/admin/api/model-connection');
+ assert.equal(JSON.parse(recoverWrites[0].body).revision,2);assert.equal(recoverWrites[0].path,'/admin/api/model-connection/modal-off');assert.equal(recoverWrites[0].method,'POST');
+ // Secret entry is separate from activation and cleared immediately, including errors.
+ run('showConnection(named)');get('#connection-profile').value='modal';run('chooseProfile()');get('#modal-key').value='wk-synthetic.ws-ui-secret';
+ const keyPosts=[];sandbox.keyApi=async(path,options)=>{keyPosts.push({path,...options});return sandbox.named;};run('api=keyApi');
+ await get('#modal-key-form').onsubmit({preventDefault(){}});assert.equal(get('#modal-key').value,'');assert.equal(keyPosts.length,1);assert(keyPosts[0].path.endsWith('/modal-key'));assert.equal(keyPosts[0].method,'POST');
+ // A lost key submission receipt is not retried and the input stays empty.
+ sandbox.keyLost=async()=>{throw new Error('synthetic key receipt lost');};run('api=keyLost');
+ get('#modal-key').value='wk-synthetic.ws-lost';await get('#modal-key-form').onsubmit({preventDefault(){}});
+ assert.equal(get('#modal-key').value,'');assert.equal(run('connectionUncertain'),true);assert.equal(get('#modal-key-submit').disabled,true);
+ run('api=readback');await run('loadConnection()');assert.equal(run('connectionUncertain'),false);
+ // A delayed key response cannot restore logged-out state or a visible credential.
+ let resolveKey;sandbox.delayedKey=()=>new Promise(resolve=>{resolveKey=resolve;});run('api=delayedKey');
+ get('#modal-key').value='wk-synthetic.ws-delayed';const keyPending=get('#modal-key-form').onsubmit({preventDefault(){}});
+ assert.equal(get('#modal-key').value,'');run('resetSession()');resolveKey(sandbox.named);await keyPending;
+ assert.equal(run('connectionSnapshot'),null);assert.equal(get('#modal-state').textContent,'');assert.equal(get('#modal-key').value,'');
  // Past probe timestamp is explicit; no automatic liveness claim.
  sandbox.proof={state:'verified',checkedAt:1700000000};assert(run('compatibilityLabel(proof)').includes('현재 연결 상태를 보장하지 않습니다'));
  // Fast filters use the actual status query, starting a fresh page.

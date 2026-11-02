@@ -6,7 +6,9 @@ Peter, AI 대시보드에서 OpenRouter와 준비된 Modal 모델을 선택해�
 
 ## 준비된 기능
 
-대시보드에서 연결을 저장하고 선택·적용하거나, 편집을 취소하고 OpenRouter로 돌아갈 수 있어요. 적용 후 들어오는 요청부터 새 연결을 쓰고, 진행 중인 요청은 기존 연결로 끝납니다. 처음 연결만 준비하면 등록된 모델 사이를 바꿀 때마다 Cloud 수정이나 재시작은 필요 없어요.
+기본은 기존 OpenRouter API예요. Modal 연결을 저장한 뒤 대시보드에서 추론용 Proxy Token(`TokenID.TokenSecret`, 예: `wk-….ws-…`)을 입력하고 별도로 적용합니다. 키 입력·저장·적용 자체는 모델을 호출하지 않아요. 키는 서버 메모리에만 두며 파일·DB·환경변수·브라우저 저장소에는 저장하지 않습니다.
+
+Modal을 끄거나 서버를 재시작하면 키 없이 OpenRouter로 돌아갑니다. 진행 중 요청은 기존 연결로 끝나며, Modal 호출 실패 시 OpenRouter로 자동 재시도하지 않아요. OpenRouter 기본 모델·역할별 키가 준비되지 않았다면 차단 상태를 표시합니다. 이 전환은 API 라우팅이며 Modal GPU의 시작·종료나 호스팅 요금을 제어하지 않습니다.
 
 요청 상세에서는 기록된 모델과 설정 revision, 마스킹된 입출력·검색·SSE 흐름을 볼 수 있어요. 호환 확인은 사용자가 동의해 직접 실행하며 비용이 발생할 수 있습니다. 과거 확인 결과가 현재 가용성을 보장하지는 않고, 자동 fallback이나 유료 상태 확인은 하지 않아요.
 
@@ -18,9 +20,8 @@ Secrets Manager에는 제가 아래 값을 등록할게요. Peter는 각 값을 
 | --- | --- |
 | `QA_ADMIN_PASSWORD` | 대시보드 로그인 비밀번호 |
 | `SESSION_SECRET` | 비밀번호와 별개인 기존 세션 서명용 비밀값 |
-| 기존 Modal 인증 변수(예: `MODAL_INFERENCE_TOKEN`) | 인증이 필요한 모델의 Bearer 토큰 |
 
-로그인에는 관리자 비밀번호를 쓰고 IAM access key는 쓰지 않아요. 기존 OpenRouter 인증 경로도 그대로 사용합니다. 비밀값을 코드나 브라우저 설정에 직접 넣지는 않습니다.
+로그인에는 관리자 비밀번호를 쓰고 IAM access key는 쓰지 않아요. 기존 OpenRouter 인증 경로도 그대로 사용합니다. Modal 키는 Secrets Manager에 추가하지 않고, 필요한 때 대시보드에서 추론 endpoint용 키만 입력해요. AWS 키나 Modal 계정 관리 키는 입력하지 않습니다.
 
 ## Peter가 연결할 최소 작업
 
@@ -39,12 +40,11 @@ staging 기본 프록시는 Cookie/Origin을 제거하므로 관리자 경로는
 ### 모델 연결과 저장 경로
 
 - `CHAT_LLM_ALLOWED_BASE_URLS`: 승인된 Modal `https://<model-host>/v1` 주소를 등록해 주세요. 대시보드 주소와 모델 추론 주소는 서로 다릅니다.
-- `CHAT_LLM_SECRET_REFS`: 사용 가능한 인증 **환경변수 이름 목록**이에요. 예를 들어 `MODAL_INFERENCE_TOKEN`이라는 이름을 넣으며 토큰 값 자체를 넣지 않습니다.
 - `CHAT_LLM_CONFIG_FILE`: private하고 쓰기 가능한 영속 마운트의 JSON 경로를 지정해 주세요. `/run/runtime` tmpfs나 읽기 전용 `/shared`·`/media`로는 설정을 보존할 수 없어요. 기존 마운트가 없다면 작은 설정 디렉터리 연결과 호스트 교체 시 보존 방법이 필요합니다.
 
-현재 지원 범위는 **Chat 한 인스턴스·한 워커**예요. 파일 공유만으로 여러 인스턴스나 워커의 설정 동기화를 보장하지 않습니다.
+현재 지원 범위는 **Chat 한 인스턴스·한 워커**예요. 메모리 키는 다른 프로세스와 공유하지 않습니다. 파일 공유만으로 여러 인스턴스나 워커의 설정 동기화를 보장하지 않습니다.
 
-Modal 서버의 model ID(served-model-name), tool calling과 SSE 지원도 확인해 주세요. 현재 인증은 기존 Bearer 참조 방식이며 `Modal-Key`/`Modal-Secret` 이중 헤더는 지원하지 않습니다.
+Modal 서버의 model ID(served-model-name), tool calling과 SSE 지원도 확인해 주세요. 현재 Modal Proxy Token의 `TokenID.TokenSecret`을 Bearer로 보내는 방식입니다. 별도 Modal Secret·IAM 권한 추가는 필요하지 않아요. 기존 비밀 참조 방식의 프로필은 메모리 키 방식으로 다시 저장해야 합니다.
 
 ### 기존 DB 준비 후 앱 배포
 

@@ -37,6 +37,7 @@ def clean(value):
         if isinstance(v, str):
             for secret in secrets: v = v.replace(secret, '[REDACTED]')
             v = re.sub(r'\bsk-or-v1-[A-Za-z0-9_-]{20,200}', '[REDACTED]', v)
+            v = re.sub(r'\bwk-[A-Za-z0-9_-]{4,200}\.ws-[A-Za-z0-9_-]{4,300}', '[REDACTED]', v)
         return v
     return visit(copy.deepcopy(value))
 

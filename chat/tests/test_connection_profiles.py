@@ -9,8 +9,11 @@ async def test_save_apply_switch_back_persist_and_repeat_without_provider_calls(
  saved=await settings.save_profile('modal','Modal Qwen',config(),0)
  assert saved['config']['kind']=='openrouter' and saved['activeProfileId']=='openrouter'
  assert saved['profiles'][-1]['verification']['state']=='needs-check'
+ settings._credential=None
  with pytest.raises(APIError):await settings.apply_profile('modal',1)
  assert settings.read()['revision']==1
+ from app.llm_connection import fingerprint
+ settings._credential=(fingerprint(config()),'wk-synthetic.ws-synthetic')
  await checked(settings)
  saved=await settings.save_profile('modal','Modal Qwen',config(),1)
  assert saved['revision']==2
@@ -24,8 +27,8 @@ async def test_save_apply_switch_back_persist_and_repeat_without_provider_calls(
  assert loaded.read()['profiles']==active['profiles']
  monkeypatch.setattr(loaded,'client',no_client)
  assert (await loaded.apply_profile('openrouter',3))['config']['kind']=='openrouter'
- assert (await loaded.apply_profile('modal',4))['activeProfileId']=='modal'
- assert loaded.read()['verification']['checkedAt']==active['verification']['checkedAt']
+ with pytest.raises(APIError):await loaded.apply_profile('modal',4)
+ assert loaded.read()['profiles'][-1]['verification']['checkedAt']==active['profiles'][-1]['verification']['checkedAt']
 
 async def test_edit_invalidates_only_changed_connection_and_keeps_active_config(settings):
  await checked(settings);await settings.save_profile('modal','Modal',config(),0);await settings.apply_profile('modal',1)
@@ -39,7 +42,7 @@ async def test_edit_invalidates_only_changed_connection_and_keeps_active_config(
  assert settings.read()==edited_without_public_fields(edited)
 
 def edited_without_public_fields(public):
- return {k:v for k,v in public.items() if k not in {'defaultConfig','writable','allowedBaseUrls','secretReferences','scope','verificationNotice'}}
+ return {k:v for k,v in public.items() if k not in {'defaultConfig','writable','allowedBaseUrls','secretReferences','scope','verificationNotice','modal'}}
 
 async def test_profiles_preserve_old_file_and_legacy_publish_rollback(settings):
  old=settings.read();old.pop('profiles');old.pop('activeProfileId');old['revision']=1
@@ -107,6 +110,8 @@ async def test_profile_routes_require_existing_admin_and_reject_cross_origin(set
 async def test_unavailable_active_profile_can_be_inspected_and_switched_back_safely(settings,monkeypatch):
  monkeypatch.setenv('CHAT_LLM_SECRET_REFS','NEUTRAL_CREDENTIAL');monkeypatch.setenv('NEUTRAL_CREDENTIAL','synthetic-profile-secret')
  c=config();c.update(auth='secret-ref',secretRef='NEUTRAL_CREDENTIAL')
+ from app.llm_connection import fingerprint
+ c.update(auth='session-key',secretRef=None);settings._credential=(fingerprint(c),'wk-synthetic.ws-synthetic')
  await checked(settings,c);await settings.save_profile('modal','Modal',c,0);await settings.apply_profile('modal',1)
  monkeypatch.delenv('NEUTRAL_CREDENTIAL');monkeypatch.setenv('CHAT_LLM_ALLOWED_BASE_URLS','')
  assert settings.public()['activeProfileId']=='modal'
