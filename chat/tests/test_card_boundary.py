@@ -23,7 +23,7 @@ def test_public_filter_projection_does_not_claim_private_policy_is_unapplied(pro
     context = {'products': products, 'filters': {'max_price': 100, 'exclude_category_ids': ['private-id']}}
     result = harness.model_context(context)
     assert result['filters'] == {'max_price': 100}
-    assert result['server_constraints'] == {'recipient_category_policy': 'enforced_for_current_scope'}
+    assert result['server_constraints'] == {'recipient_category_policy': 'search_filtered_for_current_scope'}
     assert 'private-id' not in json.dumps(result)
     assert '현재 적용 조건 전체' not in harness.system_prompt(None, None)
 
