@@ -11,8 +11,8 @@
 
 ## Cloud에서 한 번 확인할 것
 
-1. **관리자 접속:** Chat의 `/admin/qa`, `/admin/login`, `/admin/api/*`, `/static/*`를 같은 승인된 private/HTTPS origin으로 연결합니다. 현재 FE/BE proxy 경로만으로 AI 관리 화면이 열리지는 않습니다. Host/Origin과 secure cookie를 보존합니다. 팀 BE 관리자 화면과는 별개입니다.
-2. **기존 인증 주입:** 사용자가 Secrets Manager에 등록하는 `QA_ADMIN_PASSWORD`와 기존 `SESSION_SECRET`을 Chat 프로세스에 주입합니다. 로그인에는 관리자 비밀번호를 쓰며 **IAM access key를 쓰지 않습니다**. 비밀 값을 UI나 코드에 넣지 않습니다.
+1. **관리자 접속:** 제안 주소는 `https://seonjalal.com/admin/qa`이며 실제 AWS 적용은 미확인입니다. AI `/admin/*`와 정확한 정적 파일 `/static/admin.css`, `/static/http.js`, `/static/admin.js`를 연결합니다. 신고 관리 사용 시 `/static/guide.css`, `/static/reports-admin.js`도 연결합니다. `/static/*` 전체를 AI로 보내지 말고 기존 `/api/`의 BE와 `/`의 FE 라우팅을 유지합니다. staging 기본 프록시는 Cookie/Origin을 제거하므로 관리자 경로에서 Host·Origin·Cookie·Set-Cookie 전달을 별도로 보존합니다. `chat_admin`의 host-only·Path=/·Secure·HttpOnly·SameSite=Lax 계약을 유지합니다. 팀 BE 관리자 화면과는 별개이며, 화면의 `/` 채팅 테스트 링크는 이 구성에서 FE 홈으로 갑니다.
+2. **기존 인증 주입:** 사용자가 Secrets Manager에 `QA_ADMIN_PASSWORD`와 기존 `SESSION_SECRET` 값을 등록하고, Peter가 기존 Chat 런타임의 같은 이름 환경변수로 주입을 연결합니다. 로그인에는 관리자 비밀번호를 쓰며 **IAM access key를 쓰지 않습니다**. 비밀 값을 UI나 코드에 넣지 않습니다.
 3. **프로필 영속 저장:** `CHAT_LLM_CONFIG_FILE`을 기존 private writable 영속 마운트의 JSON 경로로 지정합니다. `/run/runtime` tmpfs나 읽기 전용 `/shared`·`/media`로 영속성을 대신하지 않습니다. 현재 task에 쓸 수 있는 기존 마운트가 없다면 작은 설정 디렉터리 연결이 필요합니다. 호스트 교체 시 보존 방식도 확인합니다.
 4. **모델 연결:** `CHAT_LLM_ALLOWED_BASE_URLS`에 승인된 `https://<model-host>/v1`을 넣습니다. 필요하면 이미 주입된 인증 변수 이름(예: `MODAL_INFERENCE_TOKEN`)을 `CHAT_LLM_SECRET_REFS`에 등록합니다. 기존 Bearer 참조만 사용하며 Modal의 `Modal-Key`/`Modal-Secret` 이중 헤더는 현재 지원하지 않습니다. 모델의 served-model-name·tool calling·SSE 지원을 확인합니다. **추론 URL과 대시보드 URL은 다릅니다.**
 
