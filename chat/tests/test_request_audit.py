@@ -117,3 +117,12 @@ def test_bounded_note_details_show_latest_records_and_signal_incomplete_view():
  assert out['reviewNotes'][0]['note']=='합성 메모 1'
  assert out['reviewNotes'][-1]['note']=='합성 메모 40'
  assert out['noteRecords']=={'reviewsTotal':41,'feedbackTotal':0,'limitPerKind':40,'truncated':True,'order':'latest retained records in stored order'}
+
+
+def test_connection_revision_is_recorded_setting_identity_not_release_or_inferred_model():
+ from app.request_audit import list_summary
+ summary=list_summary({'model':'served-model','backend':'openai-compatible','connectionRevision':7,'revision':'release-label'})
+ assert summary['connectionRevision']==7 and summary['backend']=='openai-compatible'
+ assert summary['revision']=='release-label'
+ assert list_summary({})['connectionRevision'] is None
+ assert list_summary({'connectionRevision':True})['connectionRevision'] is None

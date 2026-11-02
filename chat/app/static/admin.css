@@ -88,3 +88,14 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--paper); pad
  .capability-grid { grid-template-columns:1fr 1fr; } .connection-actions button { width:100%; } .turn { padding:18px; }
 }
 @media(prefers-reduced-motion:reduce) { * { scroll-behavior:auto; } }
+
+.active-connection {padding:22px 26px;background:white;border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:14px;overflow-wrap:anywhere;}
+#connection-active {font-size:17px;font-weight:650;margin:0 0 6px;}
+#connection-status {margin:0;color:var(--muted);font-size:13px;}
+.connection-switch {display:flex;align-items:end;flex-wrap:wrap;gap:10px;margin:20px 0 8px;}
+.connection-switch label {flex:1;min-width:210px;}
+#connection-apply {background:var(--blue);color:white;}
+.connection-editor {margin:20px 0;}.connection-editor>summary {font-weight:650;}
+.connection-grid {margin-top:14px;}.capability-grid {grid-column:1/-1;display:block;margin:0;}
+.connection-grid>p {grid-column:1/-1;margin:0;}.quick-filters {margin-top:14px;}
+@media(max-width:600px){.connection-switch button {flex:1 1 45%;}.connection-switch label {flex-basis:100%;}.active-connection {padding:18px;}}

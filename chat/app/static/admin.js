@@ -42,13 +42,13 @@ function reviewEditor(turn, cid) {
 function clearSelection() { selectionVersion++; current = null; selectedFocus = null; allTurns = []; $('#detail').replaceChildren(); }
 async function api(path, options = {}) {
   const session = sessionVersion;
-  return ChatHTTP.json(path, options, () => { if (session === sessionVersion) resetSession(); });
+  return ChatHTTP.json(path, options, () => { if (session === sessionVersion) resetSession('관리자 세션이 만료됐습니다. 관리자 비밀번호로 다시 로그인하세요.'); });
 }
-function resetSession() {
+function resetSession(message='관리자 로그인이 필요합니다.') {
   sessionVersion++; listVersion++; clearSelection(); next = null;
-  connectionVersion++; connectionSnapshot = null; connectionBusy = false; $('#connection-active').textContent='';
+  connectionVersion++; connectionSnapshot = null; connectionBusy = false; connectionUncertain=false; $('#connection-active').textContent='';
   if (cf()?.elements) { cf().reset(); $('#connection-profile').replaceChildren(new Option('새 연결 만들기','')); $('#connection-profile-name').value=''; $('#connection-capabilities').replaceChildren(); connectionState('로그인이 필요합니다.'); connectionButtons(); }
-  $('#items').replaceChildren(); $('#login').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true;
+  $('#items').replaceChildren(); $('#login').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true; $('#status').textContent=message;
 }
 function report(e) { $('#status').textContent = e.message; $('#status').className = 'error'; }
 function download(value, name) { const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], {type: 'application/json'})), a = el('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
@@ -72,7 +72,7 @@ async function load(reset = true) {
     for (const row of data.items) {
       const button = el('button', undefined, 'conversation'); button.dataset.id = row.id; button.setAttribute('aria-pressed', row.id === current);
       button.append(el('span', '대화 ' + row.id.slice(0, 8), 'title'), el('p', `${when(row.created)} · ${row.turnCount}턴`, 'meta'));
-      if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`${t.status||'미기록'} · ${t.model||'모델 미기록'} · ${t.sourceScope}`, 'meta'),el('p',`입/출 ${t.inputTokens??'?'}/${t.outputTokens??'?'} · ${t.elapsedMs??'?'}ms · ${t.costUsd??'?'} USD`,'meta'));}
+      if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`${t.status||'미기록'} · ${t.backend||'연결 미기록'} · ${t.model||'모델 미기록'} · 설정 v${t.connectionRevision??'?'} · ${t.sourceScope}`, 'meta'),el('p',`입/출 ${t.inputTokens??'?'}/${t.outputTokens??'?'} · ${t.elapsedMs??'?'}ms · ${t.costUsd??'?'} USD`,'meta'));}
       if (row.latestFeedbackAt) button.append(el('p', `최근 의견 ${when(row.latestFeedbackAt)} · 미검토 ${row.pendingFeedbackCount}개`, 'meta'));
       if (row.failedCount) button.append(el('span', `실패 ${row.failedCount}건`, 'meta failed'));
       button.onclick = () => select(row.id, false, row.focusTurnId).catch(report); $('#items').append(button);
@@ -133,15 +133,15 @@ function render(data) {
 }
 $('#filters').onsubmit = e => { e.preventDefault(); load().catch(report); };
 $('#more').onclick = () => load(false).catch(report);
-$('#login').onsubmit = async e => { e.preventDefault(); try { await api('/admin/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password: $('#password').value})}); resetSession(); await load(); } catch (e) { report(e); } finally { $('#password').value = ''; } };
+$('#login').onsubmit = async e => { e.preventDefault(); try { await api('/admin/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password: $('#password').value})}); resetSession(); await load(); await loadConnection(); } catch (e) { report(e); } finally { $('#password').value = ''; } };
 $('#logout').onclick = async () => { try { await api('/admin/logout', {method: 'POST'}); resetSession(); $('#status').textContent = '로그아웃했습니다.'; } catch (e) { report(e); } };
-load().catch(report);
+load().then(()=>{if(!$('#workspace').hidden)return loadConnection();}).catch(report);
 
 function tracePanel(cid, turn) {
   const trace=turn.trace, box=el('section',undefined,'trace-panel');
   if(!trace){box.append(el('p','실행 근거 미수집 · 과거 기록은 재구성하지 않습니다.','meta'));return box;}
   const meta=el('div',undefined,'trace-meta'), totals=trace.totals||{};
-  for(const value of [trace.sourceScope,trace.environment||'환경 미기록','코드 '+(trace.sourceIdentity?.promptVersion||trace.sourceIdentity?.integrationSourceSha256||'미기록').slice(0,12),trace.connection?.model||turn.context?.model||'모델 미기록'])meta.append(el('span',value,'chip'));
+  for(const value of [trace.sourceScope,trace.environment||'환경 미기록','코드 '+(trace.sourceIdentity?.promptVersion||trace.sourceIdentity?.integrationSourceSha256||'미기록').slice(0,12),trace.connection?.model||turn.context?.model||'모델 미기록','설정 v'+(trace.connection?.revision??'미기록')])meta.append(el('span',value,'chip'));
   if(trace.executionMode==='mock')meta.prepend(el('span','합성 기록 · 모델 미호출','chip'));
   box.append(meta,el('p',`입력 ${totals.inputTokens??'미확인'} · 출력 ${totals.outputTokens??'미확인'} tokens · ${trace.elapsedMs??'미확인'}ms · 비용 ${totals.costUsd==null?'미확인':totals.costUsd+' USD'}`,'trace-totals'));
   box.append(el('p',`${trace.recording.calls==='not-recorded-legacy'?'모델 입출력 미기록':'마스킹된 모델 기록'} · 캐시/추론은 총 토큰에 포함됩니다.`,'meta'));
@@ -169,7 +169,7 @@ function traceDetail(data){
   if(!data.modelCalls?.length)root.append(el('p','과거 모델 입출력은 기록되지 않았습니다. 사용량 영수증만 별도로 확인할 수 있습니다.','meta'));
   root.append(el('p','비공개 취향·비밀·추론 원문과 도구 인자 본문은 이 상세에 포함하지 않습니다.','meta'));return root;
 }
-let connectionSnapshot=null, connectionBusy=false, connectionVersion=0;
+let connectionSnapshot=null, connectionBusy=false, connectionVersion=0, connectionUncertain=false;
 const cf=()=>$('#connection-form');
 function connectionInput(){
   const value=name=>cf().elements[name].value,auth=value('auth');
@@ -178,43 +178,61 @@ function connectionInput(){
 function connectionState(message){$('#connection-status').textContent=message;}
 function connectionFields(){
   const form=cf(),openrouter=form.elements.kind?.value==='openrouter';
-  for(const name of ['kind','baseUrl','model','auth','secretRef','connectTimeout','readTimeout'])if(form.elements[name])form.elements[name].disabled=connectionBusy||!connectionSnapshot?.writable||(name==='auth'&&openrouter)||(name==='secretRef'&&(openrouter||form.elements.auth?.value!=='secret-ref'));
+  for(const name of ['kind','baseUrl','model','auth','secretRef','connectTimeout','readTimeout'])if(form.elements[name])form.elements[name].disabled=connectionBusy||connectionUncertain||!connectionSnapshot?.writable||(name==='auth'&&openrouter)||(name==='secretRef'&&(openrouter||form.elements.auth?.value!=='secret-ref'));
   if(form.elements.baseUrl)form.elements.baseUrl.readOnly=openrouter;
 }
 function selectedProfile(){return connectionSnapshot?.profiles?.find(p=>p.id===$('#connection-profile').value);}
 function profileEdited(){const profile=selectedProfile();return !profile||profile.name!==$('#connection-profile-name').value.trim()||Object.entries(connectionInput()).some(([key,value])=>value!==(profile.config[key]??null));}
 function connectionButtons(){
- connectionFields();for(const id of ['connection-profile','connection-profile-name'])$('#'+id).disabled=connectionBusy||!connectionSnapshot?.writable;
- for(const id of ['connection-save','connection-check','connection-rollback','connection-reload','connection-apply'])$('#'+id).disabled=connectionBusy||(id!=='connection-reload'&&!connectionSnapshot?.writable)||(id==='connection-check'&&(!$('#probe-consent').checked||cf().elements.kind.value!=='openai-compatible'))||(id==='connection-rollback'&&!connectionSnapshot?.history?.length)||(id==='connection-apply'&&(profileEdited()||(selectedProfile()?.config.kind==='openai-compatible'&&selectedProfile()?.verification?.state!=='verified')));
+ connectionFields();for(const id of ['connection-profile','connection-profile-name'])$('#'+id).disabled=connectionBusy||connectionUncertain||!connectionSnapshot?.writable;
+ for(const id of ['connection-save','connection-check','connection-rollback','connection-reload','connection-apply','connection-openrouter','connection-cancel'])$('#'+id).disabled=connectionBusy||(connectionUncertain&&id!=='connection-reload')||(id!=='connection-reload'&&!connectionSnapshot?.writable)||(id==='connection-check'&&(!$('#probe-consent').checked||cf().elements.kind.value!=='openai-compatible'))||(id==='connection-rollback'&&!connectionSnapshot?.history?.length)||(id==='connection-apply'&&(profileEdited()||(selectedProfile()?.config.kind==='openai-compatible'&&selectedProfile()?.verification?.state!=='verified')));
 }
+function compatibilityLabel(verification){return verification?.state==='verified'?`과거 호환 확인: ${(Number.isFinite(verification.checkedAt)?when(new Date(verification.checkedAt*1000)):'시각 미기록')} · 현재 연결 상태를 보장하지 않습니다.`:'이 설정은 명시적 호환 확인 기록이 없습니다.';}
 function fillConnection(config,verification){
  for(const [key,value] of Object.entries(config)){if(key!=='secretRef'&&cf().elements[key])cf().elements[key].value=value??'';}
  const refs=cf().elements.secretRef;refs.replaceChildren(new Option('없음',''));for(const name of connectionSnapshot.secretReferences||[])refs.append(new Option(name,name));refs.value=config.secretRef||'';
- const caps=$('#connection-capabilities');caps.replaceChildren();for(const [key,label] of [['connection','연결'],['tools','도구 호출'],['sse','SSE 완료']])caps.append(el('div',label+' · '+(verification?.[key]===true?'이 설정의 과거 명시 검증 확인':'미관측'),'capability'));
+ const caps=$('#connection-capabilities');caps.replaceChildren(el('p',compatibilityLabel(verification),'meta'));
 }
 function chooseProfile(){
- const profile=selectedProfile();$('#connection-profile-name').value=profile?.name||'';
+ const profile=selectedProfile();$('#connection-profile-name').value=profile?.name||'';$('#connection-draft').textContent=profile?'저장된 연결을 선택했습니다. 적용 전에는 현재 모델이 유지됩니다.':'새 연결 초안 · 저장 전입니다.';$('#connection-editor').open=!profile;
  fillConnection(profile?.config||connectionSnapshot.defaultConfig||connectionSnapshot.config,profile?.verification);
  const active=connectionSnapshot.profiles?.find(p=>p.id===connectionSnapshot.activeProfileId);
  connectionState(`현재 적용: ${active?.name||'기존 직접 설정'} · 선택: ${profile?.name||'새 연결'} · 설정 v${connectionSnapshot.revision} · ${connectionSnapshot.writable?'저장 가능':'읽기 전용'}`);connectionButtons();
 }
 function showConnection(data,preferredId){
- connectionSnapshot=data;const active=data.profiles?.find(p=>p.id===data.activeProfileId);$('#connection-active').textContent=`현재 적용: ${active?.name||'기존 직접 설정'} · ${data.config.kind} · ${data.config.model} · ${data.config.baseUrl}`;const select=$('#connection-profile');select.replaceChildren(new Option('새 연결 만들기',''));
+ if(!data||!Number.isInteger(data.revision)||!data.config||typeof data.config!=='object'||Array.isArray(data.config))throw new Error('설정 응답 형식을 확인하지 못했습니다. 다시 조회하세요.');
+ connectionUncertain=false;connectionSnapshot=data;$('#connection-readiness').textContent=`설정 저장: ${data.writable?'경로 지정됨 (영속 마운트는 운영 확인 필요)':'읽기 전용'} · 허용 URL: ${(data.allowedBaseUrls||[]).join(', ')||'미기록'} · 인증 참조: ${(data.secretReferences||[]).join(', ')||'없음'}`;const active=data.profiles?.find(p=>p.id===data.activeProfileId);$('#connection-active').textContent=`현재 적용: ${active?.name||'기존 직접 설정'} · ${data.config.kind} · ${data.config.model} · ${data.config.baseUrl}`;const select=$('#connection-profile');select.replaceChildren(new Option('새 연결 만들기',''));
  for(const profile of data.profiles||[])select.append(new Option(profile.name,profile.id));select.value=preferredId??data.activeProfileId??'';
  if(data.profiles?.length)chooseProfile();else{fillConnection(data.config,data.verification);connectionState(`설정 v${data.revision} · ${data.writable?'저장 가능':'읽기 전용'} · ${data.scope}`);connectionButtons();}
 }
 async function loadConnection(){if(connectionBusy)return;const generation=++connectionVersion;connectionBusy=true;connectionButtons();try{const data=await api('/admin/api/model-connection');if(generation===connectionVersion)showConnection(data);}catch(e){if(generation===connectionVersion)connectionState(e.message);}finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}}
-async function connectionAction(path,body,preferredId){if(connectionBusy)return;const generation=++connectionVersion;connectionBusy=true;connectionButtons();try{const data=await api(path,{method:/\/(apply|check|rollback)$/.test(path)?'POST':'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(generation!==connectionVersion)return;if(data.config)showConnection(data,preferredId);else connectionState('도구·SSE 호환 확인. 이 설정은 아직 적용하지 않았습니다.');}catch(e){if(generation===connectionVersion)connectionState(e.message+' 기존 적용 설정은 다시 조회해 확인하세요.');}finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}}
+async function connectionAction(path,body,preferredId){
+ if(connectionBusy||connectionUncertain)return;
+ const generation=++connectionVersion,probe=path.endsWith('/check');connectionBusy=true;connectionButtons();connectionState(probe?'명시적 호환 확인 중…':'설정 처리 중…');
+ try{
+  const data=await api(path,{method:/\/(apply|check|rollback)$/.test(path)?'POST':'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(generation!==connectionVersion)return;
+  if(!probe)showConnection(data,preferredId);
+  else{if(data?.state!=='verified'||!Number.isFinite(data.checkedAt))throw new Error('호환 확인 응답을 확인하지 못했습니다. 현재 적용 모델은 유지됩니다.');connectionState('호환 확인 완료 · 아직 저장하거나 적용하지 않았습니다.');$('#connection-capabilities').replaceChildren(el('p',compatibilityLabel(data),'meta'));}
+ }catch(e){
+  if(generation!==connectionVersion)return;
+  if(!probe&&(!e.status||e.status>=500)){connectionUncertain=true;$('#connection-active').textContent=$('#connection-active').textContent.replace(/^현재 적용:/,'마지막 확인:');connectionState('처리 응답을 확인하지 못했습니다. 적용 여부 미확정 · 자동 재전송하지 않습니다. 현재 설정을 다시 조회하세요.');}
+  else connectionState(e.message+' 현재 적용 모델은 다시 조회해 확인할 수 있습니다.');
+ }finally{if(generation===connectionVersion){connectionBusy=false;connectionButtons();}}
+}
 if (cf()?.elements && $('#tab-traces')) {
 $('#tab-traces').onclick=()=>{$('#traces-view').hidden=false;$('#connection-view').hidden=true;$('#tab-traces').setAttribute('aria-pressed','true');$('#tab-connection').setAttribute('aria-pressed','false');};
 $('#tab-connection').onclick=()=>{$('#traces-view').hidden=true;$('#connection-view').hidden=false;$('#tab-traces').setAttribute('aria-pressed','false');$('#tab-connection').setAttribute('aria-pressed','true');loadConnection();};
 $('#connection-reload').onclick=loadConnection;
+$('#connection-cancel').onclick=()=>{if(!connectionBusy&&!connectionUncertain)chooseProfile();};
+$('#connection-openrouter').onclick=()=>{if(connectionSnapshot?.defaultConfig?.kind==='openrouter')connectionAction('/admin/api/model-connection',{revision:connectionSnapshot.revision,config:connectionSnapshot.defaultConfig});};
+for(const [id,status] of [['requests-failed','FAILED'],['requests-cancelled','CANCELLED'],['requests-all','']])$('#'+id).onclick=()=>{$('#filters').elements.status.value=status;load().catch(report);};
 $('#probe-consent').onchange=connectionButtons;
 cf().elements.auth.onchange=connectionButtons;
 cf().elements.kind.onchange=()=>{cf().elements.auth.value=cf().elements.kind.value==='openrouter'?'existing-openrouter':'none';if(cf().elements.kind.value==='openrouter')cf().elements.baseUrl.value='https://openrouter.ai/api/v1';connectionButtons();};
 cf().onsubmit=e=>{e.preventDefault();if(!connectionSnapshot)return;const id=$('#connection-profile').value||crypto.randomUUID();connectionAction('/admin/api/model-connection/profiles/'+id,{revision:connectionSnapshot.revision,name:$('#connection-profile-name').value.trim(),config:connectionInput()},id);};
 $('#connection-profile').onchange=()=>{if(!connectionBusy)chooseProfile();};
-cf().oninput=()=>{connectionButtons();$('#connection-capabilities').replaceChildren(el('p','편집한 설정은 저장·적용 전입니다. 호환 확인은 정확히 같은 설정에만 유효합니다.','meta'));};
+cf().oninput=()=>{connectionButtons();$('#connection-draft').textContent=profileEdited()?'미저장 편집 · 적용하려면 같은 설정의 호환 확인과 저장이 필요합니다.':'저장된 설정과 같습니다.';$('#connection-capabilities').replaceChildren(el('p','편집한 설정은 저장·적용 전입니다. 호환 확인은 정확히 같은 설정에만 유효합니다.','meta'));};
 $('#connection-apply').onclick=()=>{const profile=selectedProfile();if(profile&&!profileEdited())connectionAction('/admin/api/model-connection/profiles/'+profile.id+'/apply',{revision:connectionSnapshot.revision},profile.id);};
 $('#connection-check').onclick=()=>{if($('#probe-consent').checked)connectionAction('/admin/api/model-connection/check',{config:connectionInput()});};
 $('#connection-rollback').onclick=()=>{if(connectionSnapshot)connectionAction('/admin/api/model-connection/rollback',{revision:connectionSnapshot.revision,config:{}});};

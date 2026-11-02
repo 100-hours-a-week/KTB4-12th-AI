@@ -17,9 +17,10 @@ class Element {
  setAttribute(){} reset(){this.resetCount++;}
 }
 const nodes=new Map(),get=k=>{if(!nodes.has(k))nodes.set(k,new Element());return nodes.get(k);};
+get('#filters').elements={status:{value:''}};
 get('#connection-form').elements={kind:{value:'openrouter'},auth:{value:'existing-openrouter'},secretRef:new Element()};
 const sandbox={document:{querySelector:get,querySelectorAll:()=>[],createElement:()=>new Element()},
- crypto:{randomUUID:()=> 'new-profile'},URLSearchParams,Date,JSON,Object,setTimeout,FormData:class{get(){return '';}},Option:class{},
+ crypto:{randomUUID:()=> 'new-profile'},URLSearchParams,Date,JSON,Object,setTimeout,FormData:class{constructor(form){this.form=form;}get(key){return this.form.elements?.[key]?.value||'';}},Option:class{},
  ChatHTTP:{json:async()=>({items:[],nextCursor:null})}};
 vm.createContext(sandbox);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),sandbox);
 const run=x=>vm.runInContext(x,sandbox);
@@ -90,9 +91,42 @@ const reply={revision:1,config:{kind:'openrouter',model:'synthetic'},writable:tr
  assert.equal(run('connectionVersion'),probeGeneration);
  assert.equal(run('connectionBusy'),true);
  assert.equal(get('#connection-check').disabled,true);
- finishProbe({state:'verified'});await probe;
+ finishProbe({state:'verified',checkedAt:1700000000});await probe;
  assert.equal(run('connectionBusy'),false);
- assert.equal(get('#connection-status').textContent,'도구·SSE 호환 확인. 이 설정은 아직 적용하지 않았습니다.');
+ assert.equal(get('#connection-status').textContent,'호환 확인 완료 · 아직 저장하거나 적용하지 않았습니다.');
+ // Draft cancel is local-only and keeps the applied model unchanged.
+ run('showConnection(named)');get('#connection-profile').value='modal';run('chooseProfile()');
+ const writesBeforeCancel=profileWrites.length;
+ get('#connection-form').elements.model.value='discard-me';get('#connection-form').oninput();get('#connection-cancel').onclick();
+ assert.equal(get('#connection-form').elements.model.value,'served-model');assert.equal(profileWrites.length,writesBeforeCancel);
+ assert.equal(run('connectionSnapshot.config.kind'),'openrouter');
+ // A lost mutation receipt blocks writes until explicit GET reconciliation.
+ let mutationCount=0;sandbox.lostApi=async()=>{mutationCount++;throw new Error('synthetic response lost');};run('api=lostApi');
+ await run("connectionAction('/admin/api/model-connection/profiles/modal/apply',{revision:2})");
+ assert.equal(run('connectionUncertain'),true);assert.equal(get('#connection-apply').disabled,true);
+ assert(get('#connection-status').textContent.includes('적용 여부 미확정'));assert(get('#connection-active').textContent.startsWith('마지막 확인:'));
+ await run("connectionAction('/admin/api/model-connection',{})");assert.equal(mutationCount,1);
+ sandbox.readback=async()=>sandbox.named;run('api=readback');await run('loadConnection()');assert.equal(run('connectionUncertain'),false);
+ // Explicit validation rejection does not claim a switch or lock out recovery.
+ sandbox.badApi=async()=>{const error=new Error('safe invalid settings');error.status=400;throw error;};run('api=badApi');
+ await run("connectionAction('/admin/api/model-connection',{})");assert.equal(run('connectionUncertain'),false);assert.equal(run('connectionSnapshot.config.kind'),'openrouter');
+ // Valid JSON with the wrong mutation contract is also an uncertain receipt.
+ sandbox.malformedApi=async()=>({ok:true});run('api=malformedApi');
+ await run("connectionAction('/admin/api/model-connection',{})");assert.equal(run('connectionUncertain'),true);
+ await run('loadConnection()');assert.equal(run('connectionUncertain'),true);
+ run('api=readback');await run('loadConnection()');assert.equal(run('connectionUncertain'),false);
+ run('api=malformedApi');await run("connectionAction('/admin/api/model-connection/check',{})");
+ assert(!get('#connection-status').textContent.includes('호환 확인 완료'));
+ // Manual native recovery uses server default config, not an editable profile id.
+ const recoverWrites=[];sandbox.recoveryApi=async(path,options)=>{recoverWrites.push({path,...options});return sandbox.named;};run('api=recoveryApi');
+ get('#connection-openrouter').onclick();await new Promise(setImmediate);
+ assert.equal(JSON.parse(recoverWrites[0].body).config.kind,'openrouter');assert.equal(recoverWrites[0].path,'/admin/api/model-connection');
+ // Past probe timestamp is explicit; no automatic liveness claim.
+ sandbox.proof={state:'verified',checkedAt:1700000000};assert(run('compatibilityLabel(proof)').includes('현재 연결 상태를 보장하지 않습니다'));
+ // Fast filters use the actual status query, starting a fresh page.
+ const queries=[];sandbox.filterApi=async path=>{queries.push(path);return {items:[],nextCursor:null};};run('api=filterApi');
+ get('#requests-failed').onclick();await new Promise(setImmediate);assert(queries.at(-1).includes('status=FAILED'));
+ get('#requests-cancelled').onclick();await new Promise(setImmediate);assert(queries.at(-1).includes('status=CANCELLED'));
  // Keep the real api wrapper: an old 401 cannot invalidate a new login.
  const source=fs.readFileSync(process.argv[1],'utf8');
  run(source.slice(source.indexOf('async function api('),source.indexOf('function resetSession(')));
@@ -117,7 +151,7 @@ const reply={revision:1,config:{kind:'openrouter',model:'synthetic'},writable:tr
  // A current-session 401 still signs out and clears state.
  const active=run("api('/old-session')");oldUnauthorized();finishOld({});await active;
  assert.equal(run('connectionSnapshot'),null);
- assert.equal(get('#login').hidden,false);assert.equal(get('#workspace').hidden,true);
+ assert.equal(get('#login').hidden,false);assert.equal(get('#workspace').hidden,true);assert(get('#status').textContent.includes('관리자'));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''
     result=subprocess.run([node,'-e',script,str(Path(__file__).resolve().parents[1]/'app/static/admin.js')],capture_output=True,text=True,timeout=10)
