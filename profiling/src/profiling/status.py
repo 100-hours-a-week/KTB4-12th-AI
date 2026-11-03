@@ -42,6 +42,8 @@ class LlmStatus:
             self._last_error_at: str | None = None
             self._consecutive = 0
             self._counts: Counter = Counter()
+            self._engines: Counter = Counter()          # v3 엔진을 켰을 때 — v3 · v2-fallback 몇 번
+            self._last_fallback_at: str | None = None
 
     def configure(self, *, requested: str, enabled: bool, model: str | None = None, reason: str | None = None) -> None:
         """기동 때 한 번 — 무엇을 켜려 했고 실제로 켜졌는지."""
@@ -63,6 +65,13 @@ class LlmStatus:
                 self._consecutive = 0
                 self._last_ok_at = _now()
 
+    def record_engine(self, engine: str) -> None:
+        """v3 엔진을 켰을 때 한 건이 어느 길로 갔나 — v3 · v2-fallback(Modal v3 컨테이너를 못 써 v2 추출기로 넘김)."""
+        with self._lock:
+            self._engines[engine] += 1
+            if engine == "v2-fallback":
+                self._last_fallback_at = _now()
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             c = self._configured
@@ -78,7 +87,8 @@ class LlmStatus:
                 state = "ok"
             return {"state": state, **c, "last": self._last, "last_ok_at": self._last_ok_at, "last_error": self._last_error,
                     "last_error_at": self._last_error_at, "consecutive_failures": self._consecutive,
-                    "calls": {"ok": self._counts["ok"], "fail": self._counts["fail"]}}
+                    "calls": {"ok": self._counts["ok"], "fail": self._counts["fail"]},
+                    **({"engine": {**self._engines, "last_fallback_at": self._last_fallback_at}} if self._engines else {})}
 
 
 LLM = LlmStatus()
