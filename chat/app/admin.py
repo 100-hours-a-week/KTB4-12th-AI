@@ -12,6 +12,11 @@ from app.release import revision as app_revision
 from app.security import SIGNER,SECURE,admin_session,admin_access_version,admin_origin,throttle,valid_token
 router=APIRouter(include_in_schema=False)
 Admin=Annotated[None,Depends(admin_session)]
+ADMIN_ASSETS=frozenset({'admin.css','http.js','admin.js','guide.css','reports-admin.js'})
+@router.api_route('/admin/static/{filename}',methods=['GET','HEAD'])
+def asset(filename:str):
+ if filename not in ADMIN_ASSETS:raise APIError(404,'파일을 찾을 수 없습니다.')
+ return FileResponse(Path(__file__).parent/'static'/filename,media_type='text/css' if filename.endswith('.css') else 'text/javascript')
 class Login(BaseModel):password:str=Field(max_length=200)
 class Review(BaseModel):reviewed:bool
 @router.get('/admin/qa')
