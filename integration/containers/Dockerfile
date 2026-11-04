@@ -120,6 +120,7 @@ RUN touch /workspace/integration/containers/smoke_only
 USER 10001:10001
 
 FROM profiler AS migrate
+COPY integration/migration_upgrade.py integration/catalog_transition.py /workspace/integration/
 COPY chat/sql /workspace/chat/sql
 COPY product-search/sql /workspace/product-search/sql
 ENTRYPOINT ["python","-m","integration.migrate_single_server"]

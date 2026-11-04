@@ -109,6 +109,12 @@ class Settings(BaseSettings):
                     "s0: 순위 앞 30개 그대로(10-12 까지의 규칙, 되돌릴 수 있게 남김). pipeline.PoolStrategy 참고",
     )
 
+    INCREMENTAL_TAGS: bool = Field(
+        default=False,
+        description="증분 태그 추출(10-29) — true: 이전 프로필의 태그 중 근거(취향 문장 · 리뷰)가 그대로인 것은 다시 쓰고 바뀐 글만 LLM 에 보낸다 · "
+                    "false: 늘 전체 추출(지금까지). 이전 프로필 없음 · 판이 다름 · 이전 실패면 켜도 전체 추출. incremental.py 참고",
+    )
+
     # ---- 태그 추출(LLM) · 임베딩 (10-12, 기본 꺼짐 — 켜면 D 의 임베딩 단계가 돈다)
     TAGGER: Literal["none", "ollama", "openrouter"] = Field(
         default="none",
@@ -141,6 +147,28 @@ class Settings(BaseSettings):
                     "ollama: gemma4:12b. 다른 모델은 이름을 직접(ollama 예 qwen3.5:9b, openrouter 는 모델 목록의 id)",
     )
     TAGGER_TIMEOUT_S: float = Field(default=120.0, gt=0, description="LLM 호출 한 번의 시간 상한(초)")
+
+    # ---- v3 태그 엔진(11-03, 11-04 기본 v3 — 배포 대비). TAGGER 추출기는 v3 를 못 쓸 때의 폴백. V3_URL · 키 3개가 다 있어야 실제로 켜지고,
+    #      하나라도 비면 기동 로그에 남기고 v2 추출기로만 돈다(로컬 · 시험은 그대로 v2). v2 로 되돌리려면 TAG_ENGINE=v2
+    TAG_ENGINE: Literal["v2", "v3"] = Field(
+        default="v3",
+        description="태그 엔진 — v2: TAGGER 추출기 하나(v3 를 끌 때) · v3: Modal v3 컨테이너(V3_URL — 12B 나눠 뽑기 · 질문 판정 · Laya 거부)에 사람마다 한 번 + 규칙 A·B·C. "
+                    "v3 를 못 쓰면(연결 · 5xx · V3_TIMEOUT_S 넘음 · 상대 실패) 그 사람은 TAGGER 추출기로(V3_FALLBACK). TAG_SPEC=tag3disliked 만",
+    )
+    V3_URL: str = Field(default="", description="Modal v3 컨테이너 주소(/v3/tags 앞까지). 비면 v3 를 켜지 않음")
+    V3_API_KEY: SecretStr | None = Field(default=None, description="Modal v3 컨테이너 키(Bearer, 컨테이너 안에서 확인). 로그 · 응답에 찍히지 않게 SecretStr")
+    V3_PROXY_KEY: SecretStr | None = Field(
+        default=None,
+        description="Modal 프록시 인증 토큰 ID(Modal-Key 헤더) — Modal 이 컨테이너를 켜기 전에 문 앞에서 확인(키 없는 요청이 GPU 를 깨우지 않게). "
+                    "V3_PROXY_SECRET 과 둘 다 있어야 v3 를 켬",
+    )
+    V3_PROXY_SECRET: SecretStr | None = Field(default=None, description="Modal 프록시 인증 토큰 비밀(Modal-Secret 헤더)")
+    V3_TIMEOUT_S: float = Field(
+        default=240.0, gt=0,
+        description="사람 한 명의 v3 기한(초) — 꺼진 Modal 컨테이너가 켜지는 시간(약 2분)을 넉넉히 기다린다. 넘으면 그 사람은 v2 폴백. "
+                    "폴백까지 더해도 RUNNING_STALE_S 보다 짧아야 중복 분석이 안 생긴다",
+    )
+    V3_FALLBACK: bool = Field(default=True, description="v3 를 못 쓸 때 TAGGER 추출기로 넘길지 — false 면 태그 없이 진행")
     SEARCH_BASE_URL: str = ""
     SEARCH_TOKEN: SecretStr | None = None
 

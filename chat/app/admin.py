@@ -9,16 +9,21 @@ from pydantic import BaseModel,Field,UUID4
 from app.errors import APIError
 from app.review_models import ReportReview,TurnReview
 from app.release import revision as app_revision
-from app.security import SIGNER,SECURE,admin_session,admin_access_version,same_origin,throttle,valid_token
+from app.security import SIGNER,SECURE,admin_session,admin_access_version,admin_origin,throttle,valid_token
 router=APIRouter(include_in_schema=False)
 Admin=Annotated[None,Depends(admin_session)]
+ADMIN_ASSETS=frozenset({'admin.css','http.js','admin.js','guide.css','reports-admin.js'})
+@router.api_route('/admin/static/{filename}',methods=['GET','HEAD'])
+def asset(filename:str):
+ if filename not in ADMIN_ASSETS:raise APIError(404,'파일을 찾을 수 없습니다.')
+ return FileResponse(Path(__file__).parent/'static'/filename,media_type='text/css' if filename.endswith('.css') else 'text/javascript')
 class Login(BaseModel):password:str=Field(max_length=200)
 class Review(BaseModel):reviewed:bool
 @router.get('/admin/qa')
 def page():return FileResponse(Path(__file__).parent/'static'/'admin.html')
 @router.post('/admin/login')
 async def login(body:Login,request:Request,response:Response):
- same_origin(request);throttle(('admin',request.client.host),8,300)
+ admin_origin(request);throttle(('admin',request.client.host),8,300)
  if not valid_token(body.password,os.environ['QA_ADMIN_PASSWORD']):raise APIError(401,'비밀번호를 확인해 주세요.')
  response.set_cookie('chat_admin',SIGNER.dumps({'version':admin_access_version()},salt='admin'),max_age=28800,secure=SECURE,httponly=True,samesite='lax')
  return {'ok':True}
@@ -67,57 +72,32 @@ async def report_review(fid:UUID4,body:Review,request:Request,auth:Admin):
 async def report_summary(request:Request,auth:Admin,limit:Annotated[int,Query(ge=1,le=100)]=50,cursor:Annotated[str|None,Query(max_length=400)]=None,status:Literal['all','unresolved','pending','reviewed','triaged','resolved']='unresolved'):
  return await request.app.state.store.call('report_summary',limit=limit,cursor=cursor,status=status)
 
-class ConnectionChange(BaseModel):
+class ConnectionRevision(BaseModel):
  model_config={'extra':'forbid'}
  revision:int=Field(ge=0)
- config:dict
-class ConnectionProbe(BaseModel):
- model_config={'extra':'forbid'}
- config:dict
 @router.get('/admin/api/model-connection')
 async def connection_status(request:Request,auth:Admin):
  connections=getattr(request.app.state.runtime,'connections',None)
  if connections is None:raise APIError(409,'현재 실행기는 모델 연결 설정을 지원하지 않습니다.')
  return connections.public()
-@router.put('/admin/api/model-connection')
-async def connection_save(body:ConnectionChange,request:Request,auth:Admin):
- return await request.app.state.runtime.connections.publish(body.config,body.revision)
-@router.post('/admin/api/model-connection/check')
-async def connection_probe(body:ConnectionProbe,request:Request,auth:Admin):
- throttle(('connection-probe',request.client.host),3,300)
- return await request.app.state.runtime.connections.check(body.config)
-@router.post('/admin/api/model-connection/rollback')
-async def connection_rollback(body:ConnectionChange,request:Request,auth:Admin):
- return await request.app.state.runtime.connections.rollback(body.revision)
-class ProfileChange(ConnectionChange):
- name:str=Field(min_length=1,max_length=60)
-class ProfileApply(BaseModel):
- model_config={'extra':'forbid'}
- revision:int=Field(ge=0)
-@router.post('/admin/api/model-connection/modal-key')
-async def modal_key(request:Request,auth:Admin):
- # Do not put a secret in a validation model or an error detail.
+@router.post('/admin/api/model-connection/activate')
+async def connection_activate(request:Request,auth:Admin):
+ # Keep raw keys out of Pydantic validation errors and response models.
  raw=bytearray()
  async for chunk in request.stream():
   raw.extend(chunk)
-  if len(raw)>4096:raise APIError(413,'키 입력 요청이 너무 큽니다.')
+  if len(raw)>8192:raise APIError(413,'연결 입력이 너무 큽니다.')
  try:
   import json
   body=json.loads(raw)
   if not isinstance(body,dict) or set(body)!={'config','key','revision'}:raise ValueError()
- except (ValueError,TypeError):raise APIError(400,'키 입력 요청 형식을 확인하세요.') from None
+ except (ValueError,TypeError):raise APIError(400,'연결 입력 형식을 확인하세요.') from None
  finally:raw.clear()
- try:return await request.app.state.runtime.connections.submit_key(body['config'],body['key'],body['revision'])
+ try:return await request.app.state.runtime.connections.activate(body['config'],body['key'],body['revision'])
  finally:body.clear()
 @router.post('/admin/api/model-connection/modal-off')
-async def modal_off(body:ProfileApply,request:Request,auth:Admin):
+async def connection_off(body:ConnectionRevision,request:Request,auth:Admin):
  return await request.app.state.runtime.connections.disable(body.revision)
-@router.put('/admin/api/model-connection/profiles/{profile_id}')
-async def profile_save(profile_id:str,body:ProfileChange,request:Request,auth:Admin):
- return await request.app.state.runtime.connections.save_profile(profile_id,body.name,body.config,body.revision)
-@router.post('/admin/api/model-connection/profiles/{profile_id}/apply')
-async def profile_apply(profile_id:str,body:ProfileApply,request:Request,auth:Admin):
- return await request.app.state.runtime.connections.apply_profile(profile_id,body.revision)
 @router.get('/admin/api/conversations/{cid}/turns/{tid}/trace')
 async def request_trace(cid:UUID4,tid:UUID4,request:Request,auth:Admin,details:bool=False):
  from app.request_audit import trace

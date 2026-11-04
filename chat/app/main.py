@@ -217,7 +217,7 @@ def live():return {'alive':True,'revision':app_revision(),'mode':getattr(app.sta
 async def ready():
  if not app.state.runtime.healthy:raise APIError(503,'실행 서버가 준비되지 않았습니다.')
  connections=getattr(app.state.runtime,'connections',None)
- compatible=connections is not None and connections.read()['config']['kind']=='openai-compatible'
+ compatible=connections is not None and connections.public()['endpointActive']
  if compatible:
   connection=await connections.admit();await connection.close()
  elif hasattr(app.state.runtime,'provider_key') and not (await asyncio.to_thread(app.state.runtime.provider_key.status))['configured']:raise APIError(503,'LLM 키가 설정되지 않았거나 읽을 수 없습니다.')

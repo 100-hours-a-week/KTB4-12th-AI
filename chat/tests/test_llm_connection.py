@@ -1,166 +1,70 @@
-import asyncio, copy, json, os
-import httpx, pytest
+"""Memory-only routing and real httpx redirect behavior with synthetic transports."""
+import asyncio,json,socket
+import httpx,pytest
 from app.errors import APIError
-from app.llm_connection import Connections, validate, destination, ACTIVE_CONNECTION
-from app.low_latency import ProviderAdapter
-
-BASE='http://127.0.0.1:18999/v1'
-def config():return {'kind':'openai-compatible','baseUrl':BASE,'model':'synthetic-vllm','auth':'session-key','secretRef':None,'connectTimeout':2,'readTimeout':5}
-def packet(name='connection_probe',arguments='{"probe":"ok"}'):
- return 'data: '+json.dumps({'choices':[{'delta':{'tool_calls':[{'index':0,'function':{'name':name,'arguments':arguments}}]},'finish_reason':'tool_calls'}]})+'\n\ndata: [DONE]\n\n'
+from app.llm_connection import Connections,validate,destination,ACTIVE_CONNECTION,PinnedTransport
+BASE='https://model.example/v1'
+KEY='synthetic-distinct-endpoint-key'
+def config():return {'kind':'openai-compatible','baseUrl':BASE,'model':'synthetic-vllm','connectTimeout':10,'readTimeout':75}
 @pytest.fixture
-def settings(tmp_path,monkeypatch):
- monkeypatch.setenv('AI_ENVIRONMENT','local');monkeypatch.setenv('CHAT_LLM_ALLOWED_BASE_URLS',BASE)
- monkeypatch.setenv('OPENROUTER_API_KEY','synthetic-openrouter')
- value=Connections(tmp_path/'model.json')
- from app.llm_connection import fingerprint
- value._credential=(fingerprint(config()),'wk-synthetic.ws-synthetic')
- return value
-async def checked(settings,c=None):
- c=c or config()
- return await settings.check(c,httpx.MockTransport(lambda req:httpx.Response(200,headers={'content-type':'text/event-stream'},text=packet())))
+def settings():return Connections()
 
-@pytest.mark.parametrize('url',['http://169.254.169.254/v1','https://user:pass@example.com/v1','https://x.example/v1?key=a','file:///v1','http://localhost:18999/v1',BASE+'/chat/completions',BASE+'#secret'])
-def test_url_rejects_unapproved_or_credential_destinations(settings,url):
- c=config();c['baseUrl']=url
- with pytest.raises(APIError):validate(c)
-def test_remote_dns_private_ip_is_rejected(monkeypatch):
- monkeypatch.setenv('CHAT_LLM_ALLOWED_BASE_URLS','https://model.example/v1')
- monkeypatch.setattr('socket.getaddrinfo',lambda *a,**k:[(2,1,6,'',('127.0.0.1',443))])
- with pytest.raises(APIError):destination('https://model.example/v1')
-def test_production_never_accepts_local_mock(settings,monkeypatch):
- monkeypatch.setenv('AI_ENVIRONMENT','production')
- with pytest.raises(APIError):validate(config())
-async def test_activation_requires_exact_memory_key_not_a_paid_check(settings):
- old=settings.public();settings._credential=None
- with pytest.raises(APIError):await settings.publish(config(),0)
- assert settings.read()['revision']==0
- await settings.submit_key(config(),'wk-synthetic.ws-synthetic',0)
- assert settings.public()['config']['kind']=='openrouter'
- saved=await settings.publish(config(),1);assert saved['revision']==2
- c=config();c['model']='different'
- with pytest.raises(APIError):await settings.publish(c,2)
- assert settings.read()['config']['model']=='synthetic-vllm'
- with pytest.raises(APIError):await settings.publish(config(),0)
-async def test_snapshot_and_disable_preserve_inflight_provider(settings):
- await settings.publish(config(),0);admitted=await settings.admit()
- try:
-  off=await settings.disable(1)
-  assert admitted.model=='synthetic-vllm' and admitted.revision==1
-  assert off['config']['kind']=='openrouter' and not off['modal']['keyPresent']
- finally:await admitted.close()
-@pytest.mark.parametrize('mode',['http','json','tool','incomplete'])
-async def test_invalid_capabilities_never_replace_settings(settings,mode):
- def reply(req):
-  if mode=='http':return httpx.Response(401,text='do not log this body')
-  if mode=='json':return httpx.Response(200,json={'choices':[]})
-  return httpx.Response(200,headers={'content-type':'text/event-stream'},text=packet('wrong') if mode=='tool' else packet().replace('data: [DONE]',''))
- with pytest.raises(APIError):await settings.check(config(),httpx.MockTransport(reply))
- assert settings.read()['revision']==0 and not settings.path.exists()
-async def test_secret_reference_never_returns_or_reuses_openrouter_key(settings,monkeypatch):
- monkeypatch.setenv('CHAT_LLM_SECRET_REFS','SYNTHETIC_MODAL_KEY');monkeypatch.setenv('SYNTHETIC_MODAL_KEY','synthetic-modal-only');monkeypatch.setenv('OPENROUTER_API_KEY_CHAT','synthetic-openrouter-never-forward')
- c=config();c.update(auth='secret-ref',secretRef='SYNTHETIC_MODAL_KEY');seen=[]
- def reply(req):seen.append(req.headers.get('Authorization'));return httpx.Response(200,headers={'content-type':'text/event-stream'},text=packet())
- await settings.check(c,httpx.MockTransport(reply))
- with pytest.raises(APIError):await settings.publish(c,0)
- assert seen==['Bearer synthetic-modal-only']
- assert 'synthetic-modal-only' not in json.dumps(settings.public())
- assert 'synthetic-openrouter' not in json.dumps(settings.public())
-async def test_redirect_not_followed(settings):
+@pytest.mark.parametrize('url',['https://fresh.example/v1','https://fresh.example/proxy/v1','https://fresh.example'])
+def test_no_cloud_allowlist_and_normal_url_paths(settings,monkeypatch,url):
+ monkeypatch.delenv('CHAT_LLM_ALLOWED_BASE_URLS',raising=False)
+ assert validate({**config(),'baseUrl':url})['baseUrl'].endswith('/v1')
+
+@pytest.mark.parametrize('url',['http://remote.example/v1','https://user:password@model.example/v1','https://169.254.169.254/v1','https://127.0.0.1/v1','https://model.example/v1?key=hidden','file:///v1','https://model.example\\evil/v1'])
+def test_invalid_destinations_are_rejected(url):
+ with pytest.raises(APIError):validate({**config(),'baseUrl':url})
+
+@pytest.mark.parametrize('value',[None,[],{},True])
+def test_malformed_config_has_safe_error(value):
+ with pytest.raises(APIError):validate(value)
+
+@pytest.mark.parametrize('status,method,other_host',[(307,'POST',False),(308,'POST',False),(303,'GET',False),(307,'POST',True)])
+async def test_redirects_preserve_protocol_without_cross_origin_credentials(settings,status,method,other_host):
  seen=[]
- def reply(req):seen.append(str(req.url));return httpx.Response(307,headers={'Location':'http://169.254.169.254/v1/chat/completions'})
- with pytest.raises(APIError):await settings.check(config(),httpx.MockTransport(reply))
- assert seen==[BASE+'/chat/completions']
-async def test_cancellation_closes_probe_and_does_not_save(settings):
- entered=asyncio.Event()
- async def reply(req):entered.set();await asyncio.Event().wait()
- task=asyncio.create_task(settings.check(config(),httpx.MockTransport(reply)));await entered.wait();task.cancel()
- with pytest.raises(asyncio.CancelledError):await task
- assert not settings.path.exists()
-async def test_https_default_port_and_pinned_transport_host_sni(settings,monkeypatch):
- from app.llm_connection import PinnedTransport
- monkeypatch.setenv('CHAT_LLM_ALLOWED_BASE_URLS','https://model.example/v1')
- monkeypatch.setattr('socket.getaddrinfo',lambda *a,**k:[(2,1,6,'',('8.8.8.8',443))])
- c=config();c.update(baseUrl='https://model.example/v1',auth='none');seen=[]
- def reply(req):seen.append(req.url);return httpx.Response(200,headers={'content-type':'text/event-stream'},text=packet())
- await settings.check(c,httpx.MockTransport(reply));assert seen[0].host=='model.example'
- class Inner(httpx.AsyncBaseTransport):
-  async def handle_async_request(self,req):
-   assert req.url.host=='8.8.8.8' and req.headers['host']=='model.example' and req.extensions['sni_hostname']=='model.example'
-   return httpx.Response(200)
- transport=PinnedTransport('model.example','8.8.8.8');await transport.inner.aclose();transport.inner=Inner()
- async with httpx.AsyncClient(transport=transport) as client:assert (await client.get('https://model.example/v1/chat/completions')).status_code==200
-@pytest.mark.parametrize('named_profile',[False,True])
-async def test_real_chat_runtime_uses_compatible_snapshot_for_entire_turn(settings,monkeypatch,named_profile):
- import uuid
- import test_low_latency as fixture
- from app.low_latency import LowLatencyRuntime
- from app.model_config import ModelCatalog
- from app.request_audit import trace
- await checked(settings)
- if named_profile:
-  await settings.save_profile('modal','Modal',config(),0);await settings.apply_profile('modal',1)
- else:await settings.publish(config(),0)
- admitted_revision=settings.read()['revision']
- entered=asyncio.Event();release=asyncio.Event();sent=[]
- packets=[fixture.tool('gift_context',fixture.context(budget=20000)),fixture.tool('show_gifts',fixture.show())]
- async def reply(req):
-  sent.append(json.loads(req.content))
-  if len(sent)==1:entered.set();await release.wait()
-  assert req.url==BASE+'/chat/completions' and req.headers['authorization']=='Bearer wk-synthetic.ws-synthetic'
-  assert 'provider' not in sent[-1] and 'reasoning' not in sent[-1]
-  return httpx.Response(200,headers={'content-type':'text/event-stream'},text='data: '+json.dumps(packets.pop(0))+'\n\ndata: [DONE]\n\n')
- original=settings.client
- async def client(c,transport=None,**kwargs):return await original(c,transport or httpx.MockTransport(reply),**kwargs)
- monkeypatch.setattr(settings,'client',client)
- store=fixture.Store();search=fixture.Search();runtime=object.__new__(LowLatencyRuntime);runtime.init_state(store,search,'owner');runtime.connections=settings;runtime.model='unused/openrouter'
- async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: (_ for _ in ()).throw(AssertionError('OpenRouter must not be called')))) as original_http:
-  runtime.http=original_http;runtime.catalog=ModelCatalog(original_http)
-  cid,tid=str(uuid.uuid4()),str(uuid.uuid4());await store.call('conversation',cid=cid,sender=7,recipient=42,protocol_fixture=False,demo_profile=None)
-  accepted=await runtime.accept(cid,tid,'합성 책받침 하나 추천');assert accepted['status']=='PROCESSING'
-  await entered.wait();old=settings.read()
-  if named_profile:await settings.apply_profile('openrouter',old['revision'])
-  else:await settings.publish(copy.deepcopy(settings.default),old['revision'])
-  release.set()
-  await asyncio.gather(*list(runtime.jobs.values()))
-  assert store.states[tid]['status']=='COMPLETED' and len(sent)==2 and all(b['model']=='synthetic-vllm' for b in sent)
-  assert store.events[tid][-1]['event']=='turn.finished'
-  receipt=store.traces[tid];assert receipt['connection']['revision']==admitted_revision
-  summary=trace(cid,store.public(store.states[tid]),receipt);assert summary['totals']['inputTokens']==20 and summary['totals']['outputTokens']==20
-  # Same terminal turn retry is a read, never a new request/config admission.
-  again=await runtime.accept(cid,tid,'합성 책받침 하나 추천');assert again['status']=='COMPLETED' and len(sent)==2
-@pytest.mark.parametrize('mode',['missing-finish','malformed-details'])
-async def test_probe_matches_runtime_tool_stream_contract(settings,mode):
  def reply(req):
-  raw=packet()
-  if mode=='missing-finish':raw=raw.replace('"tool_calls"}', 'null}')
-  else:raw='data: []\n\ndata: [DONE]\n\n'
-  return httpx.Response(200,headers={'content-type':'text/event-stream'},text=raw)
- with pytest.raises(APIError):await settings.check(config(),httpx.MockTransport(reply))
- assert settings.read()['revision']==0
+  seen.append((req.method,str(req.url),req.headers.get('Authorization')))
+  if len(seen)==1:return httpx.Response(status,headers={'Location':('https://result.example' if other_host else BASE)+'/result?request=synthetic'})
+  return httpx.Response(200,text='data: [DONE]\n\n')
+ c=validate(config())
+ async with await settings.client(c,httpx.MockTransport(reply),token=KEY) as client:
+  r=await client.post('chat/completions',json={'synthetic':True})
+ assert r.status_code==200 and len(seen)==2
+ assert seen[1][0]==method and seen[0][2]=='Bearer '+KEY
+ assert seen[1][2]==(None if other_host else 'Bearer '+KEY)
 
-async def test_read_default_and_admit_never_probe_provider(settings):
- assert settings.public()['revision']==0
- admitted=await settings.admit()
- assert admitted.kind=='openrouter' and admitted.client is None
- assert settings.checks=={} and not settings.path.exists()
+@pytest.mark.parametrize('location',['http://remote.example/result','https://169.254.169.254/result'])
+async def test_redirect_cannot_downgrade_or_reach_metadata(settings,location):
+ calls=[]
+ def reply(req):calls.append(req);return httpx.Response(307,headers={'Location':location})
+ async with await settings.client(validate(config()),httpx.MockTransport(reply),token=KEY) as client:
+  with pytest.raises(APIError):await client.post('chat/completions',json={})
+ assert len(calls)==1
 
-@pytest.mark.parametrize('failure',['http','timeout','missing-done','server-error'])
-async def test_compatible_probe_failures_do_not_replace_config(settings,failure):
- await checked(settings);await settings.publish(config(),0)
- before=settings.read()
- def reply(req):
-  if failure=='http':return httpx.Response(503)
-  if failure=='timeout':raise httpx.ReadTimeout('synthetic timeout',request=req)
-  raw=packet().replace('data: [DONE]\n\n','') if failure=='missing-done' else 'data: {"error":{"message":"synthetic"}}\n\ndata: [DONE]\n\n'
-  return httpx.Response(200,headers={'content-type':'text/event-stream'},text=raw)
- with pytest.raises(APIError):await settings.check(config(),httpx.MockTransport(reply))
- assert settings.read()==before
+async def test_redirect_loop_is_bounded_without_auto_provider_retry(settings):
+ calls=[]
+ def reply(req):calls.append(req);return httpx.Response(307,headers={'Location':'/again'})
+ async with await settings.client(validate(config()),httpx.MockTransport(reply),token=KEY) as client:
+  with pytest.raises(httpx.TooManyRedirects):await client.post('chat/completions',json={})
+ assert len(calls)==6
 
-async def test_probe_accepts_bounded_narration_before_valid_tool(settings):
- prefix='data: '+json.dumps({'choices':[{'delta':{'content':'확인하겠습니다.'}}]})+'\n\n'
- result=await settings.check(config(),httpx.MockTransport(lambda req:httpx.Response(200,headers={'content-type':'text/event-stream'},text=prefix+packet())))
- assert result['tools'] and result['sse']
+async def test_dns_private_result_never_reaches_transport(monkeypatch):
+ monkeypatch.setattr(socket,'getaddrinfo',lambda *a,**kw:[(2,1,6,'',('10.0.0.1',443))])
+ transport=PinnedTransport()
+ try:
+  with pytest.raises(APIError):await transport.handle_async_request(httpx.Request('POST',BASE+'/chat/completions'))
+ finally:await transport.aclose()
+
+async def test_key_free_start_and_missing_default_key(settings,monkeypatch):
+ assert settings.public()['config']['kind']=='openrouter'
+ assert (await settings.admit()).client is None
+ monkeypatch.setattr(settings,'openrouter_ready',lambda:False)
+ with pytest.raises(APIError):await settings.activate(config(),KEY,settings.revision)
+ assert not settings.public()['endpointActive']
+ with pytest.raises(APIError):await settings.admit()
 
 @pytest.mark.parametrize('tool_response',[True,False])
 async def test_compatible_runtime_resolves_text_or_tool_before_publishing(settings,tool_response):
@@ -191,34 +95,21 @@ async def test_compatible_runtime_resolves_text_or_tool_before_publishing(settin
   assert text==('' if tool_response else '조회하겠습니다. 안녕하세요.')
   assert bool([e for e in events if e['kind']=='tool'])==tool_response
 
-@pytest.mark.parametrize('field,value',[
- ('kind',[]),('baseUrl',{'invalid':'url'}),('baseUrl',True),('auth',[]),('secretRef',['BAD_REF']),
-])
-def test_malformed_connection_field_types_return_safe_validation_errors(settings,field,value):
- c=config();c[field]=value
- if field=='secretRef':c['auth']='secret-ref'
- with pytest.raises(APIError) as error:validate(c)
- assert error.value.status==400
- assert settings.read()['revision']==0
+async def test_redirect_userinfo_is_rejected(settings):
+ async with await settings.client(validate(config()),httpx.MockTransport(lambda r:httpx.Response(307,headers={'Location':'https://user:secret@model.example/result'})),token=KEY) as client:
+  with pytest.raises(APIError):await client.post('chat/completions',json={})
 
-@pytest.mark.parametrize('document',[
- [],None,{'revision':1,'config':{},'history':[]},
- {'revision':1,'config':'not a config','history':[]},
- {'revision':1,'config':config(),'history':[None]},
- {'revision':1,'config':config(),'history':[{}]},
- {'revision':1,'config':config(),'history':[],'verification':[]},
- {'revision':1,'config':config(),'history':[{'config':config(),'verification':['invalid']}]},
-])
-def test_malformed_settings_file_fails_safely_without_replacing_it(settings,document):
- raw=json.dumps(document);settings.path.write_text(raw)
- with pytest.raises(APIError) as error:settings.read()
- assert error.value.status==503
- assert settings.path.read_text()==raw
-
-
-async def test_rollback_cannot_reactivate_modal_after_off(settings):
- await checked(settings);await settings.publish(config(),0)
- await settings.disable(1)
- raw=settings.path.read_text()
- assert (await settings.rollback(2))['config']['kind']=='openrouter'
- assert not settings.public()['modal']['keyPresent']
+async def test_pinned_transport_preserves_host_tls_and_honors_dns_timeout(monkeypatch):
+ monkeypatch.setattr(socket,'getaddrinfo',lambda *a,**kw:[(2,1,6,'',('8.8.8.8',443))])
+ transport=PinnedTransport();await transport.inner.aclose();seen=[]
+ class Inner:
+  async def handle_async_request(self,r):seen.append(r);return httpx.Response(200)
+  async def aclose(self):pass
+ transport.inner=Inner()
+ await transport.handle_async_request(httpx.Request('POST',BASE+'/chat/completions',headers={'Authorization':'Bearer '+KEY}))
+ assert seen[0].url.host=='8.8.8.8' and seen[0].headers['host']=='model.example' and seen[0].extensions['sni_hostname']=='model.example'
+ async def timeout(*a,**kw):
+  a[0].close();raise TimeoutError()
+ monkeypatch.setattr(asyncio,'wait_for',timeout)
+ with pytest.raises(httpx.ConnectTimeout):await transport.handle_async_request(httpx.Request('POST',BASE+'/chat/completions'))
+ await transport.aclose()

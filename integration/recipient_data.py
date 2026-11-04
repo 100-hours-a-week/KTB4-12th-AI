@@ -38,13 +38,26 @@ CREATE TABLE IF NOT EXISTS ai_profile.recipient_input_versions (
 """
 
 
+class RecipientInputMigrationRequired(ValueError):
+    """Raw legacy input cannot silently become a guarded profile."""
+
+
 def migrate(db) -> None:
     """Add input storage; preserve only known identity hashes of legacy requests.
 
     Legacy cleaned analysis text is deliberately not turned into an original
     request. A recipient has no raw snapshot until that exact input arrives.
     """
+    exists = db.execute("SELECT to_regclass('ai_profile.recipient_inputs')").fetchone()[0]
+    if exists:
+        columns = {r[0] for r in db.execute("SELECT column_name FROM information_schema.columns WHERE table_schema='ai_profile' AND table_name='recipient_inputs'").fetchall()}
+        if not {'guarded_input', 'guard_version'} <= columns:
+            if db.execute("SELECT EXISTS(SELECT 1 FROM ai_profile.recipient_inputs)").fetchone()[0]:
+                raise RecipientInputMigrationRequired("Legacy recipient inputs need an explicit guarded-data migration; existing rows preserved")
+        elif db.execute("SELECT EXISTS(SELECT 1 FROM ai_profile.recipient_inputs WHERE guarded_input IS NULL OR guard_version IS NULL)").fetchone()[0]:
+            raise RecipientInputMigrationRequired("Legacy recipient inputs need an explicit guarded-data migration; existing rows preserved")
     db.execute(RECIPIENT_INPUTS_DDL)
+    db.execute("ALTER TABLE ai_profile.recipient_inputs ALTER COLUMN guarded_input SET NOT NULL, ALTER COLUMN guard_version SET NOT NULL")
     db.execute("""INSERT INTO ai_profile.recipient_input_versions
             (recipient_user_id,source_version,input_hash)
         SELECT recipient_user_id,source_version,input_hash

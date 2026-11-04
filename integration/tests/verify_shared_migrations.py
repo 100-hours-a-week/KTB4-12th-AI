@@ -53,11 +53,12 @@ def main():
         with sa.create_engine(url('emmet4930_shared_fresh')).connect() as c:
             revision=c.exec_driver_sql('select version_num from alembic_version').scalar()
             privileges=c.exec_driver_sql("select has_table_privilege('synthetic_shared_app','ai_profile.recipient_profiles','SELECT'),has_table_privilege('synthetic_shared_app','ai_catalog.products','UPDATE')").one()
-            assert revision=='0010' and tuple(privileges)==(True,False)
+            assert revision=='0011' and tuple(privileges)==(True,False)
             results['fresh']={'revision':revision,'customRoleReadProfile':True,'catalogWriteDenied':True}
-        old=OUTPUT/'old-alembic';shutil.copytree(ROOT/'profiling/alembic',old)
-        (old/'versions/0007_app_role.py').write_bytes(subprocess.check_output(['git','-C',str(ROOT),'show','4930af63510d069244516619ac36f72bb53a86f0:profiling/alembic/versions/0007_app_role.py']))
-        target=url('emmet4930_shared_upgrade');migrate(target,'0007',old)
+        # Apply the checked-in 0007 with the original local role. Later steps
+        # prove changing that setting never replays an already stamped revision.
+        os.environ['PROFILING_APP_DB_ROLE']='ai_app'
+        target=url('emmet4930_shared_upgrade');migrate(target,'0007',ROOT/'profiling/alembic')
         engine=sa.create_engine(target)
         with engine.begin() as c:
             c.exec_driver_sql("INSERT INTO ai_catalog.categories(source_category_id,parent_source_category_id,name,level,product_count,backend_category_id,taxonomy_version) VALUES('group',NULL,'합성',1,1,1,'synthetic'),('leaf','group','합성 소분류',2,1,11,'synthetic')")
@@ -80,9 +81,9 @@ def main():
             results['existing0008']={'updated0007Replayed':False,'newRoleCreated':False,'rewindOrRepair':False}
             row=c.exec_driver_sql('SELECT source_version,preferred_tags,disliked_tags FROM ai_profile.recipient_profiles WHERE recipient_user_id=88101').one()
             assert tuple(row)==(7,[],[])
-            assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0010'
+            assert c.exec_driver_sql('SELECT version_num FROM alembic_version').scalar()=='0011'
             assert c.exec_driver_sql("SELECT format_type(atttypid,atttypmod) FROM pg_attribute WHERE attrelid='ai_catalog.products'::regclass AND attname='embedding'").scalar()=='vector(768)'
-            results['upgrade0010']={'from':'0008','to':'0010','profilePreserved':True,'dislikedTagsDefault':[], 'embeddingColumn':'vector(768)','storageSwitched':False}
+            results['upgrade0011']={'from':'0008','to':'0011','profilePreserved':True,'dislikedTagsDefault':[], 'embeddingColumn':'vector(768)','storageSwitched':False}
         with engine.begin() as c:
             c.exec_driver_sql("INSERT INTO ai_catalog.catalog_versions(package_id,taxonomy_version,product_count,category_count,is_active) VALUES('synthetic-native','synthetic',1,2,true)")
         env={**os.environ,'PROFILING_DATABASE_URL':target,'PROFILING_APP_DB_ROLE':'ai_app','PROFILING_TAGGER':'none','PYTHONDONTWRITEBYTECODE':'1'}

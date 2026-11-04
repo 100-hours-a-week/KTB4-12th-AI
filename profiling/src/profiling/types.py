@@ -169,6 +169,8 @@ class ValidationResult(BaseModel):
     disliked_category_names: list[str] = Field(description="Backend 비선호 카테고리 이름 — 메모리에서만(DB 엔 disliked_categories 로, DR-040). "
                                                          "DB 의 disliked_tags(글에서 뽑은 비선호 태그, DR-043)와 다르다")
     log: list[Decision]
+    ref_products: dict[str, int] = Field(default_factory=dict, description="프롬프트 리뷰 순번(r1 …) → 상품 번호 — 메모리에서만. "
+                                                                         "profile_tags 가 저장할 ref 를 상품 번호로 바꿀 때 쓴다(10-28)")
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +358,8 @@ class ProfileTag(BaseModel):
     axis: str = Field(description="태그 규격의 축 — tag3: 카테고리 · IP · 브랜드(tag4 는 + 특징)")
     tag: str
     source: Literal["preference", "review_text"] = Field(description="근거가 취향 문장인지 리뷰인지")
-    ref: str | None = Field(default=None, description="근거 자리 — pref · r1 · r2 … (여러 개면 'pref, r1')")
+    ref: str | None = Field(default=None, description="근거 — 취향 문장이면 pref, 리뷰면 그 리뷰의 상품 번호(여러 개면 'pref, <상품 번호>'). "
+                                                      "10-28 전 행은 프롬프트 순번(r1 · r2 …)일 수 있다")
 
 
 class RecipientProfile(BaseModel):
@@ -429,8 +432,10 @@ def from_outcome(rq: ProfileRequest, outcome: ProfileOutcome, profile_run_id: st
 
 
 def profile_tags(validation: ValidationResult | None, *, dislikes: bool = False) -> list[ProfileTag]:
-    """판정 로그의 keep → ProfileTag(축 · 글자 · 출처 · 근거 자리). 축이 없는 옛 결과는 likes = 카테고리 · key_features = 특징으로 본다.
-    dislikes=True 면 비선호 keep 만(disliked_tags), 아니면 비선호를 뺀 나머지(preferred_tags)."""
+    """판정 로그의 keep → ProfileTag(축 · 글자 · 출처 · 근거). 축이 없는 옛 결과는 likes = 카테고리 · key_features = 특징으로 본다.
+    dislikes=True 면 비선호 keep 만(disliked_tags), 아니면 비선호를 뺀 나머지(preferred_tags).
+    ref 의 리뷰 순번(r1)은 상품 번호로 바꿔 저장한다(10-28) — 순번은 그 프롬프트 안에서만 뜻이 있어 리뷰가 늘면 밀리지만,
+    한 사람 안에서 상품 하나에 리뷰는 하나(prepare 가 겹친 상품을 버림)라 상품 번호는 그 리뷰를 계속 가리킨다. 대응이 없는 순번은 그대로 둔다."""
     if validation is None:
         return []
     out: list[ProfileTag] = []
@@ -438,9 +443,19 @@ def profile_tags(validation: ValidationResult | None, *, dislikes: bool = False)
         if d.decision != "keep" or (d.axis == "dislikes") != dislikes:     # 선호 칸 · 비선호 칸을 나눈다(tag3disliked, DR-043)
             continue
         axis = getattr(d, "axis4", None) or ("특징" if d.axis == "key_features" else "카테고리")
-        ref = d.ref or None
+        ref = ref_to_products(d.ref, validation.ref_products) or None
         out.append(ProfileTag(axis=axis, tag=d.tag, source="preference" if ref and "pref" in ref else "review_text", ref=ref))
     return out
+
+
+def ref_parts(ref: str | None) -> list[str]:
+    """근거 ref 를 조각으로 — 'pref, r1' → ['pref', 'r1']. 나누는 규칙은 tagging.validate 와 같다(공백 · 쉼표 · / · ·)."""
+    return [x for x in re.split(r"[\s,/·]+", ref or "") if x]
+
+
+def ref_to_products(ref: str | None, products: dict[str, int]) -> str:
+    """'pref, r1' → 'pref, <r1 의 상품 번호>'. 대응이 없는 조각은 그대로."""
+    return ", ".join(str(products[x]) if x in products else x for x in ref_parts(ref))
 
 
 def should_replace(current: RecipientProfile | None, incoming: RecipientProfile) -> bool:

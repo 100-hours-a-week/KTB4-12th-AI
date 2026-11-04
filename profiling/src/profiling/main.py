@@ -175,6 +175,8 @@ async def lifespan(app: FastAPI):
             app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, settings.OPENROUTER_API_KEY.get_secret_value() if settings.OPENROUTER_API_KEY else "",
                                                       settings.tagger_model, timeout_s=settings.TAGGER_TIMEOUT_S)
             log.info("태그 추출기 openrouter model=%s url=%s", settings.tagger_model, settings.OPENROUTER_URL)   # 키는 남기지 않음
+    if settings.TAG_ENGINE == "v3":     # v3 엔진 — TAGGER 추출기는 v3 를 못 쓸 때의 폴백이 된다. 만들지 못하면 v2 추출기 그대로
+        app.state.tagger, app.state.tag_spec = _v3_engine(settings, app.state.tagger, app.state.tag_spec)
     if settings.CATALOG_SOURCE == "search_http":
         app.state.embedding = app.state.catalog
         app.state.embedding_status = {"enabled": True, "version": app.state.embedding.version,
@@ -193,8 +195,9 @@ async def lifespan(app: FastAPI):
             log.exception("임베딩을 켜지 못함 — 끈 채로 진행(태그가 있어도 임베딩 단계 없이 D)")
             app.state.embedding_status = {"enabled": False, "reason": type(e).__name__}
     status.LLM.reset()
-    status.LLM.configure(requested=settings.TAGGER, enabled=app.state.tagger is not None,
-                         model=settings.tagger_model, reason=tagger_reason)
+    status.LLM.configure(requested=f"v3+{settings.TAGGER}" if getattr(app.state.tagger, "version", None) == "v3" else settings.TAGGER,
+                         enabled=app.state.tagger is not None, model=getattr(app.state.tagger, "model", settings.tagger_model),
+                         reason=tagger_reason)
     app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
 
     # 끊긴 실행 정리 — 프로세스가 죽으면 그 행은 RUNNING 인 채 남는다. 남겨 두면 중복 판정이 "이미 분석 중"으로
@@ -210,8 +213,8 @@ async def lifespan(app: FastAPI):
     app.state.supervisor.start()
     app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S,
                                        token_provider=getattr(app.state, "be_token_provider", None))
-    log.info("profiling 시작 backend=%s pool_size=%s dislike_mode=%s pool_strategy=%s", settings.BACKEND_BASE_URL, settings.POOL_SIZE,
-             settings.DISLIKE_MODE, settings.POOL_STRATEGY)
+    log.info("profiling 시작 backend=%s pool_size=%s dislike_mode=%s pool_strategy=%s incremental_tags=%s", settings.BACKEND_BASE_URL,
+             settings.POOL_SIZE, settings.DISLIKE_MODE, settings.POOL_STRATEGY, settings.INCREMENTAL_TAGS)
 
     yield
 
@@ -223,6 +226,36 @@ async def lifespan(app: FastAPI):
         if callable(close):
             close()
     app.state.engine.dispose()
+
+
+def _v3_engine(settings: Settings, fallback, spec):
+    """v3 엔진 조립 — Modal v3 컨테이너 클라이언트 + 폴백 추출기. 주소 · 키(프록시 인증 둘 · 요청 키)가 비었거나 규격이 맞지 않으면
+    v3 를 켜지 않고 (폴백 추출기, 규격)을 그대로 돌려준다(서버는 뜬다 — v2 로 돈다)."""
+    from profiling import tagging
+    spec = spec or tagging.load_spec()
+    if not settings.V3_URL:
+        log.error("TAG_ENGINE=v3(기본) 인데 V3_URL 이 비어 있음 — v2 추출기로만 진행(v3 를 안 쓸 거면 TAG_ENGINE=v2)")
+        return fallback, spec
+    if not (settings.V3_PROXY_KEY and settings.V3_PROXY_SECRET and settings.V3_API_KEY):   # Modal 은 프록시 인증 · 요청 키를 켠 채로 올림 — 없으면 모든 요청이 401
+        log.error("TAG_ENGINE=v3(기본) 인데 V3_PROXY_KEY · V3_PROXY_SECRET · V3_API_KEY 중 빈 것이 있음 — v2 추출기로만 진행")
+        return fallback, spec
+    from profiling.v3.client import V3Client
+    from profiling.v3.engine import V3Engine
+    client = V3Client(settings.V3_URL, settings.V3_API_KEY.get_secret_value(),
+                      proxy_key=settings.V3_PROXY_KEY.get_secret_value(), proxy_secret=settings.V3_PROXY_SECRET.get_secret_value())
+    try:
+        engine = V3Engine(client, spec, timeout_s=settings.V3_TIMEOUT_S,
+                          fallback=fallback if settings.V3_FALLBACK else None)
+    except ValueError as e:     # 규격이 비선호 규격이 아님 — 설정 오류
+        client.close()
+        log.error("v3 엔진을 만들지 못함: %s — v2 추출기로만 진행", e)
+        return fallback, spec
+    if settings.V3_FALLBACK and settings.V3_TIMEOUT_S + settings.TAGGER_TIMEOUT_S >= settings.RUNNING_STALE_S:
+        log.warning("V3_TIMEOUT_S(%s) + TAGGER_TIMEOUT_S(%s) 가 RUNNING_STALE_S(%s) 이상 — v3 기한 뒤 v2 로 넘긴 건이 분석 중에 '멈춤'으로 보여 "
+                    "다시 집힐 수 있음(같은 사람 두 번 분석)", settings.V3_TIMEOUT_S, settings.TAGGER_TIMEOUT_S, settings.RUNNING_STALE_S)
+    log.info("태그 엔진 v3 version=%s url=%s timeout_s=%s fallback=%s", engine.version, settings.V3_URL, settings.V3_TIMEOUT_S,
+             engine.fallback.model if engine.fallback else "none")   # 키는 남기지 않음
+    return engine, spec
 
 
 def db_pool_size(settings: Settings) -> int:
