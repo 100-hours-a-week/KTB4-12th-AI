@@ -1,0 +1,33 @@
+# v3 태그 그래프 보강 별칭 — 영어 표기 → 이미 있는 노드의 이름(축:이름). 실험(10-26 태그 그래프)에서 그대로 옮김, 규칙 C 의 노드 찾기에만 쓴다
+# 별칭	대상
+coffee	카테고리:커피
+espresso	카테고리:커피
+perfume	카테고리:향수
+fragrance	카테고리:향
+headphone	카테고리:헤드폰
+headphones	카테고리:헤드폰
+earphone	카테고리:이어폰
+earphones	카테고리:이어폰
+earbuds	카테고리:이어폰
+speaker	카테고리:스피커
+candle	카테고리:캔들
+candles	카테고리:캔들
+diffuser	카테고리:디퓨저
+cake	카테고리:케이크
+chocolate	카테고리:초콜릿
+wine	카테고리:와인
+tea	카테고리:차
+flower	카테고리:꽃
+flowers	카테고리:꽃
+camping	카테고리:캠핑용품
+board game	카테고리:보드게임
+cosmetics	카테고리:화장품
+makeup	카테고리:메이크업
+skincare	카테고리:스킨케어
+tumbler	카테고리:텀블러
+mug	카테고리:텀블러
+bag	카테고리:가방
+shoes	카테고리:신발
+sneakers	카테고리:신발
+wallet	카테고리:지갑
+keyboard	카테고리:키보드
