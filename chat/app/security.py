@@ -20,8 +20,25 @@ def same_origin(request):
  origin=request.headers.get('origin')
  if origin and urlsplit(origin).netloc!=request.headers.get('host'):raise APIError(403,'허용되지 않은 요청 출처입니다.')
  if request.headers.get('sec-fetch-site')=='cross-site':raise APIError(403,'허용되지 않은 요청 출처입니다.')
+# Public browser origin is independent of the internal CloudFront/ALB Host.
+# Production already supplies AI_ENVIRONMENT; no new deployment setting is needed.
+ADMIN_PUBLIC_ORIGIN='https://www.seonjalal.com'
+def admin_origin(request:Request):
+ environment=os.getenv('AI_ENVIRONMENT','local')
+ if environment not in {'local','develop','staging','production'}:
+  raise APIError(503,'관리자 접속 환경 설정을 확인해 주세요.')
+ if environment!='production':
+  same_origin(request);return
+ if not SECURE:raise APIError(503,'운영 관리자 세션은 Secure 쿠키가 필요합니다.')
+ origins=request.headers.getlist('origin')
+ if len(origins)>1 or origins and origins[0]!=ADMIN_PUBLIC_ORIGIN:
+  raise APIError(403,'허용되지 않은 요청 출처입니다.')
+ if not origins and request.method in {'POST','PUT','PATCH','DELETE'}:
+  raise APIError(403,'관리자 변경 요청의 Origin이 필요합니다.')
+ if request.headers.get('sec-fetch-site')=='cross-site':
+  raise APIError(403,'허용되지 않은 요청 출처입니다.')
 def admin_session(request:Request):
- same_origin(request)
+ admin_origin(request)
  try:
   value=SIGNER.loads(request.cookies.get('chat_admin',''),salt='admin',max_age=28800)
   if not isinstance(value,dict) or not valid_token(value.get('version'),admin_access_version()):raise BadSignature('stale admin access')
