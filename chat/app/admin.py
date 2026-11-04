@@ -9,7 +9,7 @@ from pydantic import BaseModel,Field,UUID4
 from app.errors import APIError
 from app.review_models import ReportReview,TurnReview
 from app.release import revision as app_revision
-from app.security import SIGNER,SECURE,admin_session,admin_access_version,same_origin,throttle,valid_token
+from app.security import SIGNER,SECURE,admin_session,admin_access_version,admin_origin,throttle,valid_token
 router=APIRouter(include_in_schema=False)
 Admin=Annotated[None,Depends(admin_session)]
 class Login(BaseModel):password:str=Field(max_length=200)
@@ -18,7 +18,7 @@ class Review(BaseModel):reviewed:bool
 def page():return FileResponse(Path(__file__).parent/'static'/'admin.html')
 @router.post('/admin/login')
 async def login(body:Login,request:Request,response:Response):
- same_origin(request);throttle(('admin',request.client.host),8,300)
+ admin_origin(request);throttle(('admin',request.client.host),8,300)
  if not valid_token(body.password,os.environ['QA_ADMIN_PASSWORD']):raise APIError(401,'비밀번호를 확인해 주세요.')
  response.set_cookie('chat_admin',SIGNER.dumps({'version':admin_access_version()},salt='admin'),max_age=28800,secure=SECURE,httponly=True,samesite='lax')
  return {'ok':True}

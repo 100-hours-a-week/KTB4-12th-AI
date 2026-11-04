@@ -45,4 +45,4 @@ PYTHONPATH=chat:chat/pc_tests:profiling/src:. chat/.venv/bin/python -B -m pytest
 
 지원 범위는 **Chat 인스턴스 1개, worker 1개**입니다. 메모리 revision은 동시 편집과 재시작 후 오래된 화면의 변경을 거부합니다. 적용 응답 유실 시 자동 재전송하지 않고 현재 연결을 다시 조회합니다. 서비스 요청의 연결 1–30초, 읽기 1–120초와 기존 턴 전체 제한은 유지합니다.
 
-대시보드 경로는 같은 HTTPS origin의 `/admin/qa`입니다. `/admin/*`와 `/static/admin.css`, `/static/http.js`, `/static/admin.js`를 연결하고 신고 관리 사용 시 `/static/guide.css`, `/static/reports-admin.js`도 연결합니다. FE의 `/`와 BE의 `/api/`는 유지하며 `/static/*` 전체를 AI로 보내지 않습니다. 관리자 경로에서 Host, Origin, Cookie, Set-Cookie를 보존해야 합니다. 기존 관리자 비밀번호와 세션 비밀 주입은 유지합니다. 모델 연결 변경 자체의 새 DB migration이나 Modal hosting 코드는 없습니다.
+대시보드 경로는 같은 HTTPS origin의 `/admin/qa`입니다. `/admin/*`와 `/static/admin.css`, `/static/http.js`, `/static/admin.js`를 연결하고 신고 관리 사용 시 `/static/guide.css`, `/static/reports-admin.js`도 연결합니다. FE의 `/`와 BE의 `/api/`는 유지하며 `/static/*` 전체를 AI로 보내지 않습니다. `AI_ENVIRONMENT=production`의 관리자 Origin은 `https://www.seonjalal.com`이며 내부 Host와 분리해 검사합니다. 관리자 경로는 Origin, Cookie, Set-Cookie를 전달하고 응답 캐시를 꺼야 합니다. 기존 관리자 비밀번호와 세션 비밀 주입은 유지합니다. 모델 연결 변경 자체의 새 DB migration이나 Modal hosting 코드는 없습니다.
