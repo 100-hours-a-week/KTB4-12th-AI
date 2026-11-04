@@ -37,7 +37,7 @@ from enum import StrEnum
 from typing import NamedTuple
 from uuid import UUID
 
-from profiling import changes, selection, status, tagging
+from profiling import changes, incremental, selection, status, tagging
 from profiling.ports import (
     CatalogReader,
     EmbeddingIndex,
@@ -64,6 +64,8 @@ from profiling.types import (
     from_outcome,
     score_categories,
 )
+from profiling.v3.client import V3Unavailable
+from profiling.v3.engine import V3Engine
 
 log = logging.getLogger(__name__)
 
@@ -320,13 +322,14 @@ def profile(
     rq: ProfileRequest, *, catalog: CatalogReader, store: ProfileRunStore,
     recipient_store: RecipientProfileStore, pool_size: int = 30, dislike_mode: DislikeMode = DislikeMode.EXCLUDE,
     pool_strategy: PoolStrategy = PoolStrategy.D, embedding: EmbeddingIndex | None = None,
-    tagger: TagExtractor | None = None, tag_spec: tagging.TagSpec | None = None,
+    tagger: TagExtractor | None = None, tag_spec: tagging.TagSpec | None = None, incremental_tags: bool = False,
 ) -> ProfileOutcome:
     """7.6 요청 한 건 → ProfileOutcome (저장까지). 예외를 밖으로 내지 않고 FAILED로 돌려준다.
 
     반환의 status가 RESULT_READY면 호출자(api.run_and_callback)가 7.7 콜백을 보내고, FAILED면 보내지 않는다(문서 1: AI는 침묵).
     catalog·store·recipient_store는 ports 모양이면 무엇이든 된다(파일/DB → 테스트 가짜).
     tag_spec 은 태그 규격(축 · 프롬프트) — 서비스는 기동 때 읽은 것을 넘기고, 없으면 tagging 의 기본 규격.
+    incremental_tags 가 True 면 이전 프로필의 태그를 다시 쓰고 바뀐 글만 LLM 에 보낸다(incremental.py, 설정 INCREMENTAL_TAGS · 기본 꺼짐).
     """
     rid, sv = rq.recipient_user_id, rq.source_version
     h = input_hash(rq)
@@ -364,9 +367,14 @@ def profile(
                      rid, len(rq.reviews), len(scores))
         elif needs_model(rq):
             spec = tag_spec or tagging.SPEC
-            tag_run = _extract_tags(rq, products, tagger, disliked_names, spec)
+            prev = _prev_profile(recipient_store, rid) if incremental_tags else None
+            tag_run = _extract_tags(rq, products, tagger, disliked_names, spec, incremental_tags=incremental_tags, prev=prev,
+                                    catalog_key=catalog_version_id)
             validation, tags, prompt_version, tag_status = tag_run.validation, tag_run.tags, tag_run.prompt_version, tag_run.status
-            status.LLM.record(tag_status)          # /health 의 llm 칸 — 외부 LLM 장애를 프로세스 장애와 구분(10-15)
+            if tag_run.llm_called:
+                status.LLM.record(tag_status)      # /health 의 llm 칸 — 외부 LLM 장애를 프로세스 장애와 구분(10-15). 증분에서 안 불렀으면 세지 않음
+            if tag_run.engine:
+                status.LLM.record_engine(tag_run.engine)   # /health 의 llm.engine 칸 — v3 · v2-fallback 몇 번
             llm_cost = tag_run.usage.cost_usd if tag_run.usage else None
             validator_version = spec.validator_version
 
@@ -432,14 +440,26 @@ def _log_change(recipient_store: RecipientProfileStore, new: RecipientProfile) -
              changes.log_fields(changes.summarize(prev, new)))
 
 
+def _prev_profile(recipient_store: RecipientProfileStore, recipient_user_id: int) -> RecipientProfile | None:
+    """증분 추출용 이전 프로필. 못 읽으면 None — 전체 추출로 간다(분석은 막지 않는다)."""
+    try:
+        return recipient_store.get(recipient_user_id)
+    except Exception as e:  # noqa: BLE001 — 조회 실패는 전체 추출로 대신한다
+        log.warning("tag_incr recipient=%s 이전 프로필 조회 실패 — 전체 추출: %s", recipient_user_id, type(e).__name__)
+        return None
+
+
 class TagRun(NamedTuple):
-    """태그 추출 한 번의 결과 — 검증 결과 · D 태그 · prompt_version · 상태(로그 · 집계용: ok · empty · bad_json · fail:<kind>) · 사용량."""
+    """태그 추출 한 번의 결과 — 검증 결과 · D 태그 · prompt_version · 상태(로그 · 집계용: ok · empty · bad_json · fail:<kind>) · 사용량 ·
+    LLM 을 불렀나(증분 추출에서 바뀐 글이 없으면 False — /health 의 llm 칸에 세지 않는다)."""
 
     validation: ValidationResult
     tags: list[selection.Tag]
     prompt_version: str | None
     status: str
     usage: TokenUsage | None = None
+    llm_called: bool = True
+    engine: str | None = None                # v3 엔진을 켰을 때만 — "v3" · "v2-fallback"(v3 를 못 써서 v2 추출기로 넘김)
 
 
 def _usage_fields(u: TokenUsage | None) -> str:
@@ -450,18 +470,23 @@ def _usage_fields(u: TokenUsage | None) -> str:
 
 
 def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: TagExtractor,
-                  disliked_names: list[str], spec: tagging.TagSpec | None = None) -> TagRun:
+                  disliked_names: list[str], spec: tagging.TagSpec | None = None, *, incremental_tags: bool = False,
+                  prev: RecipientProfile | None = None, catalog_key: object = None) -> TagRun:
     """LLM 한 번 → 검증기 → TagRun. **실패해도 요청은 계속** — 태그 없이(빈 결과) 돌려준다.
 
     장애 추적: 한 줄 로그 `tag_extract <상태> recipient= source_version= model= …` 를 항상 남긴다 — 상태 · 원인 분류(timeout · connect ·
     http_404 …) · 토큰 · 시간(적재/입력/출력) · 입력 크기(리뷰 수 · 프롬프트 글자 수) · 남김/버림 수 · 축별 수 · 버림 사유별 수.
-    원문(리뷰 글 · 취향 문장 · 모델 출력 · 태그 글자)은 로그에 남기지 않는다 — 개수 · 시간 · 모델 · 분류만."""
+    원문(리뷰 글 · 취향 문장 · 모델 출력 · 태그 글자)은 로그에 남기지 않는다 — 개수 · 시간 · 모델 · 분류만.
+    incremental_tags 면 incremental.plan 으로 이전 태그를 다시 쓰고 바뀐 글만 보낸다(_extract_incremental). 계획이 안 서면 전체 추출.
+    tagger 가 v3 엔진(V3Engine)이면 v3 로 뽑고(_extract_v3), Modal v3 컨테이너를 못 쓰면 그 사람은 엔진의 fallback(v2 추출기)으로 아래 길을 그대로 탄다."""
     rid, sv = rq.recipient_user_id, rq.source_version
     spec = spec or tagging.SPEC
     empty = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_category_names=disliked_names, log=[])
-    prep = tagging.prepare(rq, {p.productId: p for p in products})       # 가드레일: 개인정보 · 욕설 가림, 의미 없는 글 버림, 인젝션 의심 표시
+    by_id = {p.productId: p for p in products}
+    prep = tagging.prepare(rq, by_id)       # 가드레일: 개인정보 · 욕설 가림, 의미 없는 글 버림, 인젝션 의심 표시
     prompt, ratings = prep.prompt, prep.ratings
     pv = f"{spec.version}@{tagger.model}"
+    tagger_model = tagger.model
     g = prep.guard
     head = (f"recipient={rid} source_version={sv} model={tagger.model} prompt={spec.version} "
             f"reviews={len(rq.reviews)} pref={'y' if prep.has_pref else 'n'} prompt_chars={len(prompt)} "
@@ -469,23 +494,39 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
     if not tagging.worth_llm(prep):                  # 근거가 될 것(취향 문장 · 4~5점 리뷰)이 없다 — 부르지 않는다(비용 0, 결과는 어차피 빈 태그)
         log.info("tag_extract skip_no_signal %s — 정리 뒤 취향 문장 없음 · 4~5점 리뷰 없음, LLM 안 부름", head)
         return TagRun(empty, [], pv, "skip_no_signal")
+    engine = None
+    if isinstance(tagger, V3Engine):
+        run = _extract_v3(rq, by_id, products, tagger, disliked_names, spec, head, catalog_key)
+        if run is not None:
+            return run
+        if tagger.fallback is None:
+            return TagRun(empty, [], None, "fail:v3_unavailable", engine="v2-fallback")
+        engine, tagger = "v2-fallback", tagger.fallback
+        pv = f"{spec.version}@{tagger.model}+v2-fallback"
+        head = head.replace(f"model={tagger_model} ", f"model={tagger.model} ", 1)
+    if incremental_tags:
+        plan = incremental.plan(prev, rq, by_id, prompt_version=pv, validator_version=spec.validator_version)
+        run = None if isinstance(plan, str) else _extract_incremental(rq, by_id, tagger, disliked_names, spec, plan, pv)
+        if run is not None:
+            return run._replace(engine=engine)
+        log.info("tag_incr fallback=%s recipient=%s source_version=%s — 전체 추출", plan if isinstance(plan, str) else "no_tags_left", rid, sv)
     t0 = time.perf_counter()
     try:
         reply = tagger.extract(spec.system, prompt, spec.schema)
     except TagExtractError as e:                     # 분류된 실패 — 시간 초과 · 연결 실패 · 모델 없음 · 잘림
         log.warning("tag_extract fail:%s %s wall_ms=%.0f %s err=%s — 태그 없이 진행", e.kind, head, (time.perf_counter() - t0) * 1000,
                     _usage_fields(e.usage), _brief(e))
-        return TagRun(empty, [], None, f"fail:{e.kind}", e.usage)
+        return TagRun(empty, [], None, f"fail:{e.kind}", e.usage, engine=engine)
     except Exception as e:  # noqa: BLE001 — 기존 태그 없는 fallback을 유지하며 입력 보호를 위해 traceback을 남기지 않는다.
         log.warning("tag_extract fail:unknown %s wall_ms=%.0f err=%s — 태그 없이 진행", head, (time.perf_counter() - t0) * 1000,
                     type(e).__name__)
-        return TagRun(empty, [], None, "fail:unknown")
+        return TagRun(empty, [], None, "fail:unknown", engine=engine)
     wall_ms = (time.perf_counter() - t0) * 1000
     raw, usage = (reply.text, reply.usage) if isinstance(reply, TagReply) else (str(reply), None)
     parsed, parse_err = tagging.parse_report(raw)
     keep, drop = tagging.validate(parsed, ratings, prep.has_pref, spec)
     keep, drop = tagging.drop_category_restatements(keep, drop, disliked_names)     # BE 비선호 대분류를 다시 말한 비선호는 버림(10-16)
-    validation = tagging.to_validation(keep, drop, disliked_names)
+    validation = tagging.to_validation(keep, drop, disliked_names, prep.products)
     axes = Counter(t["axis"] for t in keep)
     drops = Counter(tagging.drop_reason_key(t.get("drop")) for t in drop)
     status = parse_err if parse_err in ("bad_json", "no_tags_list") else "empty" if not keep else "ok"
@@ -495,7 +536,85 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
     log.log(level, "tag_extract %s %s wall_ms=%.0f %s out_chars=%d parsed=%d kept=%d dropped=%d axes=%s drops=%s%s", status, head, wall_ms,
             _usage_fields(usage), len(raw), len(parsed), len(keep), len(drop), _counts(axes), _counts(drops),
             f" parse={parse_err}" if parse_err else "")
-    return TagRun(validation, tagging.tags_of(validation), pv, status, usage)
+    return TagRun(validation, tagging.tags_of(validation), pv, status, usage, engine=engine)
+
+
+def _extract_v3(rq: ProfileRequest, by_id: dict[int, ProductRecord], products: list[ProductRecord], engine: V3Engine,
+                disliked_names: list[str], spec: tagging.TagSpec, head: str, catalog_key: object) -> TagRun | None:
+    """v3 엔진 한 번 → 검증기(v2 와 같은 tagging.validate) → TagRun. Modal v3 컨테이너를 못 쓰면 None(부르는 쪽이 v2 로 넘김).
+    로그는 v2 와 같은 한 줄 꼴 `tag_extract <상태> … engine=v3` — 원문(글 · 출력 · 태그 글자)은 남기지 않는다."""
+    t0 = time.perf_counter()
+    try:
+        run = engine.run(rq, by_id, products, catalog_key=catalog_key)
+    except V3Unavailable as e:
+        log.warning("tag_extract v3_unavailable:%s %s wall_ms=%.0f fallback=%s — %s", e.kind, head, (time.perf_counter() - t0) * 1000,
+                    engine.fallback.model if engine.fallback else "none",
+                    "v2 추출기로 넘김" if engine.fallback else "v2 추출기 없음, 태그 없이 진행")
+        return None
+    except Exception as e:  # noqa: BLE001 — 엔진 안의 예상 밖 오류도 그 사람만 v2 로(입력 보호를 위해 종류만 남김)
+        log.warning("tag_extract v3_error:%s %s wall_ms=%.0f — v2 로 넘김", type(e).__name__, head, (time.perf_counter() - t0) * 1000)
+        return None
+    prep = tagging.prepare(rq, by_id)
+    keep, drop = tagging.validate(run.keep, prep.ratings, prep.has_pref, spec)
+    keep, drop = tagging.drop_category_restatements(keep, drop, disliked_names)
+    validation = tagging.to_validation(keep, drop, disliked_names, prep.products)
+    status = "empty" if not keep else "ok"
+    log.info("tag_extract %s %s engine=v3 version=%s wall_ms=%.0f calls=%d %s kept=%d dropped=%d axes=%s", status, head, engine.version,
+             (time.perf_counter() - t0) * 1000, run.calls, _usage_fields(run.usage), len(keep), len(drop),
+             _counts(Counter(t["axis"] for t in keep)))
+    return TagRun(validation, tagging.tags_of(validation), f"{spec.version}+{engine.model}", status, run.usage, engine="v3")
+
+
+def _extract_incremental(rq: ProfileRequest, by_id: dict[int, ProductRecord], tagger: TagExtractor, disliked_names: list[str],
+                         spec: tagging.TagSpec, plan: incremental.Plan, pv: str) -> TagRun | None:
+    """증분 추출 — 바뀐 글만 LLM 한 번(+ 다시 쓰는 태그 요약) → 검증기 → 이전 태그와 합침 → 비선호 대분류 다시 말함 거르기.
+    바뀐 글이 없으면 LLM 을 부르지 않는다. 그런데 남는 태그가 0개면 None(호출자가 전체 추출). 실패 처리 · 로그 꼴은 전체 추출과 같다
+    (`tag_extract <상태> … mode=incr`, 원문 없음). 판정 로그의 ref 는 새 태그는 r1(이번 프롬프트), 다시 쓰는 태그는 상품 번호."""
+    rid, sv = rq.recipient_user_id, rq.source_version
+    empty = ValidationResult(likes=[], key_features=[], dislikes=[], preferred_tags=[], disliked_category_names=disliked_names, log=[])
+    head = (f"recipient={rid} source_version={sv} model={tagger.model} prompt={spec.version} mode=incr kept_prev={len(plan.kept)} "
+            f"dropped_prev={plan.dropped_prev} send_reviews={len(plan.send_reviews)} send_pref={'y' if plan.send_pref else 'n'}")
+    new_keep: list[dict] = []
+    drop: list[dict] = []
+    products: dict[str, int] = {}
+    usage: TokenUsage | None = None
+    tail = "llm=no"
+    if plan.needs_llm:
+        prep = tagging.prepare(rq, by_id, only=plan.send_reviews, with_pref=plan.send_pref, note=tagging.kept_note(plan.kept))
+        g = prep.guard
+        head += f" prompt_chars={len(prep.prompt)} guard={g['version']}:{_counts(Counter(g['counts']))}"
+        t0 = time.perf_counter()
+        try:
+            reply = tagger.extract(spec.system, prep.prompt, spec.schema)
+        except TagExtractError as e:
+            log.warning("tag_extract fail:%s %s wall_ms=%.0f %s err=%s — 태그 없이 진행", e.kind, head, (time.perf_counter() - t0) * 1000,
+                        _usage_fields(e.usage), _brief(e))
+            return TagRun(empty, [], None, f"fail:{e.kind}", e.usage)
+        except Exception as e:  # noqa: BLE001 — 전체 추출과 같은 태그 없는 fallback
+            log.warning("tag_extract fail:unknown %s wall_ms=%.0f err=%s — 태그 없이 진행", head, (time.perf_counter() - t0) * 1000,
+                        type(e).__name__)
+            return TagRun(empty, [], None, "fail:unknown")
+        wall_ms = (time.perf_counter() - t0) * 1000
+        raw, usage = (reply.text, reply.usage) if isinstance(reply, TagReply) else (str(reply), None)
+        parsed, parse_err = tagging.parse_report(raw)
+        if parse_err in ("bad_json", "no_tags_list"):      # 전체 추출과 같게 — 깨진 출력이면 태그 없음(다시 쓰는 태그도 붙이지 않는다)
+            log.warning("tag_extract %s %s wall_ms=%.0f %s out_chars=%d", parse_err, head, wall_ms, _usage_fields(usage), len(raw))
+            return TagRun(empty, [], pv, parse_err, usage)
+        new_keep, drop = tagging.validate(parsed, prep.ratings, prep.has_pref, spec)
+        products = prep.products
+        tail = f"wall_ms={wall_ms:.0f} {_usage_fields(usage)} out_chars={len(raw)} parsed={len(parsed)}" + (f" parse={parse_err}" if parse_err else "")
+        if "injection_suspect" in g["counts"] and new_keep:
+            log.warning("tag_extract injection_suspect recipient=%s source_version=%s — 입력에 지시문 꼴, 새 태그 %d개는 검증기 통과분만",
+                        rid, sv, len(new_keep))
+    keep, drop = tagging.drop_category_restatements(incremental.merge(plan.kept, new_keep), drop, disliked_names)
+    if not keep and not plan.needs_llm:
+        return None
+    validation = tagging.to_validation(keep, drop, disliked_names, products)
+    status = "ok" if keep else "empty"
+    log.log(logging.INFO if status == "ok" else logging.WARNING, "tag_extract %s %s %s new=%d kept=%d dropped=%d axes=%s drops=%s", status, head,
+            tail, len(new_keep), len(keep), len(drop), _counts(Counter(t["axis"] for t in keep)),
+            _counts(Counter(tagging.drop_reason_key(t.get("drop")) for t in drop)))
+    return TagRun(validation, tagging.tags_of(validation), pv, status, usage, plan.needs_llm)
 
 
 def _counts(c: Counter) -> str:

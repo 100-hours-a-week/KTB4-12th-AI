@@ -28,7 +28,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -139,17 +139,22 @@ PROMPT_SHA256, PROMPT_VERSION = SPEC.sha256, SPEC.version
 
 
 class Prepared(NamedTuple):
-    """LLM 에 보낼 준비 — 프롬프트 · ref → 별점 · 정리 뒤 취향 문장이 남았나 · 가드레일 보고(표시 · 개수, 원문 없음)."""
+    """LLM 에 보낼 준비 — 프롬프트 · ref → 별점 · 정리 뒤 취향 문장이 남았나 · 가드레일 보고(표시 · 개수, 원문 없음) · ref → 상품 번호."""
 
     prompt: str
     ratings: dict[str, int]
     has_pref: bool
     guard: dict[str, Any]
+    products: dict[str, int]           # r1 → 그 리뷰의 상품 번호. 저장 때 ref 를 상품 번호로 바꾼다(profile_tags, 10-28)
 
 
-def prepare(rq: ProfileRequest, by_id: dict[int, ProductRecord]) -> Prepared:
+def prepare(rq: ProfileRequest, by_id: dict[int, ProductRecord], *, only: Collection[int] | None = None, with_pref: bool = True,
+            note: str | None = None) -> Prepared:
     """사람 하나의 입력 — 취향 문장 · 리뷰 글을 **가드레일(guard.clean)로 정리한 뒤** 프롬프트를 만든다(10-13).
-    리뷰는 받은 순서(최신순) 그대로 r1, r2 … 의미 없는 글은 '(없음)'으로(별점 · 상품 정보는 그대로), 개인정보 · 욕설은 가린 채로."""
+    리뷰는 받은 순서(최신순) 그대로 r1, r2 … 의미 없는 글은 '(없음)'으로(별점 · 상품 정보는 그대로), 개인정보 · 욕설은 가린 채로.
+    모델에는 상품 번호를 보이지 않는다(짧은 r1 이 덜 틀린다) — r1 → 상품 번호 대응은 products 로 따로 넘긴다.
+    증분 추출(incremental, 10-29)은 바뀐 것만 보낸다: only = 보낼 리뷰의 상품 번호(겹친 상품 · 카탈로그 밖은 전체와 같은 규칙으로 먼저 거름) ·
+    with_pref=False 면 취향 문장을 '(없음)'으로 · note = 취향 문장 다음 줄에 넣을 기존 태그 요약(kept_note)."""
     flags: Counter = Counter()
     counts: Counter = Counter()
 
@@ -160,21 +165,31 @@ def prepare(rq: ProfileRequest, by_id: dict[int, ProductRecord]) -> Prepared:
             flags[f"{where}:{f}"] += 1
         return r.text
 
-    pref = take(rq.gift_preference, "pref")
-    lines, ratings, seen = [], {}, set()
+    pref = take(rq.gift_preference, "pref") if with_pref else None
+    lines, ratings, products, seen = [], {}, {}, set()
     for rv in rq.reviews:
         if rv.product_id in seen or rv.product_id not in by_id:
             continue
         seen.add(rv.product_id)
+        if only is not None and rv.product_id not in only:
+            continue
         p = by_id[rv.product_id]
         ref = f"r{len(ratings) + 1}"
         ratings[ref] = rv.rating
+        products[ref] = rv.product_id
         text = take(rv.review_text, "review")
         lines.append(f"{ref}. 별점 {rv.rating}점 · 상품명: {p.name} · 브랜드: {p.brand} · 분류: {p.parentCategoryName} > {p.categoryName}"
                      f" · 종류: {p.productKind} · 리뷰 글: {text or '(없음)'}")
-    body = f"취향 문장(pref): {pref or '(없음)'}\n리뷰:\n" + ("\n".join(lines) if lines else "(없음)")
+    body = f"취향 문장(pref): {pref or '(없음)'}\n" + (f"{note}\n" if note else "") + "리뷰:\n" + ("\n".join(lines) if lines else "(없음)")
     prompt = body + '\n\nJSON 으로만 답하라: {"tags": [{"axis": ..., "tag": ..., "ref": ..., "evidence": ...}]}'
-    return Prepared(prompt, ratings, pref is not None, {"version": guard.GUARD_VERSION, "flags": dict(flags), "counts": dict(counts)})
+    return Prepared(prompt, ratings, pref is not None, {"version": guard.GUARD_VERSION, "flags": dict(flags), "counts": dict(counts)}, products)
+
+
+def kept_note(kept: Sequence[dict]) -> str:
+    """증분 추출 프롬프트의 기존 태그 요약 한 줄 — 바뀌지 않은 글에서 이미 뽑은 태그(축:태그). 10-28 증분 정확도 시험(incr_acc)과 같은 글."""
+    likes = [f"{t['axis']}:{t['tag']}" for t in kept if t.get("polarity") != "비선호"]
+    dis = [f"{t['axis']}:{t['tag']}" for t in kept if t.get("polarity") == "비선호"]
+    return f"기존 태그(바뀌지 않은 글에서 뽑음) — 선호: {', '.join(likes) or '없음'} / 비선호: {', '.join(dis) or '없음'}"
 
 
 def build_prompt(rq: ProfileRequest, by_id: dict[int, ProductRecord]) -> tuple[str, dict[str, int]]:
@@ -269,8 +284,10 @@ def drop_category_restatements(keep: Sequence[dict], drop: Sequence[dict],
     return kept, dropped
 
 
-def to_validation(keep: Sequence[dict], drop: Sequence[dict], disliked_names: Sequence[str]) -> ValidationResult:
-    """검증 결과 → ValidationResult. 비선호 → dislikes · 특징 → key_features · 나머지 → likes. 판정 로그엔 원문 대신 축 · ref · 사유만."""
+def to_validation(keep: Sequence[dict], drop: Sequence[dict], disliked_names: Sequence[str],
+                  ref_products: dict[str, int] | None = None) -> ValidationResult:
+    """검증 결과 → ValidationResult. 비선호 → dislikes · 특징 → key_features · 나머지 → likes. 판정 로그엔 원문 대신 축 · ref · 사유만.
+    판정 로그의 ref 는 모델이 쓴 그대로(r1) 두고, r1 → 상품 번호 대응(ref_products, Prepared.products)을 함께 실어 저장 때 바꾼다."""
     def vt(t: dict) -> ValidatedTag:
         return ValidatedTag(tag=t["tag"], source=_source(str(t.get("ref", ""))), grade="confirmed")
 
@@ -282,7 +299,7 @@ def to_validation(keep: Sequence[dict], drop: Sequence[dict], disliked_names: Se
                      ref=str(t.get("ref", "")), axis4=t.get("axis"), reason=t.get("drop")) for t in drop]
     return ValidationResult(likes=likes, key_features=feats, dislikes=dislikes,
                             preferred_tags=[t["tag"] for t in keep if _bucket(t) != "dislikes"],
-                            disliked_category_names=list(disliked_names), log=log)
+                            disliked_category_names=list(disliked_names), log=log, ref_products=dict(ref_products or {}))
 
 
 def tags_of(validation: ValidationResult) -> list[Tag]:
