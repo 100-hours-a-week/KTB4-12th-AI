@@ -35,25 +35,14 @@ PYTHONPATH=chat:chat/pc_tests:profiling/src:. chat/.venv/bin/python -B -m pytest
 
 `/admin/qa`는 기존 관리자 로그인을 사용합니다. 목록은 원문을 숨기고 요청 ID·버전·상태·사용량을 표시합니다. 상세는 명시적으로 열며 비밀·비공개 취향·숨은 추론·도구 인자 본문을 제외합니다. 모델 입력 미리보기는 호출당 최대 24,000자, 저장된 SSE 목록은 앞 100개와 잘림 여부를 표시합니다. 상세 접근 창은 24시간이며 **DB 삭제 보존 정책이 아닙니다**. 기존 감사/대화 기록을 자동 삭제하지 않습니다. 과거에 기록하지 않은 모델 입출력은 재구성하지 않습니다. 캐시·추론 토큰은 입력·출력 합계에 다시 더하지 않습니다.
 
-모델 연결은 Chat 전용이며 Profiler를 바꾸지 않습니다. 기본은 기존 역할별 키를 쓰는 OpenRouter입니다. 기본 모델·키 설정이 없으면 차단 상태를 표시합니다. 변경 UI에는 다음 배포 설정이 필요합니다.
+모델 연결은 Chat 전용이며 Profiler를 바꾸지 않습니다. 기본은 기존 역할별 키를 쓰는 OpenRouter입니다. 관리자가 추론 API 주소, 모델 ID, 해당 서버의 Bearer 키를 입력하고 **입력한 연결 활성화**를 누르면 새 요청부터 적용합니다. 인증 없는 서버는 키를 비웁니다. 활성화 자체는 모델 호출이나 호환 시험을 하지 않습니다. OpenAI 호환 도구 호출과 SSE 지원은 연결할 서버에서 준비해야 합니다.
 
-- `CHAT_LLM_CONFIG_FILE`: 기존 비공개 영속 폴더의 쓰기 가능한 설정 JSON 경로. 없으면 읽기 전용입니다. 키 값은 저장하지 않습니다.
-- `CHAT_LLM_ALLOWED_BASE_URLS`: 허용한 OpenAI 호환 `/v1` 주소 목록. 원격은 HTTPS·공인 IP만 허용합니다. 로컬 합성 시험은 `local/develop`의 명시된 loopback 주소만 허용합니다. 연결은 검증한 IP에 고정하며 원래 Host/TLS 이름을 유지하고 리다이렉트·환경 프록시를 사용하지 않습니다.
+설정과 입력 키는 한 프로세스의 메모리에만 두며 파일, DB, 환경변수, 브라우저 저장소에 저장하지 않습니다. 조회 응답에는 설정만 반환하고 입력 키는 포함하지 않습니다. 입력창은 제출 즉시 비웁니다. `CHAT_LLM_CONFIG_FILE`, `CHAT_LLM_ALLOWED_BASE_URLS`, `CHAT_LLM_SECRET_REFS`는 사용하지 않으며 기존 파일도 읽거나 변경하지 않습니다. 새 URL 등록을 위한 배포나 영속 마운트는 필요 없습니다. AWS 키나 계정 관리 키는 입력하지 않습니다.
 
-저장된 연결은 최대 10개입니다. URL·모델·시간 제한을 저장한 뒤 Modal 추론용 Proxy Token(`TokenID.TokenSecret`, `wk-….ws-…`)을 대시보드에 입력하고 **선택한 연결 적용**을 별도로 누릅니다. 키 입력만으로 활성화되지 않으며 입력창은 즉시 비웁니다. 키는 서버 메모리에만 두고 설정 파일·DB·환경변수·브라우저 저장소·조회 응답에는 남기지 않습니다. AWS 키나 Modal 계정 관리 키는 입력하지 않습니다.
+**기본 OpenRouter로 돌아가기**와 서버 재시작은 직접 연결 설정과 키를 비웁니다. 기본 OpenRouter 키가 없으면 활성화와 요청을 차단하고 준비 상태를 표시합니다. 진행 중 요청은 접수 시 연결로 끝나며 실패 시 다른 provider로 자동 재시도하지 않습니다. 전환은 외부 모델 서버나 GPU를 종료하지 않습니다. 채팅 기록은 기존 PostgreSQL에 유지됩니다.
 
-키는 입력한 연결 설정에만 유효합니다. 설정을 바꾸면 그 설정의 키를 다시 입력해야 합니다. 기존 비밀 참조 방식의 Modal 프로필도 메모리 키 방식으로 다시 저장합니다. 선택·저장·키 입력·적용은 모델을 호출하지 않으며, 호환 확인은 활성화의 필수 조건이 아닙니다.
+원격 모델은 공개 HTTPS 주소를 사용합니다. URL에 인증정보를 넣지 않습니다. loopback HTTP는 `local/develop` 합성 시험에서만 허용합니다. 일반 redirect는 최대 5번 따라가며 다른 origin에는 입력 키를 전달하지 않고 사설/메타데이터 주소와 HTTPS downgrade를 차단합니다. Modal의 303 결과 조회는 GET으로 따르며 원래 POST를 다시 실행하지 않습니다. 실제 endpoint의 도구 호출/SSE 호환은 별도 검증이 필요합니다.
 
-**Modal 끄기 · OpenRouter**는 키를 비우고 보존된 OpenRouter 설정으로 돌아갑니다. 서버 재시작도 Modal 꺼짐·키 없음으로 시작합니다. 진행 중 요청은 접수 시 연결로 끝나며, 실패 시 OpenRouter로 자동 재시도하지 않습니다. 이전 설정 복구로 Modal을 다시 켤 수는 없습니다. 이 기능은 API 라우팅이며 진행 중 호출이나 Modal GPU 호스팅 요금을 중지하지 않습니다.
+지원 범위는 **Chat 인스턴스 1개, worker 1개**입니다. 메모리 revision은 동시 편집과 재시작 후 오래된 화면의 변경을 거부합니다. 적용 응답 유실 시 자동 재전송하지 않고 현재 연결을 다시 조회합니다. 서비스 요청의 연결 1–30초, 읽기 1–120초와 기존 턴 전체 제한은 유지합니다.
 
-최초 배포에서는 기존 관리자 인증·OpenRouter 키, 위 설정 경로와 허용 URL만 준비합니다. Modal 키를 Secrets Manager에 추가할 필요는 없습니다. 설정 폴더는 영속 쓰기가 가능해야 하며 `/run/runtime` tmpfs나 읽기 전용 `/shared`·`/media`는 대체 경로가 아닙니다. 등록된 URL 안의 전환은 UI로 처리하고, 새 URL의 허용 정책 변경은 배포 담당자가 합니다. 이 기능 자체의 새 DB migration이나 Modal hosting 코드는 없습니다.
-
-지원 범위는 **Chat 인스턴스 1개·worker 1개**입니다. 파일 잠금·revision은 충돌하는 쓰기를 막지만 여러 프로세스의 메모리 키나 활성 상태를 공유하지 않습니다. 새 Redis·설정 서비스·자동 fallback·유료 health polling은 없습니다.
-
-대시보드 제안 경로는 같은 HTTPS origin의 `/admin/qa`입니다. `/admin/*`와 `/static/admin.css`, `/static/http.js`, `/static/admin.js`를 연결하고 신고 관리 사용 시 `/static/guide.css`, `/static/reports-admin.js`도 연결합니다. FE의 `/`와 BE의 `/api/`는 유지하며 `/static/*` 전체를 AI로 보내지 않습니다. 관리자 경로에서 Host·Origin·Cookie·Set-Cookie를 보존해야 합니다. 일반 FE/BE 도메인에 자동으로 추가되는 경로는 아닙니다.
-
-Modal/vLLM 서버는 모델 ID(served-model-name), 모델에 맞는 chat template, 자동 tool calling과 도구 JSON 인자·SSE 완료 계약을 지원해야 합니다. Proxy Token의 `TokenID.TokenSecret`을 단일 Bearer로 보내며 별도 이중 헤더는 사용하지 않습니다. OpenRouter 키를 다른 호스트로 전달하지 않습니다.
-
-별도 동의 후 **명시적으로 호환 확인**을 눌렀을 때만 최대 64 출력 토큰의 합성 도구/SSE 시험을 실행합니다. 시험 제한은 15초이므로 긴 cold start는 별도로 준비해야 합니다. 서비스 요청은 연결 1–30초·읽기 1–120초와 기존 턴 전체 제한(180초)을 따릅니다. 과거 확인은 현재 가용성·추천 품질·실제 Modal 운영 성공을 보장하지 않습니다.
-
-근거: [Modal OpenAI 호환 vLLM 예제](https://modal.com/docs/examples/llm_inference), [vLLM 자동 도구 호출](https://docs.vllm.ai/en/latest/features/tool_calling/).
+대시보드 경로는 같은 HTTPS origin의 `/admin/qa`입니다. `/admin/*`와 `/static/admin.css`, `/static/http.js`, `/static/admin.js`를 연결하고 신고 관리 사용 시 `/static/guide.css`, `/static/reports-admin.js`도 연결합니다. FE의 `/`와 BE의 `/api/`는 유지하며 `/static/*` 전체를 AI로 보내지 않습니다. 관리자 경로에서 Host, Origin, Cookie, Set-Cookie를 보존해야 합니다. 기존 관리자 비밀번호와 세션 비밀 주입은 유지합니다. 모델 연결 변경 자체의 새 DB migration이나 Modal hosting 코드는 없습니다.
