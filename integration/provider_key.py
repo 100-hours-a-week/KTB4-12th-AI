@@ -47,7 +47,7 @@ def deployment_source(kind, env):
 
 def environment(environ=None):
     value = (os.environ if environ is None else environ).get("AI_ENVIRONMENT", "local")
-    if value not in {"local", "develop", "production"}:
+    if value not in {"local", "develop", "staging", "production"}:
         raise KeyUnavailable("CREDENTIAL_ENVIRONMENT_INVALID")
     return value
 
