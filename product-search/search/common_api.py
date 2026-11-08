@@ -20,6 +20,7 @@ from .visibility import denied_products, visible
 VECTOR_DIMENSIONS = 768
 CATALOG_PAGE_SIZE = 500
 QUERY_BATCH_SIZE = 32
+QUERY_BATCH_TIMEOUT_SECONDS = 20
 QUERY_UTF16_LIMIT = 2000
 
 # These routes enforce readiness after distinguishing current from retained
@@ -312,16 +313,25 @@ async def queries(body: Queries, request: Request):
     async with pinned(request, body.snapshot_id, body.binding_id) as service:
         if service.embedding is None:
             raise HTTPException(503, "ENCODER_UNAVAILABLE")
-        # SharedEmbedding supplies bounded scheduling/single-flight. Do not
-        # lowercase/normalize: Profiler previously encoded the exact tag text.
+        # The encoder is serial: fan-out can fill its 24-slot queue with a
+        # single valid 32-text batch. Admit one text at a time per request,
+        # retaining shared priority/single-flight and leaving room for others.
+        # Do not lowercase/normalize: Profiler encodes the exact tag text.
         try:
-            embeddings = await asyncio.gather(
-                *(service.embedding.get(text, "profile") for text in body.texts)
-            )
+            async with asyncio.timeout(QUERY_BATCH_TIMEOUT_SECONDS):
+                embeddings = [
+                    await service.embedding.get(text, "profile") for text in body.texts
+                ]
         except SearchBusy as exc:
             raise HTTPException(
                 503, "ENCODER_BUSY", headers={"Retry-After": "1"}
             ) from exc
+        except TimeoutError as exc:
+            raise HTTPException(
+                503, "ENCODER_TIMEOUT", headers={"Retry-After": "1"}
+            ) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, "ENCODER_FAILURE") from exc
         matrix = encoder_query_matrix(embeddings, len(body.texts))
         return {"snapshotId": service.snapshot_id, "vectors": matrix.tolist()}
 
