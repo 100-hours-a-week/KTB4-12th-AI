@@ -32,6 +32,8 @@ services:
       SEARCH_RUNTIME_ROOT: /runtime
       BACKEND_SERVICE_TOKEN_FILE: /run/secrets/backend_export_token
       AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
+      AI_DATABASE_HOST: ${AI_DATABASE_HOST:-postgres}
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:-develop}
       CATALOG_SYNC_DATABASE_URL_FILE: /run/secrets/catalog_sync_database_url
     secrets:
     - backend_export_token

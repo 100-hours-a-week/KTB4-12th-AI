@@ -1,9 +1,14 @@
 """Process resource guards, separate from business quotas and stored turn state."""
 import os
+import asyncio
+from contextvars import ContextVar
 from collections import Counter
 from starlette.responses import StreamingResponse
 from app.errors import APIError
 
+
+# Only synchronous storage dispatch reads this context; it never grants admission.
+PREFLIGHT_STORAGE = ContextVar("chat_preflight_storage", default=False)
 
 def positive_setting(name, default):
     try:
@@ -20,6 +25,8 @@ class ResourceLimits:
         # Headroom for metadata/storage admission beside the existing four
         # generating turns. These are protective defaults, not throughput claims.
         self.pending_admissions = positive_setting('CHAT_MAX_PENDING_ADMISSIONS', 8)
+        self.preflight_limit = positive_setting('CHAT_MAX_PREFLIGHT_READS', 8)
+        self.preflight_reads = 0
         # Four views per turn allow a proxy plus tab/reconnect overlap. Total32
         # leaves headroom beyond four generating turns; no storage capacity claim.
         self.stream_total = positive_setting('CHAT_MAX_SSE_CONNECTIONS', 32)
@@ -31,6 +38,26 @@ class ResourceLimits:
     def unavailable(self):
         return APIError(503, '채팅 요청이 많습니다. 같은 ID로 잠시 후 다시 확인해 주세요.',
                         headers={'Retry-After': str(self.retry_after)})
+
+    async def preflight(self, store, method, **args):
+        """Fail before dispatch, retaining capacity until the owned read finishes.
+
+        Separate from pending admission: a terminal replay still works when new
+        generation is full. No request task or executor wait queue is unbounded.
+        """
+        if self.preflight_reads >= self.preflight_limit:
+            raise self.unavailable()
+        self.preflight_reads += 1
+        async def read():
+            token = PREFLIGHT_STORAGE.set(True)
+            try:
+                return await store.call(method, **args)
+            finally:
+                PREFLIGHT_STORAGE.reset(token)
+                self.preflight_reads -= 1
+        task = asyncio.create_task(read())
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        return await asyncio.shield(task)
 
     def check_admission(self, admissions):
         if sum(not entry['accepted'].done() for entry in admissions.values()) >= self.pending_admissions:

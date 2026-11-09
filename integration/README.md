@@ -10,7 +10,7 @@ Search·Profiler·Chat은 같은 PostgreSQL18/pgvector와 Search 상품 카탈�
 
 | 설정 | 용도 |
 |---|---|
-| `AI_DATABASE_NAME` | `ai_db_develop`, `ai_db_staging`, `ai_db_production` 중 명시한 DB. 모든 DSN과 일치해야 함 |
+| `AI_DATABASE_NAME` | `ai_db_develop`, `ai_db_staging`, `ai_db_production` 중 명시한 DB. 배포 환경과 일치해야 하며 모든 DSN도 같은 DB 사용 |
 | `AI_DATABASE_HOST` | 로컬 기본 `postgres`, ECS에서는 실제 RDS 호스트 |
 | `SEARCH_CATALOG_DATABASE_URL` | 같은 DB의 `ai_search_service` DSN |
 | `PROFILING_DATABASE_URL` | 같은 DB의 `ai_profiler_service` DSN |
@@ -22,12 +22,14 @@ Search·Profiler·Chat은 같은 PostgreSQL18/pgvector와 Search 상품 카탈�
 | `PROFILING_MQ_ENABLED` | 요청 소비 켜기. **기본 `false`**(설계 §7: 브로커 · 큐 · 실패 큐 · 권한 준비 전에는 끔) — 전환 순서(CO-07)에 따라 Cloud 가 `true` 로 켬. 끄면 프로파일 요청을 받지 않음(HTTP 길 없음) |
 | `PROFILING_MQ_URL` | RabbitMQ AI 계정 주소(비밀). 프로파일 요청 · 결과는 HTTP 7.6/7.7 대신 이 브로커로 오감. 켰을 때 비어 있으면 기동 거부 |
 | `PROFILING_MQ_*` 숫자 11개 | 슬롯 · prefetch · 재시도 · 대조 복구 등 배포 설정. 기본값 없음 — 하나라도 빠지면 Profiler 기동 거부 |
-| `AI_ENVIRONMENT` | `local`, `develop`, `production`만 허용. 환경 이름이 staging이면 이 설정에는 `develop` 사용 |
+| `AI_ENVIRONMENT` | `local`, `develop`, `staging`, `production` 허용. 모든 AI 서비스·Console·one-off 작업에 실제 환경을 동일하게 지정 |
 | `EMMET_MODEL_DIR`, `EMMET_MEDIA_DIR` | 기존 검증된 모델·상품 이미지 폴더 |
 | `EMMET_POSTGRES_VOLUME` | 로컬 Compose에서 사용할 별도 준비된 PG18 볼륨 |
 | `MIGRATION_DATABASE_URL` | 명시적 one-off 작업에서만 쓰는 `ai_migrator` DSN |
 
 기본 Compose는 준비된 로컬 DB 볼륨을 재사용합니다. 운영 데이터 볼륨으로 시험하지 마세요. DB·역할·확장·마이그레이션·초기 카탈로그 준비는 앱 기동과 분리합니다. 앱이 계정을 만들거나 권한을 확대하지 않습니다. 기존 DB 백업과 복구는 [RECOVERY.md](RECOVERY.md)를 따릅니다.
+
+스테이징은 `AI_ENVIRONMENT=staging`과 `AI_DATABASE_NAME=ai_db_staging`을 사용하며 `develop`이나 `production`으로 대신 지정하지 않습니다. 배포 환경의 DB 이름 불일치는 연결 전에 거부하며 Migration·Catalog Sync에도 같은 검사를 적용합니다. `local`의 기존 명시적 DB 선택은 유지하고, `emmet4930_*` 테스트 DB는 `local` + `INTEGRATION_SYNTHETIC_ONLY=1`에서만 허용합니다. 관리 파일·전용 typed Secret의 환경과 용도가 다른 자격증명은 거부하며 이전 값으로 우회하지 않습니다. 환경변수로 주입하는 값 자체에는 환경 메타데이터가 없으므로 배포에서 환경별 Secret·볼륨을 분리해야 합니다. 이 지원은 코드 호환성 준비이며 실제 스테이징 배포·AWS 연동 검증을 뜻하지 않습니다.
 
 ```sh
 docker compose -p seonjalal-ai -f integration/containers/compose.yaml config --quiet

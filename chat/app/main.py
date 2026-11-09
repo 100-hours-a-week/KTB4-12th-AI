@@ -176,7 +176,10 @@ async def demo_session(request:Request):
  same_origin(request);require_demo_access(request)
  try:sid=SIGNER.loads(request.cookies.get('chat_session',''),salt='demo',max_age=86400*30)
  except (BadSignature,SignatureExpired):raise APIError(401,'체험 세션을 시작해 주세요.')
- sender=await app.state.store.call('session',sid=sid)
+ if request.method=='PUT' and request.url.path.rsplit('/',2)[-2]=='turns':
+  sender=await limits_for(app.state.runtime).preflight(app.state.store,'session',sid=sid)
+ else:
+  sender=await app.state.store.call('session',sid=sid)
  return sender
 Demo=Annotated[int,Depends(demo_session)]
 @app.middleware('http')
@@ -243,8 +246,11 @@ async def conversation(conversationId:UUID4,body:PutConversation,response:Respon
  data,made=await app.state.store.call('conversation',cid=str(conversationId),sender=body.sender_id,recipient=body.recipient_id,**({'protocol_fixture':True} if request.url.path.startswith(TEST_BASE) else {}))
  response.status_code=201 if made else 200
  return {'message':'대화를 조회했습니다.','data':readable_conversation(data)}
-async def selected_runtime(cid,request):
- binding=await app.state.store.call('binding',cid=cid)
+async def selected_runtime(cid,request,*,preflight=False):
+ if preflight:
+  binding=await limits_for(app.state.runtime).preflight(app.state.store,'binding',cid=cid)
+ else:
+  binding=await app.state.store.call('binding',cid=cid)
  fixture=request.url.path.startswith(TEST_BASE)
  if bool(binding.get('protocolFixture'))!=fixture:raise APIError(409,'이 대화의 실행 경로를 사용해 주세요.')
  return app.state.fixture if fixture else app.state.runtime
@@ -266,7 +272,7 @@ async def turn_snapshot(conversationId:UUID4,turnId:UUID4,request:Request,auth:S
 @app.put(BASE+'/{conversationId}/turns/{turnId}',response_model=SuccessResponse[Turn],responses={202:{'model':SuccessResponse[Turn]}})
 async def turn(conversationId:UUID4,turnId:UUID4,body:PutTurn,response:Response,request:Request,auth:Service):
  cid,tid=str(conversationId),str(turnId)
- runtime=await selected_runtime(cid,request)
+ runtime=await selected_runtime(cid,request,preflight=True)
  quick_check=request.headers.get('x-console-quick-check')
  if (quick_check is not None or body.quick_check) and (quick_check!='true' or body.quick_check is not True or getattr(app.state,'runtime_mode','live')!='live' or runtime is getattr(app.state,'fixture',None)):
   raise APIError(400,'QUICK_CHECK_LIVE_RUNTIME_REQUIRED')
@@ -393,9 +399,9 @@ async def demo_conversation(cid:UUID4,sender:Demo,response:Response,body:DemoCon
  return {'data':data,'recipient':binding.get('demoProfile'),'protocolFixture':bool(binding.get('protocolFixture'))}
 @app.put('/demo/conversations/{cid}/turns/{tid}',include_in_schema=False)
 async def demo_turn(cid:UUID4,tid:UUID4,body:PutTurn,sender:Demo):
- await app.state.store.call('owned',cid=str(cid),sender=sender)
+ await limits_for(app.state.runtime).preflight(app.state.store,'owned',cid=str(cid),sender=sender)
  throttle(('turns',sender),30,3600)
- binding=await app.state.store.call('binding',cid=str(cid));base=TEST_BASE if binding.get('protocolFixture') else BASE
+ binding=await limits_for(app.state.runtime).preflight(app.state.store,'binding',cid=str(cid));base=TEST_BASE if binding.get('protocolFixture') else BASE
  return await proxied(f'{base}/{cid}/turns/{tid}',body.model_dump(exclude_none=True,exclude_defaults=True))
 @app.get('/demo/conversations/{cid}/turns/{tid}/events',include_in_schema=False)
 async def demo_events(cid:UUID4,tid:UUID4,sender:Demo,afterEventId:Annotated[int,Query(ge=0)]=0):

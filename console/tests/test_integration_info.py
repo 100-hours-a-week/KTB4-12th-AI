@@ -32,7 +32,7 @@ def test_explicit_bases_allow_deployment_prefixes_without_dns_or_http(value):
     assert be_api_address(value, "/route") == {"state": "configured", "url": value.rstrip("/")+"/route"}
 
 
-@pytest.mark.parametrize("env", ["local", "develop", "production"])
+@pytest.mark.parametrize("env", ["local", "develop", "staging", "production"])
 def test_authenticated_snapshot_uses_only_explicit_deployment_urls(monkeypatch, env):
     async def case():
         monkeypatch.setenv("AI_ENVIRONMENT", env)

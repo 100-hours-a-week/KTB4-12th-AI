@@ -27,7 +27,7 @@ console/.venv/bin/python -B -m uvicorn console.server:app --host 127.0.0.1 --por
 
 Docker의 로컬 포트 전달은 `CONSOLE_ADMIN_ORIGIN=http://127.0.0.1:18811`처럼 브라우저의 정확한 loopback 주소를 명시합니다. IPv6는 `http://[::1]:포트`를 사용합니다. 포트는 호스트 loopback에만 게시하며 원격 주소의 HTTP 접속은 허용하지 않습니다.
 
-운영 화면에는 **Chat 키·Profiler 키·공통 BE 토큰**이 있습니다. 세 프로세스의 `AI_ENVIRONMENT`를 `local`, `develop`, `production` 중 같은 값으로 지정하세요. 모델에는 서로 다른 키를 넣으며 누락·한도 오류 때 다른 서비스나 이전 공통 키를 대신 쓰지 않습니다. BE 토큰은 두 서비스의 요청 인증에 쓰므로 BE에도 같은 값을 설정합니다(Profiler 요청 · 결과는 RabbitMQ로 오가며 이 토큰을 쓰지 않습니다). Search·카탈로그 갱신에는 별도 `AI_INTERNAL_SERVICE_TOKEN` 또는 `_FILE`을 사용합니다.
+운영 화면에는 **Chat 키·Profiler 키·공통 BE 토큰**이 있습니다. 세 프로세스의 `AI_ENVIRONMENT`를 `local`, `develop`, `staging`, `production` 중 실제 환경과 같은 값으로 지정하세요. 스테이징 키·토큰의 저장 환경은 `staging`이며 다른 환경의 저장값을 재사용하지 않습니다. 모델에는 서로 다른 키를 넣으며 누락·한도 오류 때 다른 서비스나 이전 공통 키를 대신 쓰지 않습니다. BE 토큰은 두 서비스의 요청 인증에 쓰므로 BE에도 같은 값을 설정합니다(Profiler 요청 · 결과는 RabbitMQ로 오가며 이 토큰을 쓰지 않습니다). Search·카탈로그 갱신에는 별도 `AI_INTERNAL_SERVICE_TOKEN` 또는 `_FILE`을 사용합니다.
 
 기본 저장 대상은 로컬 영속 파일입니다. `OPENROUTER_MANAGED_KEY_DIR`와 `BE_SERVICE_TOKEN_DIR`에 `0700` 폴더를 지정하고 **전체 폴더**를 Console에는 쓰기 가능, Chat·Profiler에는 읽기 전용으로 연결하세요. 환경별 볼륨을 분리하고 재시작·배포 때 재사용합니다. 우선순위는 **대시보드 저장값 → 배포 `_FILE` → 배포 환경변수**입니다. 첫 저장 전에는 주입된 초기값을 쓰며, 저장 후에는 재배포한 환경변수로 덮어쓰지 않습니다. 설정한 `_FILE`이 없거나 비어 있으면 환경변수로 우회하지 않습니다. 저장값과 `.saved` 표식을 함께 보존해야 하며, 저장 파일이 손상되거나 없어지면 이전 초기값을 다시 쓰지 않습니다. 첫 저장 중 프로세스가 중단되거나 결과가 불확실하면 재입력이 필요할 수 있습니다. 관리 폴더가 없으면 외부 설정만 사용하고 화면은 읽기 전용입니다.
 
