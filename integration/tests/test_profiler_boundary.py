@@ -11,7 +11,7 @@ from integration.profiler_boundary import (
     RequiredStore,
     ExecutionState,
 )
-from profiling.ports import TagExtractError
+from profiling.ports import ResultRefused, TagExtractError
 
 
 
@@ -19,25 +19,37 @@ from profiling.ports import TagExtractError
 
 
 @pytest.mark.parametrize("tag_status", ["fail:timeout", "bad_json", "off"])
-def test_required_store_blocks_degraded_commit_before_callback(tag_status):
+def test_tag_fallback_result_is_accepted(tag_status):
+    """설계 CO-01 · 11-08 결정 A1: 태그 없는 추천(폴백)은 SUCCEEDED — 결과를 거절하지 않는다."""
     saved = []
     state = ExecutionState()
     store = RequiredStore(SimpleNamespace(save=saved.append), state)
     store.save(SimpleNamespace(status="RUNNING"))
-    with pytest.raises(RuntimeError):
-        store.save(SimpleNamespace(status="RESULT_READY", tag_status=tag_status))
-    assert len(saved) == 2 and str(saved[-1].status) == "FAILED"
-    store.save(SimpleNamespace(status="FAILED"))
-    assert len(saved) == 3
+    store.save(SimpleNamespace(status="RESULT_READY", tag_status=tag_status))
+    assert len(saved) == 2 and str(saved[-1].status) == "RESULT_READY"
 
 
-def test_required_embedding_failure_blocks_even_if_algorithm_falls_back():
+def test_embedding_failure_fallback_result_is_accepted():
     saved = []
     state = ExecutionState()
     store = RequiredStore(SimpleNamespace(save=saved.append), state)
     store.save(SimpleNamespace(status="RUNNING"))
     state.failure = "embedding_failed"
-    with pytest.raises(RuntimeError):
+    store.save(SimpleNamespace(status="RESULT_READY", tag_status="ok"))
+    assert len(saved) == 2 and str(saved[-1].status) == "RESULT_READY"
+
+
+def test_generation_change_refuses_result_before_commit():
+    """분석 도중 카탈로그 세대가 바뀌면 옛 카탈로그 순위 — 거절(DB 장애와 구분되는 ResultRefused)하고 FAILED 를 먼저 남긴다."""
+    saved = []
+    state = ExecutionState()
+
+    def changed():
+        raise RuntimeError("generation changed")
+
+    store = RequiredStore(SimpleNamespace(save=saved.append), state, SimpleNamespace(check=changed))
+    store.save(SimpleNamespace(status="RUNNING"))
+    with pytest.raises(ResultRefused):
         store.save(SimpleNamespace(status="RESULT_READY", tag_status="ok"))
     assert len(saved) == 2 and str(saved[-1].status) == "FAILED"
 
@@ -108,9 +120,9 @@ def test_embedding_failure_is_not_lost_when_algorithm_degrades():
     store.save(SimpleNamespace(status="RUNNING"))
     with pytest.raises(RuntimeError):
         embedding.encode(["SYNTHETIC"])
-    with pytest.raises(RuntimeError):
-        store.save(SimpleNamespace(status="RESULT_READY", tag_status="ok"))
-    assert str(saved[-1].status) == "FAILED" and saved[-1].search is None
+    assert state.failure == "embedding_failed"          # 실패 표시는 남고(로그) 결과는 폴백으로 받는다(A1)
+    store.save(SimpleNamespace(status="RESULT_READY", tag_status="ok"))
+    assert str(saved[-1].status) == "RESULT_READY"
 
 
 def test_generation_failure_at_wire_boundary_prevents_reservation_and_send():
@@ -176,12 +188,12 @@ def test_forwarded_request_preserves_all_timeout_and_custom_extensions():
 
 
 @pytest.mark.parametrize("case", ["low_rating", "filtered_preference", "empty_input"])
-def test_deliberate_no_model_result_keeps_profile_and_callback(case):
+def test_deliberate_no_model_result_keeps_profile_and_result(case):
     from datetime import datetime, timezone
     from uuid import UUID
-    from profiling import intake, pipeline
+    from profiling import pipeline, stores
     from profiling.schemas import ProductRecord
-    from profiling.types import ProfileRequest, Review, RunStatus, CallbackResult
+    from profiling.types import ProfileRequest, Review, RunStatus
 
     product = ProductRecord(
         productId=101,
@@ -239,14 +251,6 @@ def test_deliberate_no_model_result_keeps_profile_and_callback(case):
             self.calls += 1
             raise AssertionError("Deliberate no-signal path must not call model")
 
-    class Backend:
-        def __init__(self):
-            self.callbacks = []
-
-        def send_profile_callback(self, outcome):
-            self.callbacks.append(outcome)
-            return CallbackResult(status=RunStatus.DELIVERED, http_status=200)
-
     baseline = Store()
     baseline_recipient = Recipient()
     baseline_tagger = Tagger()
@@ -261,16 +265,16 @@ def test_deliberate_no_model_result_keeps_profile_and_callback(case):
     raw = Store()
     recipient = Recipient()
     tagger = Tagger()
-    backend = Backend()
     guarded = RequiredStore(raw, ExecutionState())
-    intake.run_and_callback(
-        request, catalog, guarded, backend, 30, recipient, max_attempts=1, tagger=tagger
+    # MQ processor path (profiling.mq.runtime.build.analyze): same pipeline call through the guarded store.
+    outcome = pipeline.profile(
+        request, catalog=catalog, store=guarded, recipient_store=recipient, pool_size=30, tagger=tagger
     )
     expected = "skip" if case == "empty_input" else "skip_no_signal"
     assert original.status == RunStatus.RESULT_READY and original.tag_status == expected
     assert baseline_tagger.calls == tagger.calls == 0
     assert (
-        raw.saved[-1].status == RunStatus.DELIVERED
+        raw.saved[-1].status == RunStatus.RESULT_READY
         and raw.saved[-1].tag_status == expected
     )
     assert recipient.profile is not None and baseline_recipient.profile is not None
@@ -281,10 +285,7 @@ def test_deliberate_no_model_result_keeps_profile_and_callback(case):
     assert (
         recipient.profile.category_scores == baseline_recipient.profile.category_scores
     )
-    assert (
-        len(backend.callbacks) == 1
-        and backend.callbacks[0].search.product_ids == original.search.product_ids
-    )
+    assert stores.result_payload(outcome) == stores.result_payload(original)
 
 
 def test_optional_pgvector_similarity_failure_is_guarded_and_redacted():

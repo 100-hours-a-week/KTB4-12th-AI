@@ -118,7 +118,7 @@ jobs:
           out=$(docker run --rm --network ci-net -e MIGRATION_DATABASE_URL="postgresql://ai_migrator:${MIG_PW}@postgres:5432/$DB" ai-migrate:ci --database "$DB" --emmet | tail -1)
           echo "$out"
           echo "$out" | grep -q '"changed": false'
-      - name: 결과 확인 — Alembic 0011 · DB 표지 · 스키마 5개 (레거시 DB 비차단)
+      - name: 결과 확인 — Alembic 0012 · DB 표지 · 스키마 5개 (레거시 DB 비차단)
         id: migration_result
         continue-on-error: true
         run: |
@@ -126,7 +126,7 @@ jobs:
             SELECT 'alembic=' || version_num FROM public.alembic_version;
             SELECT 'identity=' || database_name || ' ' || version FROM ai_runtime.database_identity;
             SELECT 'schemas=' || count(*) FROM pg_namespace WHERE nspname IN ('ai_profile','ai_catalog','ai_chat','ai_search','ai_runtime');" | tee result.txt
-          grep -q '^alembic=0011$' result.txt && grep -q "^identity=$DB single-server/1$" result.txt && grep -q '^schemas=5$' result.txt
+          grep -q '^alembic=0012$' result.txt && grep -q "^identity=$DB single-server/1$" result.txt && grep -q '^schemas=5$' result.txt
       - name: Report advisory migration results
         if: always()
         env:

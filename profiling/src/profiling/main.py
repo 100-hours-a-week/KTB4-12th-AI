@@ -3,16 +3,17 @@
 실행:  uv run uvicorn profiling.main:app --port 8000 --reload
 확인:  curl localhost:8000/health
 
-여기서만 구체 클래스(DbCatalogReader·FileCatalogReader · Db*Store · HttpBackendPort)를 import한다. 라우터(intake.py)와 업무(pipeline.py)는 app.state에 든 객체를 ports의 모양으로만 쓴다.
+여기서만 구체 클래스(DbCatalogReader·FileCatalogReader · Db*Store)를 import한다. MQ 처리기(mq/)와 업무(pipeline.py)는 app.state에 든 객체를 ports의 모양으로만 쓴다.
+BE ↔ AI 프로파일링 요청 · 결과는 RabbitMQ 뿐이다 — HTTP 7.6 접수 · 7.7 콜백 · 작업 큐(Supervisor)는 11-08 MQ 로 대체하며 지웠다.
 
 app.state에 두는 것 (lifespan에서 1회 생성):
   catalog          CatalogReader        DbCatalogReader(ai_catalog) 또는 FileCatalogReader — CATALOG_SOURCE 설정
-  store            ProfileRunStore      DbProfileRunStore (ai_profile.profile_runs) — 시작 시 끊긴 RUNNING 정리
+  store            ProfileRunStore      DbProfileRunStore (ai_profile.profile_runs)
   recipient_store  RecipientProfileStore  DbRecipientProfileStore (ai_profile.recipient_profiles)
-  backend          BackendPort          HttpBackendPort
-  supervisor       Supervisor            워커 스레드 + 상한 큐 — start() 하고, 종료 때 stop()
-  io_limiter       anyio.CapacityLimiter  접수 폴링·/health 의 짧은 DB 문장용(기본 스레드풀과 분리)
+  io_limiter       anyio.CapacityLimiter  /health · /readyz · 조회 API 의 짧은 DB 문장용(기본 스레드풀과 분리)
   engine           sqlalchemy Engine    시작 시 연결 확인, 종료 시 dispose
+  mq               MqRuntime | None     RabbitMQ 요청 소비자(PROFILING_MQ_ENABLED 일 때만) — start() 하고, 종료 때 DB 풀보다 먼저 stop()
+                                         mq_defer_start 가 참이면 start() 를 부른 쪽(통합 런타임)에 맡긴다
 """
 
 from __future__ import annotations
@@ -28,8 +29,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from profiling import intake, status
-from profiling.backend import HttpBackendPort
+from profiling import status
 from profiling.catalog import DbCatalogReader, FileCatalogReader
 from profiling.ports import NoActiveCatalog
 from profiling.profile_read import router as profile_read_router
@@ -39,7 +39,6 @@ from profiling.stores import (
     DbProfileRunStore,
     DbRecipientProfileStore,
 )
-from profiling.supervisor import Supervisor
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +68,7 @@ if not any(isinstance(f, _ASGIExceptionLogFilter) for f in _asgi_error_log.filte
 # 비교는 "DB 판 ≥ 기대 판"이다 — 롤링 배포는 마이그레이션을 먼저 돌리므로 그동안 옛 Task 는 한 판 높은 DB 위에서 돈다.
 # 같음으로 비교하면 마이그레이션 순간 옛 Task 가 모두 준비 안 됨(503)이 되어 AI 가 빈다. 그래서 마이그레이션은 옛 코드도 도는
 # 모양(열 추가 먼저 → 코드 → 삭제는 다음 판)으로 쓴다. 판 이름은 4자리 숫자라 문자열 비교가 곧 순서다.
-EXPECTED_MIGRATION = "0011"
+EXPECTED_MIGRATION = "0012"
 
 
 def migration_ok(version: str | None) -> bool:
@@ -78,7 +77,6 @@ def migration_ok(version: str | None) -> bool:
 _DEFAULT_SECRETS = ("dev-token",)
 _DEFAULT_DB_PASSWORDS = (":ai_password@", ":ai_app_password@")
 _PUBLIC_DB_USERS = ("ai_user", "ai_app")      # 로컬 compose 의 공개 기본 계정 이름 — 서버는 비공개 이름(PROFILING_APP_DB_ROLE)
-_DEFAULT_BACKEND = "http://localhost:8081"
 
 
 def _require_db_url(settings: Settings) -> str:
@@ -101,8 +99,6 @@ def strict_problems(settings: Settings, *, managed_auth=False) -> list[str]:
         problems.append("PROFILING_DATABASE_URL 의 계정 이름이 공개 기본값 — 서버는 비공개 앱 계정(PROFILING_APP_DB_ROLE)")
     if any(p in settings.DATABASE_URL for p in _DEFAULT_DB_PASSWORDS):
         problems.append("PROFILING_DATABASE_URL 의 비밀번호가 공개 기본값")
-    if settings.BACKEND_BASE_URL.rstrip("/") == _DEFAULT_BACKEND:
-        problems.append("PROFILING_BACKEND_BASE_URL 이 로컬 가짜 BE 기본값")
     if settings.CATALOG_SOURCE not in ("db", "search_http"):
         problems.append("PROFILING_CATALOG_SOURCE 가 db 가 아님(서버 이미지에는 카탈로그 파일이 없다)")
     if settings.CATALOG_SOURCE == "search_http" and not settings.SEARCH_BASE_URL:
@@ -122,10 +118,10 @@ async def lifespan(app: FastAPI):
     if settings.STRICT_STARTUP and (problems := strict_problems(settings, managed_auth=callable(getattr(app.state, "be_token_provider", None)))):
         raise RuntimeError("STRICT_STARTUP 기동 거부 — " + " · ".join(problems))
 
-    # 저장소 — PostgreSQL 하나뿐. 연결이 안 되면 여기서 앱이 죽는다(기록 없이 콜백만 나가는 상태를 만들지 않으려고).
+    # 저장소 — PostgreSQL 하나뿐. 연결이 안 되면 여기서 앱이 죽는다(기록 없이 결과만 나가는 상태를 만들지 않으려고).
     app.state.engine = _connect_db(settings)
 
-    # 카탈로그 — 설정 한 줄로 DB(배포)와 파일(로컬) 중 하나. 로드 실패해도 앱은 띄운다: 7.6이 503을 내고, /health가 active=false를 보이게.
+    # 카탈로그 — 설정 한 줄로 DB(배포)와 파일(로컬) 중 하나. 로드 실패해도 앱은 띄운다: /readyz 가 503 이라 MQ 는 소비를 멈추고, /health 가 active=false 를 보이게.
     try:
         ## 상품DB연결
         if settings.CATALOG_SOURCE == "search_http":
@@ -144,9 +140,9 @@ async def lifespan(app: FastAPI):
             raise
         if settings.CATALOG_SOURCE == "db":
             # DB 카탈로그는 1초마다 활성 버전을 다시 묻는다 — 기동 뒤에 적재해도 재시작 없이 살아난다(10-15: 대역으로 바꾸면 영영 503 이었다)
-            log.error("활성 카탈로그 없음: %s — 적재될 때까지 7.6 은 503 · /readyz 503(적재되면 재시작 없이 회복)", e)
+            log.error("활성 카탈로그 없음: %s — 적재될 때까지 MQ 소비 멈춤 · /readyz 503(적재되면 재시작 없이 회복)", e)
         else:
-            log.error("활성 카탈로그 없음: %s — 7.6은 503을 반환합니다", e)
+            log.error("활성 카탈로그 없음: %s — MQ 소비 멈춤 · /readyz 503", e)
             app.state.catalog = _NoCatalog(str(e))
     app.state.store = DbProfileRunStore(app.state.engine)
 
@@ -200,28 +196,30 @@ async def lifespan(app: FastAPI):
                          reason=tagger_reason)
     app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
 
-    # 끊긴 실행 정리 — 프로세스가 죽으면 그 행은 RUNNING 인 채 남는다. 남겨 두면 중복 판정이 "이미 분석 중"으로
-    # 읽어 Backend 재전송을 계속 건너뛴다. 다른 인스턴스가 **지금 돌리고 있는** 행까지 건드리지 않도록
-    # RUNNING_STALE_S 보다 오래된 것만 FAILED 로 내린다(중복 판정의 기준과 같은 값).
-    stale = app.state.store.recover_stale_runs(settings.RUNNING_STALE_S)
-    if stale:
-        log.warning("끊긴 실행 %d건을 FAILED 로 정리했습니다 (%d초 넘게 RUNNING) — Backend 가 다시 보내면 새로 분석합니다",
-                    stale, settings.RUNNING_STALE_S)
-
-    app.state.io_limiter = anyio.CapacityLimiter(settings.IO_THREADS)   # 접수 폴링·/health — 기본 스레드풀(토큰 40)과 분리, 실행 대기가 있어도 굶지 않는다
-    app.state.supervisor = Supervisor(profiling_slots=settings.PROFILING_SLOTS, queue_max=settings.QUEUE_MAX)   # 3단계 §12.1 시작값 슬롯 1
-    app.state.supervisor.start()
-    app.state.backend = HttpBackendPort(settings.BACKEND_BASE_URL, settings.SERVICE_TOKEN, settings.CALLBACK_TIMEOUT_S,
-                                       token_provider=getattr(app.state, "be_token_provider", None))
-    log.info("profiling 시작 backend=%s pool_size=%s dislike_mode=%s pool_strategy=%s incremental_tags=%s", settings.BACKEND_BASE_URL,
+    app.state.io_limiter = anyio.CapacityLimiter(settings.IO_THREADS)   # /health · 조회 API — 기본 스레드풀(토큰 40)과 분리, 분석이 쌓여도 굶지 않는다
+    log.info("profiling 시작 mq=%s pool_size=%s dislike_mode=%s pool_strategy=%s incremental_tags=%s", settings.MQ_ENABLED,
              settings.POOL_SIZE, settings.DISLIKE_MODE, settings.POOL_STRATEGY, settings.INCREMENTAL_TAGS)
+
+    # RabbitMQ 요청 소비자 — 켤 때만. 설정이 빠졌거나 0 · 음수 · 모순이면 여기서 서버가 뜨지 않는다(설계 §7 "활성화를 거부")
+    app.state.mq = None
+    if settings.MQ_ENABLED:
+        from profiling.mq import config as mqc
+        from profiling.mq import runtime as mq_runtime
+        try:
+            app.state.mq = mq_runtime.build(app.state, settings, ready=lambda: all(_ready_checks(app.state).values()))
+        except mqc.MqConfigError as e:
+            app.state.engine.dispose()
+            raise RuntimeError("PROFILING_MQ_ENABLED 인데 MQ 설정이 맞지 않음 — " + " · ".join(e.problems)) from e
+        if not getattr(app.state, "mq_defer_start", False):     # 통합 런타임은 부품을 감싼 뒤 직접 start() 한다
+            app.state.mq.start()
 
     yield
 
-    # 종료 — 신규 접수를 막고 큐를 버린 뒤 실행 중인 것만 SHUTDOWN_DRAIN_S 까지 기다린다(compose 유예 10초 안). 그 다음 콜백 클라이언트·DB 풀 정리.
-    dropped = app.state.supervisor.stop(settings.SHUTDOWN_DRAIN_S)
-    log.info("profiling 종료 dropped=%d", dropped)
-    for part in (app.state.backend, getattr(app.state, "tagger", None), getattr(app.state, "embedding", None)):
+    # 종료 — MQ 소비자 먼저(새 소비 중단 → 진행 중 대기 → 연결 닫기, 미ACK 는 브로커가 재배달) — DB 풀을 닫기 전에.
+    if app.state.mq is not None:
+        app.state.mq.stop()
+    log.info("profiling 종료")
+    for part in (getattr(app.state, "tagger", None), getattr(app.state, "embedding", None)):
         close = getattr(part, "close", None)
         if callable(close):
             close()
@@ -250,17 +248,20 @@ def _v3_engine(settings: Settings, fallback, spec):
         client.close()
         log.error("v3 엔진을 만들지 못함: %s — v2 추출기로만 진행", e)
         return fallback, spec
-    if settings.V3_FALLBACK and settings.V3_TIMEOUT_S + settings.TAGGER_TIMEOUT_S >= settings.RUNNING_STALE_S:
-        log.warning("V3_TIMEOUT_S(%s) + TAGGER_TIMEOUT_S(%s) 가 RUNNING_STALE_S(%s) 이상 — v3 기한 뒤 v2 로 넘긴 건이 분석 중에 '멈춤'으로 보여 "
-                    "다시 집힐 수 있음(같은 사람 두 번 분석)", settings.V3_TIMEOUT_S, settings.TAGGER_TIMEOUT_S, settings.RUNNING_STALE_S)
     log.info("태그 엔진 v3 version=%s url=%s timeout_s=%s fallback=%s", engine.version, settings.V3_URL, settings.V3_TIMEOUT_S,
              engine.fallback.model if engine.fallback else "none")   # 키는 남기지 않음
     return engine, spec
 
 
+def db_connections_needed(settings: Settings) -> int:
+    """동시에 쥘 수 있는 커넥션 수 — IO_THREADS(/health · 조회 API) + MQ 슬롯마다 잠금 2 + 대조 복구 1(켰을 때)."""
+    from profiling.mq.runtime import db_connections as mq_db_connections
+    return settings.IO_THREADS + mq_db_connections(settings)
+
+
 def db_pool_size(settings: Settings) -> int:
-    """상시 커넥션 수 — 설정이 없으면 슬롯 수 + IO_THREADS(슬롯마다 잠금 커넥션 1개를 분석 내내 쥐고, 접수 폴링 · /health 가 그만큼 더 쓴다)."""
-    return settings.DB_POOL_SIZE or settings.PROFILING_SLOTS + settings.IO_THREADS
+    """상시 커넥션 수 — 설정이 없으면 db_connections_needed(MQ 슬롯마다 잠금 커넥션을 분석 내내 쥐고, /health 가 그만큼 더 쓴다)."""
+    return settings.DB_POOL_SIZE or db_connections_needed(settings)
 
 
 def db_session_options(settings: Settings) -> str:
@@ -277,10 +278,11 @@ def _connect_db(settings: Settings) -> sa.Engine:
     pool_pre_ping: 풀에서 꺼낸 커넥션이 죽어 있으면(DB 재시작) 버리고 새로 연다 — 백그라운드 작업이 오래 뒤에 실행되므로 필요.
     풀 크기 · 시간 상한 · 슈퍼유저 거부는 10-13 DB 검토(설정 DB_*).
     """
-    pool_size, need = db_pool_size(settings), settings.PROFILING_SLOTS + settings.IO_THREADS
+    pool_size, need = db_pool_size(settings), db_connections_needed(settings)
     if pool_size + settings.DB_MAX_OVERFLOW < need:
         raise RuntimeError(f"DB 커넥션 풀이 작다: pool_size {pool_size} + max_overflow {settings.DB_MAX_OVERFLOW} < "
-                           f"슬롯 {settings.PROFILING_SLOTS} + IO_THREADS {settings.IO_THREADS} — 슬롯이 커넥션을 기다리다 실패한다. "
+                           f"IO_THREADS {settings.IO_THREADS} + MQ 잠금 {need - settings.IO_THREADS}"
+                           " — 슬롯이 커넥션을 기다리다 실패한다. "
                            "PROFILING_DB_POOL_SIZE 를 비우거나(자동) 늘린다")
     engine = sa.create_engine(
         _require_db_url(settings), pool_pre_ping=True, future=True,
@@ -338,16 +340,13 @@ class _NoCatalog:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="profiling", version="0.1.0", lifespan=lifespan)
-app.include_router(intake.router)
 app.include_router(profile_read_router)
 
 
 def _error_response(status: int, code: str, message: str, trace_id: str | None = None, *, retry_after: int | None = None) -> JSONResponse:
     """문서 1 §3 오류 봉투 {message, error: {code, traceId}}. 모든 오류 응답은 이 함수만 거친다.
 
-    503 에는 `Retry-After` 를 붙인다. **Backend 는 이 헤더를 읽지 않는다**(통합 수정점 v0.7, 10-08 실측) — 503 을 재시도 가능
-    실패로 보고 틱을 끝내며 디바운스를 1회 재시작한다(두 번째면 접음). 헤더는 운영자·다른 호출자를 위한 표준 힌트로 남긴다.
-    retry_after 가 오면 그 값(예: 대기열 가득은 QUEUE_FULL_RETRY_AFTER_S), 없으면 RETRY_AFTER_S(카탈로그 없음).
+    503 에는 `Retry-After` 를 붙인다(운영자 · 다른 호출자를 위한 표준 힌트). retry_after 가 오면 그 값, 없으면 RETRY_AFTER_S.
     """
     body = ErrorResponse(message=message, error=ErrorBody(code=code, traceId=trace_id))
     headers = None
@@ -359,7 +358,7 @@ def _error_response(status: int, code: str, message: str, trace_id: str | None =
 @app.exception_handler(RequestValidationError)
 async def on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Pydantic 검증 실패 — FastAPI 기본은 422이지만 문서 1은 400 INVALID_REQUEST.
-    첫 번째 오류의 위치·사유를 message에 넣어 Backend가 무엇을 고칠지 알 수 있게 한다."""
+    첫 번째 오류의 위치·사유를 message에 넣어 호출자가 무엇을 고칠지 알 수 있게 한다."""
     first = exc.errors()[0] if exc.errors() else {}
     if first.get("type") == "json_invalid":                       # 본문이 JSON이 아님 — 필드 위치가 없다
         msg = "요청 본문이 JSON이 아닙니다."
@@ -381,8 +380,7 @@ async def on_http_error(request: Request, exc: StarletteHTTPException) -> JSONRe
 
 @app.exception_handler(Exception)
 async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
-    """잡히지 않은 예외 → 500 INTERNAL_SERVER_ERROR. Backend 는 재시도 가능 실패로 보고 틱을 끝내며 디바운스를 1회 재시작한다
-    (통합 수정점 v0.7 ②③, 10-08 실측 — 위키 7.6 의 "다음 디바운스 주기에 재시도"는 옛 문구)."""
+    """잡히지 않은 예외 → 500 INTERNAL_SERVER_ERROR."""
     log.error("500 INTERNAL_SERVER_ERROR: %s", type(exc).__name__)
     return _error_response(500, "INTERNAL_SERVER_ERROR", "서버 오류가 발생했습니다.")
 
@@ -396,7 +394,7 @@ async def healthz() -> dict:
 
 @app.get("/readyz", tags=["ops"])
 async def readyz(request: Request) -> JSONResponse:
-    """**Readiness**(ECS) — 7.6 을 받아 처리할 준비가 됐나. 활성 카탈로그 · DB 연결 · 마이그레이션 판(DB ≥ EXPECTED_MIGRATION)이 다 맞으면 200,
+    """**Readiness**(ECS) — 요청을 받아 처리할 준비가 됐나(MQ 소비자도 이 검사가 거짓이면 소비를 멈춘다). 활성 카탈로그 · DB 연결 · 마이그레이션 판(DB ≥ EXPECTED_MIGRATION)이 다 맞으면 200,
     하나라도 아니면 503. **외부 LLM 은 보지 않는다** — LLM 이 죽어도 태그 없이 30개를 보내므로 트래픽에서 빼면 안 된다(10-15 프로파일링 담당 선택).
     LLM 상태는 /health 의 `llm` 칸."""
     state = request.app.state
@@ -423,11 +421,10 @@ def _ready_checks(state) -> dict[str, bool]:
 
 @app.get("/health", tags=["ops"])
 async def health(request: Request) -> dict:
-    """살아 있는지 + 활성 카탈로그가 있는지. 카탈로그가 없어도 200 — 프로세스는 살아 있으므로(7.6은 503).
+    """살아 있는지 + 활성 카탈로그가 있는지. 카탈로그가 없어도 200 — 프로세스는 살아 있으므로.
 
-    **BE 핑 계약(통합 수정점 v0.7 ①, 10-08 실측):** Backend 는 틱마다 토큰 없이 `GET /health`(2초 타임아웃)를 부르고,
-    200 이면서 `catalog.active` 와 `store.connected` 가 **둘 다 true** 일 때만 7.6 을 보낸다 — 아니면 번호를 올리지 않고 틱을 건너뛴다.
-    이 두 키의 이름·뜻·타입(bool)을 바꾸면 Backend 가 모든 틱을 건너뛴다. tests/unit/test_health_contract.py 가 지킨다.
+    `catalog.active` 와 `store.connected`(bool) 두 키는 옛 BE 핑 계약(v0.7 ①)에서 온 이름이다 — HTTP 7.6 이 없어진 뒤에도
+    운영 · 통합 점검이 읽으므로 이름 · 뜻 · 타입을 그대로 둔다(tests/unit/test_health_contract.py).
 
     async 라 기본 스레드풀 토큰을 쓰지 않는다. DB 문장 셋은 io_limiter(별도 스레드)에서 — 실행 대기가 쌓여도 /health 는 답한다(09-28).
     """
@@ -449,8 +446,9 @@ def _health_sync(state) -> dict:
         except NoActiveCatalog as e:
             catalog = {"active": False, "reason": str(e)}
         projection = {"catalog": catalog, "embedding": getattr(state, "embedding_status", {"enabled": False})}
-    return {"status": "ok", **projection, "store": _store_health(state), "supervisor": state.supervisor.stats(),
-            "llm": status.LLM.snapshot()}
+    mq = getattr(state, "mq", None)
+    return {"status": "ok", **projection, "store": _store_health(state),
+            "llm": status.LLM.snapshot(), "mq": mq.health() if mq is not None else {"enabled": False}}
 
 
 def _store_health(state) -> dict:
@@ -460,8 +458,7 @@ def _store_health(state) -> dict:
         with engine.connect() as conn:
             conn.execution_options(isolation_level="AUTOCOMMIT")     # 읽기 한 문장 — BEGIN/ROLLBACK 없이
             version = conn.execute(sa.text("select version_num from alembic_version")).scalar()
-        # 결과는 만들었는데 Backend 에 전달하지 못한 행. 늘어나면 콜백 경로에 문제가 있다는 뜻이라 운영이 바로 봐야 한다.
-        return {"backend": "db", "connected": True, "migration": version, "migration_expected": EXPECTED_MIGRATION,
-                "undelivered": state.store.undelivered_count()}
+        # 결과 전달(발행) 상태는 mq 칸(deliveries.open · dlq_pending)이 보여 준다
+        return {"backend": "db", "connected": True, "migration": version, "migration_expected": EXPECTED_MIGRATION}
     except sa.exc.SQLAlchemyError as e:      # 연결 끊김·테이블 없음 등 DB 쪽 오류만 — 그 외는 500으로 드러나야 한다
         return {"backend": "db", "connected": False, "reason": type(e).__name__}

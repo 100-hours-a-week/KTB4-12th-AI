@@ -85,18 +85,14 @@ def check(runtime, previous=None, *, password=None):
             assert all(
                 current_calls[k][: len(v)] == v for k, v in old["callbackCalls"].items()
             )
-            current_modes = json.loads((scratch / "callback-state.json").read_text())[
-                "modes"
-            ]
-            assert all(current_modes[k] == v for k, v in old["callbackModes"].items())
             response = http.post(
                 base + "/api/chat", json=old["retryBody"], headers=headers
             )
             assert response.json()["httpStatus"] == 200
             assert get_turn(old["retryBody"]["turn_id"])["status"] == "COMPLETED"
-            profile(old["profileBody"], "DELIVERED")
+            profile(old["profileBody"], "RESULT_READY")
             tests.append(
-                "restart retained terminal turns, callback calls/modes and same-body idempotency"
+                "restart retained terminal turns, MQ result log and same-body idempotency"
             )
         body = {
             k: str(uuid.uuid4()) for k in ("request_id", "conversation_id", "turn_id")
@@ -173,17 +169,18 @@ def check(runtime, previous=None, *, password=None):
             "sourceVersion": 1,
             "giftPreference": "SYNTHETIC portable gifts",
         }
-        http.put(callback + f"/fixture/mode/{recipient}/400").raise_for_status()
-        profile(profile_body, "FAILED")
-        http.put(callback + f"/fixture/mode/{recipient}/200").raise_for_status()
-        profile(profile_body, "DELIVERED")
-        # Keep an unused failure mode too, proving modes persist independently of calls.
-        http.put(callback + f"/fixture/mode/{recipient + 1}/503").raise_for_status()
+        profile(profile_body, "RESULT_READY")
+        profile(profile_body, "RESULT_READY")          # same body again: stored result reused
+        for _ in range(100):
+            calls = http.get(callback + "/fixture/calls").json()
+            if len(calls.get(str(recipient), [])) >= 2:
+                break
+            time.sleep(0.1)
+        received = calls[str(recipient)]
+        assert len(received) == 2 and received[0] == received[1] and received[0]["outcome"] == "SUCCEEDED"
         tests.append(
-            "actual free profiler callback400 failure, same-body retry and successful delivery"
+            "actual free profiler over RabbitMQ: result published, same-body request reuses the stored result"
         )
-        calls = http.get(callback + "/fixture/calls").json()
-        modes = json.loads((scratch / "callback-state.json").read_text())["modes"]
         critical = (
             "product-search/search/reloading.py",
             "profiling/src/profiling/stores.py",
@@ -207,7 +204,6 @@ def check(runtime, previous=None, *, password=None):
         "retryBody": body,
         "profileBody": profile_body,
         "callbackCalls": calls,
-        "callbackModes": modes,
     }
 
 

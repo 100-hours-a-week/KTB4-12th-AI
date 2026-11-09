@@ -65,10 +65,21 @@ services:
       PROFILING_DATABASE_URL: postgresql+psycopg://${PROFILING_APP_DB_ROLE}:${PROFILING_APP_DB_PASSWORD}@ai-db:5432/ai_chat
       PROFILING_DB_REFUSE_SUPERUSER: "true"
       PROFILING_CATALOG_SOURCE: db                  # 컨테이너 안에는 카탈로그 파일이 없다
-      # 동시 분석 수(슬롯). 배포 기본 8 — 10-14 부하 시험에서 BE 틱 최대(분당 150명) · 1만 명 재분석을 503 없이 받음(DR-041).
-      # 코드 기본값(settings.py)은 1 그대로 — 로컬 개발 · 단위 시험용. 커넥션 풀은 슬롯 + IO_THREADS(=12)로 자동
-      PROFILING_SLOTS: ${PROFILING_SLOTS:-8}
-      PROFILING_BACKEND_BASE_URL: ${PROFILING_BACKEND_BASE_URL:?.env 에 PROFILING_BACKEND_BASE_URL}
+      # BE ↔ AI 프로파일링은 RabbitMQ(11-08 HTTP 7.6 · 7.7 제거). 켜려면 .env 에 PROFILING_MQ_ENABLED=true 와 아래 값 전부(값 없는 줄 = .env · 셸에 있을 때만 넘김).
+      # 숫자는 설계가 정하지 않았다 — 비었거나 0 · 음수 · 모순이면 기동 거부(mq.config). 커넥션 풀은 IO_THREADS + MQ 슬롯 × 2 + 1 로 자동
+      PROFILING_MQ_ENABLED: ${PROFILING_MQ_ENABLED:-false}
+      PROFILING_MQ_URL:
+      PROFILING_MQ_PREFETCH:
+      PROFILING_MQ_SLOTS:
+      PROFILING_MQ_RECONNECT_DELAY_S:
+      PROFILING_MQ_SHUTDOWN_GRACE_S:
+      PROFILING_MQ_CONFIRM_TIMEOUT_S:
+      PROFILING_MQ_WAIT_S:
+      PROFILING_MQ_MAX_ANALYSIS_ATTEMPTS:
+      PROFILING_MQ_RETRY_BASE_S:
+      PROFILING_MQ_RETRY_MAX_S:
+      PROFILING_MQ_RECONCILE_AFTER_S:
+      PROFILING_MQ_RECONCILE_INTERVAL_S:
       PROFILING_SERVICE_TOKEN: ${PROFILING_SERVICE_TOKEN:?.env 에 PROFILING_SERVICE_TOKEN}
       PROFILING_LOG_LEVEL: ${PROFILING_LOG_LEVEL:-INFO}
     depends_on:

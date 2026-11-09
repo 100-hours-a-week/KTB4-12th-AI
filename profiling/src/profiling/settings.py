@@ -1,14 +1,15 @@
 """설정 — 환경변수 → 객체 하나. 실험 config.json의 값 중 서비스에 필요한 것만 옮긴다.
 
 읽는 순서(pydantic-settings): 환경변수 > .env 파일 > 아래 기본값. 기본적으로 PROFILING_ 접두사를 붙인다
-(예: PROFILING_BACKEND_BASE_URL). 모델 키는 OPENROUTER_API_KEY_PROFILER 와 기존 PROFILING_OPENROUTER_API_KEY 를 읽는다.
+(예: PROFILING_POOL_SIZE). 모델 키는 OPENROUTER_API_KEY_PROFILER 와 기존 PROFILING_OPENROUTER_API_KEY 를 읽는다.
 같은 출처에 둘 다 있으면 새 이름이 우선한다(빈 값도 명시값). _FILE 및 통합 자격 증명 충돌 검사는 integration 이 맡는다.
 팀원 골격은 아직 없다(09-18 초기 골격은 되돌려짐) — 합칠 때 접두사·이름을 맞추더라도
-여기 한 파일만 바꾼다. 코드는 settings.BACKEND_BASE_URL 처럼 속성으로만 쓴다.
+여기 한 파일만 바꾼다. 코드는 settings.POOL_SIZE 처럼 속성으로만 쓴다.
 
 값의 출처
-  - POOL_SIZE 30                  : 모델 API 설계 §7.7 (7.6 의 비선호 5·리뷰 10 상한은 schemas.py 의 max_length — 계약값, 설정 아님)
-  - CALLBACK_TIMEOUT_S 5          : 실험 하네스 config.json timeout_s(120)은 LLM용. 콜백은 짧게
+  - POOL_SIZE 30                  : 모델 API 설계 §7.7 · BE MQ 설계 결과 메시지 recommendedProductIds 최대 30
+  - BE ↔ AI 프로파일링 요청 · 결과는 RabbitMQ(MQ_*) — 11-08 HTTP 7.6 · 7.7 과 그 설정(BACKEND_BASE_URL · CALLBACK_* · PROFILING_SLOTS ·
+    QUEUE_* · RUNNING_STALE_S · SHUTDOWN_DRAIN_S)을 지웠다. 남은 환경변수는 extra="ignore" 라 기동을 막지 않는다
 """
 
 from functools import lru_cache
@@ -35,17 +36,7 @@ class Settings(BaseSettings):
     )
 
     # ---- 바깥 연결
-    BACKEND_BASE_URL: str = Field(default="http://localhost:8081", description="7.7 콜백·7.9 export 대상. 로컬 기본값은 :8081 — 서버는 Backend 내부 주소")
-    SERVICE_TOKEN: str = Field(default="", description="Backend↔AI 서비스 토큰(Bearer). 비어 있으면 7.6 토큰 검사 생략(로컬 전용)")
-    CALLBACK_TIMEOUT_S: float = Field(default=5.0, gt=0, description="7.7 POST 한 번의 타임아웃(초)")
-    CALLBACK_MAX_ATTEMPTS: int = Field(
-        default=3, ge=1,
-        description="7.7 이 5xx·네트워크로 실패하면 같은 슬롯 안에서 다시 보내는 최대 시도 수(최초 포함). 다 써도 실패면 "
-                    "RESULT_READY 로 남겨 Backend 가 같은 번호로 다시 요청할 때 재전송한다. 200·409·4xx 는 재시도하지 않는다")
-    CALLBACK_BACKOFF_S: float = Field(
-        default=0.5, gt=0,
-        description="재시도 대기의 첫 값(초). 다음은 4배씩 — 기본 0.5초·2초. 대기는 슬롯을 잡은 채 하므로 "
-                    "최악은 0.5 + 2 + 타임아웃 5초 × 3 ≈ 17.5초")
+    SERVICE_TOKEN: str = Field(default="", description="서비스 토큰(Bearer) — 챗봇의 프로필 조회 API(profile_read) 인증 · 검색 API 토큰이 없을 때 대신. 비어 있으면 검사 생략(로컬 전용)")
 
     # ---- DB (로컬 compose 기본값. 합칠 때 접두사만 맞춤)
     DATABASE_URL: str = Field(default="",                # 기본값 없음(10-15) — .env 또는 환경변수로. 비면 기동 · 마이그레이션이 멈춘다
@@ -55,10 +46,10 @@ class Settings(BaseSettings):
         default=False,
         description="true 면 앱이 슈퍼유저 계정으로 접속할 때 기동을 거부한다(운영 · 개발 서버 · compose 는 true + 앱 전용 계정). "
                     "false(로컬 uv 기본)면 경고 로그만")
-    # 커넥션 풀(10-13 DB 검토) — 슬롯마다 잠금 커넥션 1개를 분석 내내(LLM 대기 · 콜백 포함) 쥐고, 접수 폴링 · /health 가 IO_THREADS 만큼 더 쓴다
+    # 커넥션 풀(10-13 DB 검토) — MQ 슬롯마다 잠금 커넥션 2개를 분석 내내 쥐고(mq.runtime.db_connections), /health · 조회 API 가 IO_THREADS 만큼 더 쓴다
     DB_POOL_SIZE: int | None = Field(
         default=None, ge=1,
-        description="상시 커넥션 수. 비우면 PROFILING_SLOTS + IO_THREADS. pool_size + max_overflow 가 그보다 작으면 기동 거부 "
+        description="상시 커넥션 수. 비우면 IO_THREADS + MQ 잠금(켰을 때). pool_size + max_overflow 가 그보다 작으면 기동 거부 "
                     "(슬롯이 커넥션을 기다리다 DB_POOL_TIMEOUT_S 뒤 실패하는 상태를 만들지 않게)")
     DB_MAX_OVERFLOW: int = Field(default=2, ge=0, description="상시 수를 넘어 잠깐 더 여는 커넥션 수(기동 때 카탈로그 · 임베딩 적재 등)")
     DB_POOL_TIMEOUT_S: float = Field(default=10.0, gt=0, description="풀이 다 찼을 때 커넥션을 기다리는 상한(초). 넘으면 그 작업만 실패")
@@ -89,11 +80,11 @@ class Settings(BaseSettings):
     CATALOG_POLL_TTL_S: float = Field(
         default=1.0, ge=0,
         description="DbCatalogReader 가 활성 버전 id 를 다시 묻기까지의 최소 간격(초). 그 안에서는 DB 없이 들고 있던 카탈로그를 준다 — "
-                    "7.6 한 건이 접수·슬롯에서 두 번 폴링해 DB 왕복 8번을 쓰던 것을 없앤다. 새 적재·활성 해제(503)가 보이기까지 "
+                    "요청 한 건이 두 번 폴링해 DB 왕복 8번을 쓰던 것을 없앤다. 새 적재·활성 해제(503)가 보이기까지 "
                     "최대 이 시간만큼 늦는다. 0 = 호출마다 묻는다(옛 동작). CATALOG_SOURCE=db 일 때만 쓴다",
     )
 
-    # ---- 계약 상한 (문서 1 §7.7). 7.6 의 비선호 5·리뷰 10 은 schemas.py 의 max_length 가 정본 — 설정으로 두지 않는다(09-29, 아무 데서도 안 읽었다)
+    # ---- 계약 상한 (문서 1 §7.7). 요청의 비선호 5·리뷰 10 상한은 mq/messages.py 가 정본 — 설정으로 두지 않는다(09-29)
     POOL_SIZE: int = Field(default=30, ge=1, le=30, description="7.7 recommendedProductIds 개수 상한")
 
     # ---- 업무 규칙 스위치 (10-11 결정). v1 = exclude, v2(BE V2 배포 — giftPreference·reviews) 부터 penalty 로 바꾼다
@@ -166,7 +157,7 @@ class Settings(BaseSettings):
     V3_TIMEOUT_S: float = Field(
         default=240.0, gt=0,
         description="사람 한 명의 v3 기한(초) — 꺼진 Modal 컨테이너가 켜지는 시간(약 2분)을 넉넉히 기다린다. 넘으면 그 사람은 v2 폴백. "
-                    "폴백까지 더해도 RUNNING_STALE_S 보다 짧아야 중복 분석이 안 생긴다",
+                    "폴백까지 더해도 MQ_RECONCILE_AFTER_S 보다 짧아야 대조 복구가 분석 중인 건을 장기 미완료로 보지 않는다",
     )
     V3_FALLBACK: bool = Field(default=True, description="v3 를 못 쓸 때 TAGGER 추출기로 넘길지 — false 면 태그 없이 진행")
     SEARCH_BASE_URL: str = ""
@@ -182,53 +173,39 @@ class Settings(BaseSettings):
                     "file: EMBEDDING_DIR 의 data/ 파일(검색기가 만든 manifest.json · vectors.f32)",
     )
 
-    # ---- 실행 (3단계 구현 상세 §12.1 개발 시험 시작값)
-    PROFILING_SLOTS: int = Field(
-        default=1, ge=1,
-        # 필드 이름에 접두사가 이미 들어 있어 env_prefix 를 태우면 PROFILING_PROFILING_SLOTS 가 된다(이슈 2026-09-28_1424).
-        # 별칭은 접두사를 타지 않으므로 문서 이름 PROFILING_SLOTS 를 읽고, 옛 이름도 계속 받는다.
-        validation_alias=AliasChoices("PROFILING_SLOTS", "PROFILING_PROFILING_SLOTS"),
-        description="프로파일링 동시 실행 수 (Supervisor 슬롯). 환경변수 PROFILING_SLOTS",
-    )
-    RUNNING_STALE_S: int = Field(
-        default=300, ge=1,
-        description="RUNNING 기록을 '죽은 실행'으로 보는 기준(초). 접수 단계 중복 판정이 쓴다 — 이보다 오래된 RUNNING은 "
-                    "프로세스가 죽어 남은 행으로 보고 다시 분석한다. Backend 의 복구 전송 간격(maximum-window ⚙6h)보다 훨씬 짧아야 "
-                    "복구 전송이 '이미 분석 중'에 막히지 않고 재분석으로 이어진다(v0.7 ⑤)",
-    )
-
     # ---- 운영
     RETRY_AFTER_S: int = Field(
         default=300, ge=1,
-        description="503(활성 카탈로그 없음) 응답에 실어 보내는 Retry-After 초. Backend 는 이 헤더를 읽지 않는다"
-                    "(통합 수정점 v0.7, 10-08 실측) — 운영자·다른 호출자용 표준 힌트로만 남긴다",
-    )
-    QUEUE_MAX: int = Field(
-        default=200, ge=1,
-        description="접수 대기열 상한(건). 슬롯이 다 찼을 때 큐에 둘 수 있는 수. 넘치면 7.6 을 503 으로 거절하는데, Backend 는 503 을 "
-                    "재시도 가능 실패로 보고 틱을 끝내며 디바운스를 1회만 재시작한다(두 번째면 접음, v0.7 ②③). 그래서 BE 틱당 "
-                    "일반 ⚙100 + 복구 ⚙50 = 150 보다 커야 한다(BE 도 150 ≤ 200 을 검증). 대기는 큐에서 하므로 스레드풀 토큰을 쓰지 않는다(09-28)",
-    )
-    QUEUE_FULL_RETRY_AFTER_S: int = Field(
-        default=30, ge=1,
-        description="대기열 가득 503 에 싣는 Retry-After 초. 카탈로그 없음 503 의 RETRY_AFTER_S(300)와 다르다 — 곧 빠지는 상황이라 짧게",
+        description="503 응답에 실어 보내는 Retry-After 초 — 운영자 · 다른 호출자용 표준 힌트",
     )
     IO_THREADS: int = Field(
         default=4, ge=1,
-        description="접수의 카탈로그 폴링과 /health 의 DB 문장을 돌리는 별도 스레드 수(anyio CapacityLimiter). "
-                    "기본 스레드풀(40)과 분리해 실행 대기가 쌓여도 접수·/health 가 굶지 않는다",
+        description="/health · /readyz · 조회 API 의 DB 문장을 돌리는 별도 스레드 수(anyio CapacityLimiter). "
+                    "기본 스레드풀(40)과 분리해 분석이 쌓여도 /health 가 굶지 않는다",
     )
-    SHUTDOWN_DRAIN_S: float = Field(
-        default=5.0, ge=0,
-        description="종료 시 실행 중인 분석을 기다리는 최대 초. 큐에 남은 것은 버린다(Backend 가 maximum-window 뒤 같은 번호로 "
-                    "복구 전송). compose 종료 유예 10초보다 짧게",
-    )
+
+    # ---- RabbitMQ 요청 소비 (BE 「프로파일링 MQ — AI 소비·결과 발행 상세 설계」 §7 설정표)
+    # 숫자는 설계가 정하지 않았다 — 배포 설정으로 넣고, 켰는데 빠졌거나 0 · 음수 · 서로 모순이면 기동을 거부한다(mq.config).
+    MQ_ENABLED: bool = Field(default=False, description="요청 Consumer 켜기. 의존 리소스(브로커 · 큐 · 권한) 준비 전에는 끔")
+    MQ_URL: SecretStr = Field(default=SecretStr(""), description="브로커 주소 + AI 계정(시크릿 — SecretStr 이라 설정을 출력해도 가려진다). 예 amqps://<계정>:<비밀번호>@<호스트>:5671/gift")
+    MQ_PREFETCH: int | None = Field(default=None, description="브로커가 한 번에 넘겨줄 미확인(unacked) 메시지 수(basic.qos). 배포 전체 합계를 넘지 않게")
+    MQ_SLOTS: int | None = Field(default=None, description="동시에 분석하는 수(Consumer 슬롯). 배포 전체 합산 용량을 넘지 않게")
+    MQ_RECONNECT_DELAY_S: float | None = Field(default=None, description="브로커 연결이 끊긴 뒤 다시 연결하기까지 기다리는 초")
+    MQ_SHUTDOWN_GRACE_S: float | None = Field(default=None, description="종료 때 진행 중인 메시지의 처리를 기다리는 최대 초. 넘으면 연결을 닫아 브로커가 재배달")
+    MQ_CONFIRM_TIMEOUT_S: float | None = Field(default=None, description="결과 발행의 브로커 확인(Confirm)을 기다리는 최대 초. 넘으면 '성공 여부 불명' — 결과를 둔 채 같은 바이트를 다시 발행")
+    MQ_WAIT_S: float | None = Field(default=None, description="제한 간격 대기 — 잠금을 못 얻었을 때 · AI DB 장애 · 결과 발행 실패 때 같은 메시지를 다시 시도하기까지의 초")
+    MQ_MAX_ANALYSIS_ATTEMPTS: int | None = Field(default=None, description="한 요청의 분석 시도 예산(커밋된 시작 횟수, 재배달로 초기화 안 함). v3 → v2 → 태그 없는 추천 폴백은 한 번으로 센다")
+    MQ_RETRY_BASE_S: float | None = Field(default=None, description="일시적인 분석 오류 뒤 첫 재시도까지의 기준 초. n번째 실패 뒤 대기 = min(MQ_RETRY_MAX_S, 기준 × 2^(n-1)) 의 절반 + 무작위 절반(지터). 다음 시각은 DB 에 저장")
+    MQ_RETRY_MAX_S: float | None = Field(default=None, description="재시도 대기의 최대 초(MQ_RETRY_BASE_S 이상). 대기 중 메시지는 미확인(unacked)으로 쥐고 있으므로 브로커 consumer ACK timeout 보다 충분히 짧게")
+    MQ_RECONCILE_AFTER_S: float | None = Field(default=None, description="대조 복구(설계 CO-06) — 이 초보다 오래 끝나지 않은(SETTLED 아님) 전달 기록을 '장기 미완료'로 본다. MQ_RETRY_MAX_S 보다 커야 하고, 분석 한 번 · 발행 재시도에 걸리는 시간보다 넉넉해야 한다(기준은 BE 와 공동 확정 전)")
+    MQ_RECONCILE_INTERVAL_S: float | None = Field(default=None, description="대조 복구를 도는 간격(초)")
+
     LOG_LEVEL: str = Field(default="INFO", description="logging 레벨 이름")
     STRICT_STARTUP: bool = Field(
         default=False,
         description="서버(개발 · 운영 ECS) 기동 검사 — true 면 다음일 때 **기동을 거부**한다: DB 마이그레이션 판이 코드가 기대하는 판"
                     "(main.EXPECTED_MIGRATION)보다 낮음 · SERVICE_TOKEN 이 비었거나 공개 기본값(dev-token) · DATABASE_URL 비밀번호가 "
-                    "공개 기본값 · DATABASE_URL 계정 이름이 공개 기본값(로컬 이름) · BACKEND_BASE_URL 이 로컬 가짜 BE 기본값 · CATALOG_SOURCE 가 db 가 아님. "
+                    "공개 기본값 · DATABASE_URL 계정 이름이 공개 기본값(로컬 이름) · CATALOG_SOURCE 가 db 가 아님. "
                     "로컬 개발 · compose · 시험은 false(기본) — 기본값으로 돌기 때문. Task Definition 에서 true(10-15)",
     )
 

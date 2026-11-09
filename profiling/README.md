@@ -2,24 +2,25 @@
 
 받는 사람의 **비선호 카테고리 · 취향 문장 · 최근 리뷰**를 읽어 선물 **추천 상품 30개**를 골라 Backend 에 돌려주는 AI 서버입니다.
 
-- Backend 가 요청을 보내면 바로 `202` 로 받고, 분석은 뒤에서 합니다.
-- 끝나면 Backend 콜백 주소로 상품 번호 30개를 보냅니다.
+- Backend 가 RabbitMQ 요청 큐(`profiling.request`)에 요청을 넣으면, AI 가 꺼내 분석합니다.
+- 끝나면 결과 큐(`profiling.result`)로 상품 번호 30개를 발행합니다. (11-08: HTTP 7.6 접수 · 7.7 콜백을 없애고 MQ 로 대체)
 - 취향 태그 · 리뷰 정리본은 AI DB 에만 저장하고, Backend 에는 상품 번호만 보냅니다.
 
 ```mermaid
 flowchart LR
-    BE[Backend] -->|요청| IN[접수]
-    IN --> Q[대기열]
-    Q --> P[분석]
+    BE[Backend] -->|요청| RQ[[profiling.request]]
+    RQ --> P[분석]
     P --> DB[(AI DB)]
-    P -->|추천 30개| BE
+    P -->|추천 30개| RS[[profiling.result]]
+    RS --> BE
 ```
 
 | | |
 |---|---|
 | 상태 | **v2 개발 · 통합 중** (이슈 #11 · #12 · #13 · #14) |
 | 언어 · 런타임 | Python 3.13 · FastAPI · SQLAlchemy · Alembic · uv |
-| 저장소 | PostgreSQL 16 + pgvector (마이그레이션 `0011` — 상품 임베딩 벡터 `0009` · 비선호 태그 `0010` · 상품 축 태그 `0011`) |
+| 저장소 | PostgreSQL 16 + pgvector (마이그레이션 `0012` — 상품 임베딩 벡터 `0009` · 비선호 태그 `0010` · 상품 축 태그 `0011` · MQ 전달 기록 `0012`) |
+| 메시지 큐 | RabbitMQ (pika) — 요청 소비 · 결과 발행 · 요청 실패 큐 복사 |
 | 외부 LLM | OpenRouter (태그 추출 — 꺼도 추천은 동작) |
 | 담당 | AI 프로파일링 (Profile · Catalog · DB · Embedding 어댑터) |
 
@@ -75,7 +76,7 @@ docker compose run --rm -v <합본 폴더>:/b:ro ai-migrate \
   python -m tools.catalog.load_catalog --bundle /b/<카탈로그 합본>.json.gz --if-empty --tags --if-changed
 ```
 
-> compose 의 앱은 `.env` 에서 토큰 · Backend 주소만 받아 **태그 추출 · 임베딩이 꺼진 채** 뜹니다. 켜려면 `docker-compose.yml` 의 `ai-app` environment 에 `PROFILING_TAGGER` · `PROFILING_OPENROUTER_API_KEY` · `PROFILING_EMBEDDING_DIR=/app/product-search` 를 더하고 벡터를 적재합니다(`--embeddings`).
+> compose 의 앱은 `.env` 에서 토큰 · 브로커 주소 · MQ 숫자만 받아 **태그 추출 · 임베딩이 꺼진 채** 뜹니다. 켜려면 `docker-compose.yml` 의 `ai-app` environment 에 `PROFILING_TAGGER` · `PROFILING_OPENROUTER_API_KEY` · `PROFILING_EMBEDDING_DIR=/app/product-search` 를 더하고 벡터를 적재합니다(`--embeddings`).
 
 ---
 
@@ -92,7 +93,6 @@ docker compose run --rm -v <합본 폴더>:/b:ro ai-migrate \
 |---|---|---|
 | `PROFILING_DATABASE_URL` | 없음 (필수) | DB 주소. 앱은 앱 전용 계정, 마이그레이션 · 카탈로그 적재는 소유자 계정 |
 | `PROFILING_SERVICE_TOKEN` | 빈 값 | Backend 와 같은 서비스 토큰. 비면 토큰 검사를 건너뜀 — **로컬 전용** |
-| `PROFILING_BACKEND_BASE_URL` | `http://localhost:8081` | 콜백을 보낼 Backend 주소 |
 | `PROFILING_CATALOG_SOURCE` | `file` | `db` = 배포 경로. `file` = 시험용 예시 카탈로그(가짜 상품 111개) |
 | `PROFILING_TAGGER` | `none` | 태그 추출기 `none` · `openrouter` · `ollama` |
 | `PROFILING_TAGGER_MODEL` | 추출기별 | 비우면 `openrouter` → `google/gemini-3.5-flash-lite` · `ollama` → `gemma4:12b`. 다른 모델은 이름을 직접 |
@@ -102,9 +102,9 @@ docker compose run --rm -v <합본 폴더>:/b:ro ai-migrate \
 | `PROFILING_EMBEDDING_DIR` | 없음 | 질의 인코더(Node · 모델)가 있는 검색(product-search) 폴더. 주면 태그로 비슷한 상품을 찾는 단계가 켜진다 |
 | `PROFILING_EMBEDDING_SOURCE` | `db` | 상품 벡터를 읽는 곳 — `db`: `products.embedding`(pgvector, 먼저 `--embeddings` 로 적재) · `file`: 검색기 폴더의 벡터 파일 |
 | `PROFILING_DISLIKE_MODE` | `exclude` | 비선호 카테고리 `exclude`(빼기) / `penalty`(감점) |
-| `PROFILING_SLOTS` | `1` (compose · 서버 `8`) | 동시 분석 수 |
-| `PROFILING_QUEUE_MAX` | `200` | 대기열 상한. 넘으면 `503` |
-| `PROFILING_SHUTDOWN_DRAIN_S` | `5` (서버 `35`) | 종료할 때 진행 중 분석을 기다리는 최대 초 |
+| `PROFILING_MQ_ENABLED` | `false` (배포 compose 도 `false`) | RabbitMQ 요청 소비 켜기. 설계 §7 대로 브로커 · 큐 · 권한 준비 전에는 끄고, 전환 순서(CO-07)에 따라 켬. 끄면 프로파일링 요청을 받지 않음 |
+| `PROFILING_MQ_URL` | 없음 (켜면 필수 · 비밀) | 브로커 주소 + AI 계정. 권한은 `profiling.request` read · `profiling.exchange` write 만(configure 없음) |
+| `PROFILING_MQ_*` 숫자 11개 | 없음 (켜면 필수) | prefetch · 슬롯 · 재연결 · 종료 유예 · Confirm 대기 · 대기 간격 · 분석 시도 예산 · 재시도 기준/최대 · 대조 복구 기준/간격. 하나라도 빠지거나 모순이면 기동 거부 — 뜻은 `settings.py` |
 | `PROFILING_STRICT_STARTUP` | `false` (서버 `true`) | 서버용 기동 검사 — [보안](#8-보안) |
 | `PROFILING_DB_REFUSE_SUPERUSER` | `false` (compose · 서버 `true`) | 슈퍼유저로 접속하면 기동 거부 |
 
@@ -118,28 +118,28 @@ DB 연결 수 · 시간 상한 · 재시도 같은 나머지 설정은 `settings
 
 | 메서드 · 경로 | 누가 부르나 | 설명 |
 |---|---|---|
-| `POST /api/internal/v1/ai/profile/extract-and-pool` | Backend | 분석 요청. 바로 `202 PENDING`. 서비스 토큰 필요 |
+| `POST /internal/v1/profiles/read` | 챗봇 | 받는 사람 프로필 조회. 서비스 토큰 필요 |
 | `GET /health` | Backend (요청 전 매번) | 상태 전부. Backend 는 `catalog.active` · `store.connected` 만 본다 — **이름 · 뜻을 바꾸지 않는다** |
 | `GET /healthz` | ECS Liveness | 프로세스가 살아 있으면 늘 `200` |
 | `GET /readyz` | ECS Readiness | 카탈로그 · DB · 마이그레이션 판이 준비되면 `200`, 아니면 `503`. 외부 LLM 은 보지 않는다 |
 
-**분석 요청의 응답 코드**
+**분석 요청 · 결과는 HTTP 가 아니라 RabbitMQ 로 오갑니다**(vhost `gift`, 교환기 `profiling.exchange`, 큐는 BE/인프라가 선언 — AI 는 시작할 때 요청 큐가 있는지만 확인).
 
-| 코드 | 언제 |
+| 큐 | 방향 | 내용 |
+|---|---|---|
+| `profiling.request` | Backend → AI | `{schemaVersion: 1, requestId, createdAt, payload: {recipientUserId, sourceVersion, giftPreference, dislikedCategories, reviews}}` |
+| `profiling.result` | AI → Backend | `outcome: SUCCEEDED` + 상품 번호(최대 30개) 또는 `outcome: FAILED` + 오류 코드. 같은 요청이면 늘 같은 바이트 |
+| `profiling.request.failed` | AI → (보관) | 처리할 수 없는 요청 원본 복사(헤더에 실패 코드 · 해시, 본문 그대로) |
+
+| 실패 코드 | 언제 |
 |---|---|
-| `202` | 받음 (분석은 뒤에서) |
-| `400` | 본문 형식 위반 (리뷰 11개 이상 등) |
-| `401` | 서비스 토큰 틀림 |
-| `503` | 카탈로그 없음(`Retry-After: 300`) · 대기열 가득(`Retry-After: 30`) |
+| `INVALID_REQUEST` | 요청 규칙 위반 · 저장할 수 없는 글 |
+| `UNSUPPORTED_SCHEMA_VERSION` | `schemaVersion` ≠ 1 |
+| `REQUEST_CONFLICT` | 같은 받는 사람 · 번호에 다른 입력 |
+| `ANALYSIS_FAILED` | 추천이 결과 규격을 어김 |
+| `ANALYSIS_RETRY_EXHAUSTED` | 일시 오류(카탈로그 교체 중 · 분석 도중 카탈로그 세대 바뀜 · 그 밖의 처리 오류)가 시도 예산 동안 계속됨 |
 
-**콜백** — 분석이 끝나면 Backend 에 상품 번호(최대 30개)와 요청 번호(`sourceVersion`)를 보냅니다. 태그는 보내지 않습니다.
-
-| Backend 응답 | AI 쪽 기록 |
-|---|---|
-| `200` | 전달 완료 |
-| `409` | 더 새 요청이 있어 이 결과는 버려짐 |
-| `4xx` | 실패 (다시 보내지 않음 — Backend 가 나중에 다시 요청) |
-| `5xx` · 네트워크 오류 | 최대 3번까지 시도 |
+모델 장애는 실패가 아닙니다(v3 → v2 → 태그 없는 추천으로 `SUCCEEDED`). AI DB · 브로커 장애 때는 소비를 멈췄다가 이어 갑니다. 태그는 보내지 않습니다.
 
 ---
 
@@ -147,8 +147,8 @@ DB 연결 수 · 시간 상한 · 재시도 같은 나머지 설정은 `settings
 
 요청 한 건은 이렇게 처리됩니다.
 
-1. **접수** — 본문 · 토큰 검사 → 대기열에 넣고 `202`.
-2. **중복 판정** — 같은 받는 사람 · 같은 요청 번호면, 이미 결과가 있을 때 다시 분석하지 않고 결과만 다시 보냅니다. 분석 중이면 아무것도 하지 않습니다.
+1. **소비** — 요청 큐에서 꺼내 봉투 · 본문을 검사하고 전달 기록(`mq_deliveries`)을 남깁니다. 결과를 발행하고 확인받기 전에는 ACK 하지 않습니다.
+2. **중복 판정** — 같은 `requestId` 재배달이거나 같은 받는 사람 · 번호 · 입력이면, 이미 결과가 있을 때 다시 분석하지 않고 저장된 결과를 다시 발행합니다.
 3. **분석**
    1. 리뷰 별점으로 소분류별 선호 점수를 쌓습니다.
    2. 취향 문장 · 좋게 준 리뷰(4~5점)가 있으면 **태그를 뽑습니다** — 좋아하는 것(선호 태그)과 글에서 분명히 싫다고 한 것(비선호 태그).
@@ -162,7 +162,7 @@ DB 연결 수 · 시간 상한 · 재시도 같은 나머지 설정은 `settings
       - 태그가 있고 임베딩이 켜져 있으면 태그와 비슷한 상품을 골고루 섞습니다. 상품 벡터는 DB(`products.embedding`)에 있고, 태그와의 유사도는 pgvector 가 계산합니다.
       - 입력 세 칸이 모두 비어 있으면 0개를 보냅니다(Backend 가 인기순으로 대체).
    4. 결과와 받는 사람 프로필을 저장합니다. **원문은 저장하지 않고 가드레일 정리본만** 둡니다.
-4. **콜백** — Backend 로 30개를 보냅니다.
+4. **결과 발행** — 결과를 먼저 저장하고 결과 큐로 발행 → 브로커 확인 → 원본 ACK. 발행이 안 되면 다시 분석하지 않고 저장된 결과를 다시 보냅니다. 오래 끝나지 않은 기록은 대조 복구가 빠진 단계만 이어 갑니다.
 
 로그에는 리뷰 글 · 취향 문장 · LLM 출력 원문을 남기지 않습니다. 번호 · 개수 · 상태 · 비용만 남깁니다.
 
@@ -174,8 +174,8 @@ DB 연결 수 · 시간 상한 · 재시도 같은 나머지 설정은 `settings
 profiling/
 ├── src/profiling/
 │   ├── main.py          앱 조립 · 기동 검사 · /health · /healthz · /readyz
-│   ├── intake.py        요청 접수 · 토큰 · 중복 판정 · 콜백 보내기
-│   ├── supervisor.py    동시 분석 슬롯 + 대기열
+│   ├── mq/              RabbitMQ 소비 · 처리 · 결과 발행 · 전달 기록 · 대조 복구
+│   ├── profile_read.py  챗봇용 프로필 조회 API
 │   ├── pipeline.py      한 건 분석 (점수 → 태그 → 30개 → 저장)
 │   ├── selection.py     추천 30개 고르기
 │   ├── vocab.py         비선호 대조 어휘 · 상품 축 태그 계산 (규칙 판 `vocab.RULE`)
@@ -187,14 +187,13 @@ profiling/
 │   ├── embedding.py     상품 벡터 · 질의 인코더 어댑터
 │   ├── catalog.py       카탈로그 읽기 (DB · 파일)
 │   ├── stores.py        PostgreSQL 저장소
-│   ├── backend.py       Backend 콜백 어댑터
 │   ├── changes.py       프로필이 무엇이 바뀌었는지 요약 로그
 │   ├── status.py        외부 LLM 상태 (/health 의 llm 칸)
-│   ├── schemas.py       HTTP 본문 (camelCase)
+│   ├── schemas.py       조회 API 본문 (camelCase)
 │   ├── types.py         내부 타입 (snake_case)
 │   ├── ports.py         바깥 의존의 인터페이스
 │   └── settings.py      설정 (PROFILING_*)
-├── alembic/versions/    DB 마이그레이션 (0001 ~ 0011)
+├── alembic/versions/    DB 마이그레이션 (0001 ~ 0012)
 ├── tools/catalog/       운영 CLI — 카탈로그 적재 (이미지에 들어가는 유일한 도구)
 ├── tests/
 │   ├── unit/            DB · 네트워크 · LLM 없이
@@ -207,7 +206,7 @@ profiling/
 **설계 규칙**
 
 - **Ports & Adapters** — 업무 코드(`pipeline` · `selection` · `tagging`)는 HTTP · DB · LLM 을 모릅니다. 바깥은 `ports.py` 모양에 맞춰 들어옵니다. 그래서 단위 시험은 가짜 구현만으로 돕니다.
-- **이름** — HTTP 경계(`schemas.py`)만 camelCase, 나머지는 snake_case. 변환은 `pipeline.to_internal()` · `backend.to_callback()` 두 곳뿐입니다.
+- **이름** — 메시지 · HTTP 경계(`mq/messages.py` · `mq/results.py` · `schemas.py`)만 camelCase, 나머지는 snake_case.
 - **태그 규격** — `PROFILING_TAG_SPEC` 하나로 축 · 프롬프트 · JSON 스키마가 같이 바뀝니다. 프롬프트 파일의 축이 규격과 다르면 서버가 뜨지 않습니다.
 - **DB 표 구조** — 팀 위키의 DB ERD 문서를 봅니다.
 
@@ -254,12 +253,12 @@ python -m tools.catalog.load_catalog --bundle <카탈로그 합본> --embeddings
 |---|---|
 | 포트 | 8000 |
 | 헬스 체크 | Liveness `/healthz` · Readiness `/readyz` |
-| 권장 자원 | 임베딩 끔: `cpu` 256 · `memoryReservation` 256 MiB · `memory` 512 MiB / **임베딩 켬: `cpu` 1024 · `memoryReservation` 512 MiB · `memory` 1024 MiB** — 부하 시험(흉내 LLM): `cpu` 512 는 1분에 100건이 몰리면 대기열이 차 503, 1024 는 503 0 · 메모리 최대 약 400MiB |
-| 종료 유예 | `PROFILING_SHUTDOWN_DRAIN_S=35` · 컨테이너 `stopTimeout` 60 |
-| 동시 분석 | `PROFILING_SLOTS=8` (DB 연결은 Task 당 14) |
+| 권장 자원 | 임베딩 끔: `cpu` 256 · `memoryReservation` 256 MiB · `memory` 512 MiB / **임베딩 켬: `cpu` 1024 · `memoryReservation` 512 MiB · `memory` 1024 MiB** — 부하 시험(흉내 LLM, ⚠️ HTTP 접수 시절 측정 — MQ 로 다시 재지 않음): `cpu` 512 는 1분에 100건이 몰리면 대기열이 차 503, 1024 는 503 0 · 메모리 최대 약 400MiB |
+| 종료 유예 | `PROFILING_MQ_SHUTDOWN_GRACE_S` · 컨테이너 `stopTimeout` 은 그보다 길게 |
+| 동시 분석 | `PROFILING_MQ_SLOTS` · `PROFILING_MQ_PREFETCH` (값은 배포 설정, 안 8 ⚠️) — DB 연결은 슬롯마다 2개 + `IO_THREADS` |
 | 카탈로그 · 벡터 | 팀 내부 자료 — 저장소 · 이미지에 넣지 않고 첫 배포 전에 DB 에 적재 |
 
-- 새 마이그레이션을 더하면 `main.EXPECTED_MIGRATION` 도 같은 커밋에서 올립니다. 다음 번호는 `0012`.
+- 새 마이그레이션을 더하면 `main.EXPECTED_MIGRATION` 도 같은 커밋에서 올립니다. 다음 번호는 `0013`.
 - 상품 축 태그 규칙(`vocab.py` · `vocab_data/`)을 바꿔 결과가 달라지면 `vocab.RULE` 을 올립니다(지문 시험이 알려 줌). 배포 적재의 `--tags --if-changed` 가 다음 배포 때 태그를 다시 계산합니다.
 - 배포 중에는 옛 코드도 새 표에서 돌아야 하므로 **열 추가 → 코드 → 삭제는 다음 판** 순서로 씁니다.
 - 이미지 빌드: `docker build --build-context product-search=../product-search -t profiling-ai-app .` — 검색기 폴더의 질의 인코더(Node · 모델, 모델 해시 검증)를 함께 넣습니다. 켜는 것은 실행 설정 `PROFILING_EMBEDDING_DIR=/app/product-search`.
@@ -273,7 +272,6 @@ python -m tools.catalog.load_catalog --bundle <카탈로그 합본> --embeddings
 - **기동 검사(`PROFILING_STRICT_STARTUP=true`, 서버 필수)** — 아래 중 하나라도 해당하면 서버가 뜨지 않습니다. 로그에는 어느 설정인지만 나오고 값은 나오지 않습니다.
   - DB 마이그레이션 판이 코드보다 낮음
   - 서비스 토큰 · DB 계정 이름 · DB 비밀번호가 비었거나 공개된 로컬 값
-  - Backend 주소가 로컬 기본값
   - 카탈로그를 DB 에서 읽지 않음
 - **DB 권한** — 앱은 앱 전용 계정으로 접속합니다(프로필 표 읽기 · 쓰기, 카탈로그 표 읽기만). 슈퍼유저 접속은 막습니다.
 - **개인정보** — 리뷰 · 취향 원문은 저장하지 않고 로그에도 남기지 않습니다. LLM 에는 가드레일을 거친 글만 보냅니다. LLM 추적 도구는 운영에서 쓰지 않습니다.

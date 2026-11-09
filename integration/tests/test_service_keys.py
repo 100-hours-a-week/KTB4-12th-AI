@@ -9,7 +9,7 @@ import uuid
 
 import httpx
 import pytest
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from integration.provider_key import ACTIVE_KEY, ProviderAuth, KeyConflict, KeyUnavailable, ProviderKey
@@ -185,41 +185,24 @@ def test_profiler_reads_own_key_each_request_and_recovers_after_missing(tmp_path
         extractor.close()
 
 
-def test_common_be_token_rotates_intake_profile_read_and_callback(tmp_path, monkeypatch):
-    from profiling import intake, profile_read
-    from profiling.backend import HttpBackendPort
-    from profiling.types import ProfileOutcome, RunStatus, SearchResult
-    from profiling.settings import Settings
+def test_common_be_token_rotates_profile_read(tmp_path, monkeypatch):
+    """11-08: the 7.6 intake and 7.7 callback moved to RabbitMQ, so the shared BE token only guards the profile read API."""
+    from profiling import profile_read
     source = ServiceToken("profiler", managed_directory=tmp_path)
     old, new = "synthetic_BE_first_" * 2, "synthetic_BE_next_" * 2
     saved = source.save(old, None)
     app = FastAPI(); app.state.be_token_provider = source.snapshot; app.state.engine = object()
-    app.dependency_overrides[intake.settings_dep] = lambda: Settings(_env_file=None, SERVICE_TOKEN="synthetic_legacy_unused")
-    app.get("/intake-auth", dependencies=[Depends(intake.require_service_token)])(lambda: {"ok": True})
     app.include_router(profile_read.router)
     monkeypatch.setattr(profile_read, "read_profile", lambda *a: {"available": True})
-    wire = []
-    backend = HttpBackendPort("https://synthetic.invalid", "synthetic_legacy_unused", 1,
-                              token_provider=source.snapshot,
-                              transport=httpx.MockTransport(lambda request: wire.append(request.headers["authorization"]) or httpx.Response(200)))
-    outcome = ProfileOutcome(recipient_user_id=42, source_version=1, status=RunStatus.RESULT_READY,
-                             search=SearchResult(product_ids=[101], query_text="", catalog_version_id=uuid.UUID(int=1)))
     with TestClient(app) as client:
         body = {"grantId": str(uuid.UUID(int=1)), "callerUserId": 7, "recipientUserId": 42, "sourceVersion": 1}
         for value in (old, new):
             if value == new: source.save(new, saved["revision"])
-            assert client.get("/intake-auth", headers={"Authorization": "Bearer " + value}).status_code == 200
             assert client.post("/internal/v1/profiles/read", json=body, headers={"Authorization": "Bearer " + value}).status_code == 200
-            assert client.get("/intake-auth", headers={"Authorization": "Bearer synthetic_legacy_unused"}).status_code == 401
-            assert backend.send_profile_callback(outcome).status == RunStatus.DELIVERED
-        assert client.get("/intake-auth", headers={"Authorization": "Bearer " + old}).status_code == 401
+            assert client.post("/internal/v1/profiles/read", json=body, headers={"Authorization": "Bearer synthetic_legacy_unused"}).status_code == 401
         assert client.post("/internal/v1/profiles/read", json=body, headers={"Authorization": "Bearer " + old}).status_code == 401
         (tmp_path / source.record_file).unlink()
-        assert client.get("/intake-auth", headers={"Authorization": "Bearer " + new}).status_code == 503
         assert client.post("/internal/v1/profiles/read", json=body, headers={"Authorization": "Bearer " + new}).status_code == 503
-        assert backend.send_profile_callback(outcome).code.value == "CALLBACK_UNREACHABLE"
-    backend.close()
-    assert wire == ["Bearer " + old, "Bearer " + new]
 
 
 def test_refresh_uses_stable_internal_secretstr_not_shared_be_token():

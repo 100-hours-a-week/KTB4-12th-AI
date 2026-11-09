@@ -76,7 +76,8 @@ def test_actual_profiler_and_chat_models(database, source):
     assert run(database, synthetic_catalog(source), live=True, live_options=options)['passed']
 
 
-def run_models(database, export, contract, search_url, be, callbacks, token, output, start, wait, *, cases=CASES, include_profiler=True):
+def run_models(database, export, contract, search_url, mq_url, token, output, start, wait, *, cases=CASES, include_profiler=True):
+    from integration.tests import mq_harness
     # Only previously injected credentials are used. No key ever goes to disk.
     key = os.environ['OPENROUTER_API_KEY']
     evidence = {'synthetic': True, 'mock': False, 'modelFallback': False, 'requestedModel': MODEL,
@@ -93,42 +94,44 @@ def run_models(database, export, contract, search_url, be, callbacks, token, out
                     'PYTHONPATH': os.pathsep.join(map(str, [ROOT/'profiling/src', ROOT, ROOT/'product-search'])),
                     'PROFILING_DATABASE_URL': database['profiler'].replace('postgresql://', 'postgresql+psycopg://'),
                     'PROFILING_APP_DB_ROLE': 'ai_profiler_service', 'PROFILING_SERVICE_TOKEN': token,
-                    'PROFILING_BACKEND_BASE_URL': be, 'PROFILING_TAGGER': 'openrouter',
+                    **mq_harness.profiler_env(mq_url), 'PROFILING_TAGGER': 'openrouter',
                     'PROFILING_TAG_SPEC': 'tag3disliked', 'PROFILING_TAGGER_MODEL': MODEL,
                     'PROFILING_TAGGER_REQUIRED': 'true', 'PROFILING_EMBEDDING_REQUIRED': 'true',
                     'PROFILING_OPENROUTER_API_KEY': key,
 
                     'PROFILING_CATALOG_SOURCE': 'search_http', 'PROFILING_SEARCH_BASE_URL': search_url,
                     'PROFILING_SEARCH_TOKEN': token, 'PROFILING_STRICT_STARTUP': 'true',
-                    'PROFILING_CALLBACK_MAX_ATTEMPTS': '1', 'INTEGRATION_SYNTHETIC_ONLY': '1',
+                    'INTEGRATION_SYNTHETIC_ONLY': '1',
                     'SYNTHETIC_LLM_TRACE': str(output/'profiler-provider.jsonl')})
                 wait(http, profile_url, profile)
                 evidence['profileHealth'] = http.get(profile_url+'/health').json()
                 body = {'recipientUserId': 777, 'sourceVersion': 1, 'giftPreference': PREFERENCE,
                         'dislikedCategories': [{'categoryId': 41, 'categoryName': '향초'}], 'reviews': []}
                 evidence['profileInput'] = body
-                assert http.post(profile_url+'/api/internal/v1/ai/profile/extract-and-pool', json=body).status_code == 202
+                results = mq_harness.Results(mq_url).__enter__()
+                mq_harness.publish(mq_url, body)
                 deadline = time.monotonic()+100
                 while time.monotonic() < deadline:
                     with psycopg.connect(database['owner']) as db:
                         row = db.execute('SELECT to_jsonb(r) FROM ai_profile.profile_runs r WHERE recipient_user_id=777 AND source_version=1').fetchone()
-                    if row and row[0]['status'] not in ('RUNNING', 'RESULT_READY'):
+                    if row and row[0]['status'] not in ('RUNNING',):
                         evidence['profileRun'] = row[0]
                         break
                     time.sleep(.15)
                 else:
                     raise AssertionError('Real Profiler did not finish')
-                assert evidence['profileRun']['status'] == 'DELIVERED'
+                assert evidence['profileRun']['status'] == 'RESULT_READY'   # MQ keeps RESULT_READY (no HTTP DELIVERED)
                 with psycopg.connect(database['owner']) as db:
                     evidence['profile'] = db.execute('SELECT to_jsonb(r) FROM ai_profile.recipient_profiles r WHERE recipient_user_id=777').fetchone()[0]
-                evidence['callbacks'] = callbacks[:]
+                first = results.wait(1, 30)[0]
+                evidence['results'] = [first]
                 assert evidence['profile']['tag_status'] == 'ok'
-                # The same source version must replay its callback without another model call.
-                assert http.post(profile_url+'/api/internal/v1/ai/profile/extract-and-pool', json=body).status_code == 202
-                deadline = time.monotonic()+10
-                while len(callbacks) < 2 and time.monotonic() < deadline:
-                    time.sleep(.1)
-                assert len(callbacks) == 2 and callbacks[0] == callbacks[1]
+                # The same input must reuse its stored result without another model call.
+                mq_harness.publish(mq_url, body)
+                second = results.wait(2, 30)[1]
+                results.__exit__(None, None, None)
+                evidence['results'].append(second)
+                assert second['payload'] == first['payload']
                 evidence['duplicateProfileNoNewPaidAttempt'] = True
             chat, chat_url = start('chat-live', 'chat', 'app.main:app', {
                 'PYTHONPATH': os.pathsep.join(map(str, [ROOT/'chat', ROOT])), 'STORE_MODE': 'postgres',

@@ -51,7 +51,7 @@ async def main(args):
         await page.fill("#recipient", str(args.recipient))
         await page.fill("#preference", "PRIVATE_PREFERENCE Bearer fake-secret")
         await page.locator("#send-profile").click()
-        await expect(page.locator("#profile-status")).to_have_text("DELIVERED")
+        await expect(page.locator("#profile-status")).to_have_text("RESULT_READY")
         for _ in range(3):
             await page.locator("#refresh-profile").click()
             await page.wait_for_timeout(100)

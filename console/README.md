@@ -27,7 +27,7 @@ console/.venv/bin/python -B -m uvicorn console.server:app --host 127.0.0.1 --por
 
 Docker의 로컬 포트 전달은 `CONSOLE_ADMIN_ORIGIN=http://127.0.0.1:18811`처럼 브라우저의 정확한 loopback 주소를 명시합니다. IPv6는 `http://[::1]:포트`를 사용합니다. 포트는 호스트 loopback에만 게시하며 원격 주소의 HTTP 접속은 허용하지 않습니다.
 
-운영 화면에는 **Chat 키·Profiler 키·공통 BE 토큰**이 있습니다. 세 프로세스의 `AI_ENVIRONMENT`를 `local`, `develop`, `production` 중 같은 값으로 지정하세요. 모델에는 서로 다른 키를 넣으며 누락·한도 오류 때 다른 서비스나 이전 공통 키를 대신 쓰지 않습니다. BE 토큰은 두 서비스의 요청 인증·Profiler 콜백에 함께 쓰므로 BE에도 같은 값을 설정합니다. Search·카탈로그 갱신에는 별도 `AI_INTERNAL_SERVICE_TOKEN` 또는 `_FILE`을 사용합니다.
+운영 화면에는 **Chat 키·Profiler 키·공통 BE 토큰**이 있습니다. 세 프로세스의 `AI_ENVIRONMENT`를 `local`, `develop`, `production` 중 같은 값으로 지정하세요. 모델에는 서로 다른 키를 넣으며 누락·한도 오류 때 다른 서비스나 이전 공통 키를 대신 쓰지 않습니다. BE 토큰은 두 서비스의 요청 인증에 쓰므로 BE에도 같은 값을 설정합니다(Profiler 요청 · 결과는 RabbitMQ로 오가며 이 토큰을 쓰지 않습니다). Search·카탈로그 갱신에는 별도 `AI_INTERNAL_SERVICE_TOKEN` 또는 `_FILE`을 사용합니다.
 
 기본 저장 대상은 로컬 영속 파일입니다. `OPENROUTER_MANAGED_KEY_DIR`와 `BE_SERVICE_TOKEN_DIR`에 `0700` 폴더를 지정하고 **전체 폴더**를 Console에는 쓰기 가능, Chat·Profiler에는 읽기 전용으로 연결하세요. 환경별 볼륨을 분리하고 재시작·배포 때 재사용합니다. 우선순위는 **대시보드 저장값 → 배포 `_FILE` → 배포 환경변수**입니다. 첫 저장 전에는 주입된 초기값을 쓰며, 저장 후에는 재배포한 환경변수로 덮어쓰지 않습니다. 설정한 `_FILE`이 없거나 비어 있으면 환경변수로 우회하지 않습니다. 저장값과 `.saved` 표식을 함께 보존해야 하며, 저장 파일이 손상되거나 없어지면 이전 초기값을 다시 쓰지 않습니다. 첫 저장 중 프로세스가 중단되거나 결과가 불확실하면 재입력이 필요할 수 있습니다. 관리 폴더가 없으면 외부 설정만 사용하고 화면은 읽기 전용입니다.
 
@@ -51,7 +51,7 @@ Chat·Profiler는 별도 예산 gateway나 원장 없이 실행합니다. OpenRo
 |---|---|
 | `AI_ENVIRONMENT` | `develop` |
 | `CHAT_MODEL`, `PROFILING_TAGGER_MODEL` | 선택. 통합 컨테이너 기본값은 각각 `openai/gpt-6-luna`; 변경할 때 OpenRouter 모델 ID 사용 |
-| `PROFILING_BACKEND_BASE_URL` | 실제 BE 내부 origin. 로컬 기본값을 Develop 주소로 사용하지 않음 |
+| `PROFILING_MQ_URL` · `PROFILING_MQ_*` 숫자 | 브로커 주소(AI 계정, 비밀 — Secret 필드)와 MQ 숫자 11개. 뜻은 `integration/README.md` · `profiling/README.md` |
 
 배포가 Secret 필드는 비밀 환경변수로, 위 값은 일반 환경변수로 주입합니다. 이미 SSM을 쓰는 배포라면 그대로 공급해도 되지만 앱이 직접 조회하지는 않습니다. `AI_CREDENTIAL_BACKEND`는 기본 `files`를 유지하고, 이전 Compose의 `_FILE`이 새 주입값을 가리지 않는지 확인합니다. 기존 DB·JWT는 변경하지 않습니다. AI 내부 토큰은 Chat·Profiler·Search 모두 `AI_INTERNAL_SERVICE_TOKEN` 또는 `_FILE`로 같은 기존 값을 연결하며 BE 공통 토큰과 분리합니다. 기존 Chat의 `SESSION_SECRET`·`QA_ADMIN_PASSWORD`·`DEMO_ACCESS_TOKEN`도 필요합니다.
 
@@ -76,7 +76,7 @@ console/.venv/bin/python -B console/launch_fixture.py \
   --output .integration/share-runtime.json
 ```
 
-화면은 `http://127.0.0.1:18793`입니다. 다른 컴퓨터에서는 그 컴퓨터에 실행해야 하며 포트가 사용 중이면 바꿉니다. Search 주소는 `.integration/share-state/fixture-state.json`의 `urls.search`, 콜백 주소는 `.integration/share-runtime.json`의 `callbackFixtureURL`에서 확인합니다. state-dir의 비공개 설정에는 인증 정보가 있으므로 공유하지 않습니다.
+화면은 `http://127.0.0.1:18793`입니다. 다른 컴퓨터에서는 그 컴퓨터에 실행해야 하며 포트가 사용 중이면 바꿉니다. Search 주소는 `.integration/share-state/fixture-state.json`의 `urls.search`, BE 대역(프로파일 요청을 RabbitMQ로 발행하고 결과 메시지를 기록) 주소는 `.integration/share-runtime.json`의 `callbackFixtureURL`에서 확인합니다. 프로파일 요청 · 결과는 HTTP 콜백 대신 RabbitMQ로 오가므로, 실행 전에 버리는 로컬 브로커 주소를 `INTEGRATION_TEST_AMQP_URL`(vhost `gift`)로 지정합니다. 시험 도구가 시작할 때 프로파일링 큐 3개를 비우므로 호스트가 로컬(localhost · 127.x · ::1 · `rabbitmq` · host.docker.internal)이 아니면 실행을 거부합니다. state-dir의 비공개 설정에는 인증 정보가 있으므로 공유하지 않습니다.
 
 채팅 화면은 수신자 선택·대화·추천 상품 순서로 읽습니다. **처리 과정**과 고급 연결·이벤트·JSON은 접어 두며, 기록이 없는 프로필·검색·제외 사유는 미수집으로 표시합니다. 완료는 EOF나 HTTP 200이 아니라 저장된 턴 상태로 판단하고 재시도에는 같은 UUID·본문을 사용합니다. 반복 가능한 합성 검사는 다음과 같습니다.
 
@@ -85,13 +85,13 @@ PYTHONPATH=. console/.venv/bin/python -B -m console.check_fixture \
   --runtime .integration/share-runtime.json --output .integration/check-before.json
 ```
 
-대시보드의 **연동 정보**에는 BE용 API 주소와 복사 버튼이 있습니다. Console 배포 설정의 `CONSOLE_BE_CHAT_BASE_URL`·`CONSOLE_BE_PROFILER_BASE_URL`에 BE에서 접근할 서비스 기준 주소를 지정하면 계약 경로를 붙여 표시합니다. 내부 관측 주소나 브라우저 주소에서 추측하지 않으며, 미설정 또는 자격 증명·query·fragment가 포함된 주소는 숨깁니다. `APP_REVISION`에 배포 commit SHA를 주면 표시하고, 없으면 현재 Console build를 표시합니다. 키 설정·DB·상품 준비 상태는 기존 관측이며 BE 연결 성공이나 모델 호출 성공을 뜻하지 않습니다.
+대시보드의 **연동 정보**에는 BE용 API 주소와 복사 버튼이 있습니다. Console 배포 설정의 `CONSOLE_BE_CHAT_BASE_URL`에 BE에서 접근할 서비스 기준 주소를 지정하면 계약 경로를 붙여 표시합니다. Profiler 요청은 RabbitMQ로 오가므로(BE가 요청 큐에 발행) HTTP 주소 대신 메시지 큐로 표시합니다. 내부 관측 주소나 브라우저 주소에서 추측하지 않으며, 미설정 또는 자격 증명·query·fragment가 포함된 주소는 숨깁니다. `APP_REVISION`에 배포 commit SHA를 주면 표시하고, 없으면 현재 Console build를 표시합니다. 키 설정·DB·상품 준비 상태는 기존 관측이며 BE 연결 성공이나 모델 호출 성공을 뜻하지 않습니다.
 
 **빠른 점검**은 비용 안내에 동의하고 버튼을 눌렀을 때만 고정 합성 질문 한 건을 보냅니다. 실제 모델·상품 데이터, 기존 BE 권한과 합성 수신자 fixture가 준비돼야 하며 현재 메시지나 실제 사용자의 취향은 보내지 않습니다. 성공은 그 질문 한 건의 결과이며, 이미지·데이터 버전도 확인된 범위만 표시합니다.
 
 ## 종료와 재개
 
-실행한 터미널에서 Ctrl+C를 누르면 신규 접수를 닫고 Chat PROCESSING과 Profiler 실행·큐가 비기를 기다립니다. 저장된 RESULT_READY는 콜백 재전송 대기이므로 종료를 막지 않습니다. 30초 내에 끝나지 않거나 상태 확인이 실패하면 종료를 거부하고 화면을 복구합니다. 작업 완료 후 다시 Ctrl+C를 누르세요. DB나 프로세스를 강제로 지워 넘기지 않습니다.
+실행한 터미널에서 Ctrl+C를 누르면 신규 접수를 닫고 Chat PROCESSING과 Profiler 실행·큐가 비기를 기다립니다. 저장된 RESULT_READY는 결과 발행까지 끝난 상태이므로 종료를 막지 않습니다(발행 확인 전에 끊기면 브로커가 재배달하고 저장된 결과를 다시 보냅니다). 30초 내에 끝나지 않거나 상태 확인이 실패하면 종료를 거부하고 화면을 복구합니다. 작업 완료 후 다시 Ctrl+C를 누르세요. DB나 프로세스를 강제로 지워 넘기지 않습니다.
 
 ```sh
 console/.venv/bin/python -B console/launch_fixture.py \

@@ -231,17 +231,7 @@ def public_health(service, data):
         },
         "profiling": {
             "catalog": ("active", "version", "products"),
-            "store": ("backend", "connected", "migration", "undelivered"),
-            "supervisor": (
-                "slots",
-                "running",
-                "queued",
-                "queue_max",
-                "submitted",
-                "completed",
-                "rejected",
-                "failed",
-            ),
+            "store": ("backend", "connected", "migration"),
             "tagger": ("enabled", "required", "model"),
             "llm": ("enabled", "model", "requested", "state", "last", "consecutive_failures"),
             "integration": ("modelRequired", "budgetGuard", "catalogVersionBound"),
@@ -257,6 +247,19 @@ def public_health(service, data):
                 if k in value
                 and (value[k] is None or type(value[k]) in (str, int, float, bool))
             }
+    if service == "profiling" and isinstance(data.get("mq"), dict):
+        # 11-08: the HTTP worker queue was replaced by the RabbitMQ consumer. Its /health block is
+        # two levels deep (consumer · deliveries); expose only scalar operational counts, flattened.
+        mq, picked = data["mq"], {}
+        for part, names in (
+            (mq, ("enabled",)),
+            (mq.get("consumer"), ("connected", "consuming", "inflight", "slots", "prefetch")),
+            (mq.get("deliveries"), ("open", "dlq_pending")),
+        ):
+            if isinstance(part, dict):
+                picked.update({k: part[k] for k in names if k in part
+                               and (part[k] is None or type(part[k]) in (str, int, float, bool))})
+        safe["mq"] = picked
     # catalogLoadError can contain arbitrary provider/database exception text.
     if safe.get("catalogLoadError") is not None:
         safe["catalogLoadError"] = "카탈로그 로드 오류 · 원문 숨김"
@@ -1032,20 +1035,25 @@ class Backend:
             raise HTTPException(429, "Console history limit reached; restart to clear")
         if not self.demo:
             await self.check_profile_ready()
-            if self.config.get("liveModel") and "backend" in self.targets:
-                bound_status, bound = await self.request(
-                    "backend", "PUT",
-                    f"/fixture/recipients/{body.recipientUserId}/profile-input",
-                    body.model_dump(),
-                )
-                if bound_status != 200 or bound.get("inputBound") is not True or bound.get("synthetic") is not True:
-                    return {"httpStatus": bound_status if bound_status != 200 else 409, "body": {"message": "Synthetic profile input binding failed"}, "key": key, "receivedAt": STAMP()}
-            status, result = await self.request(
-                "profiling",
-                "POST",
-                "/api/internal/v1/ai/profile/extract-and-pool",
+            # 11-08: Profiler requests travel over RabbitMQ. The synthetic BE stand-in binds the input and
+            # publishes profiling.request; there is no Profiler HTTP intake any more.
+            if "backend" not in self.targets:
+                return {"httpStatus": 503, "body": {"message": "No synthetic BE stand-in to publish the MQ request"}, "key": key, "receivedAt": STAMP()}
+            bound_status, bound = await self.request(
+                "backend", "PUT",
+                f"/fixture/recipients/{body.recipientUserId}/profile-input",
                 body.model_dump(),
             )
+            if bound_status != 200 or bound.get("inputBound") is not True or bound.get("synthetic") is not True:
+                return {"httpStatus": bound_status if bound_status != 200 else 409, "body": {"message": "Synthetic profile input binding failed"}, "key": key, "receivedAt": STAMP()}
+            status, result = await self.request(
+                "backend", "POST",
+                f"/fixture/recipients/{body.recipientUserId}/profile-request",
+                body.model_dump(),
+            )
+            if status == 200 and isinstance(result, dict) and result.get("published") is True:
+                status, result = 202, {"data": {"profileStatus": "PENDING", "sourceVersion": body.sourceVersion,
+                                                "requestId": result.get("requestId")}, "transport": "rabbitmq"}
         else:
             status, result = (
                 202,
@@ -1073,13 +1081,11 @@ class Backend:
     async def produce_profile(self, key, preference):
         await asyncio.sleep(0.7)
         row = self.profiles[key]
+        # MQ: RESULT_READY is final (the result message is published from the stored row; no HTTP DELIVERED).
         row.update(
             status="FAILED" if preference and "/fail" in preference else "RESULT_READY",
             updated=STAMP(),
         )
-        if row["status"] != "FAILED":
-            await asyncio.sleep(0.6)
-            row.update(status="DELIVERED", updated=STAMP(), callbackAttempts=1)
 
     def database_snapshot(self):
         with psycopg.connect(
@@ -1175,9 +1181,9 @@ class Backend:
                     "updated": row["updated_at"].isoformat(),
                     "stage": {
                         "RUNNING": "분석 실행 · 세부 단계 미계측",
-                        "RESULT_READY": "분석 완료 · 콜백 전달 대기",
-                        "DELIVERED": "콜백 수락 응답 저장",
-                        "SUPERSEDED": "구버전 콜백 폐기",
+                        "RESULT_READY": "분석 완료 · 결과 저장(MQ 결과 발행)",
+                        "DELIVERED": "옛 HTTP 콜백 수락 저장",
+                        "SUPERSEDED": "옛 HTTP 구버전 콜백 폐기",
                         "FAILED": "실패 상태 저장",
                     }.get(row["status"], "단계 미수집"),
                     "stageSource": "stored run status",
@@ -1569,7 +1575,8 @@ def create_app(config=None):
         "authentication": "Authorization: Bearer <service_token>",
         "api": {
             "chat": {"method": "PUT", **be_api_address(os.getenv("CONSOLE_BE_CHAT_BASE_URL"), "/v1/chat/conversations/{conversationId}")},
-            "profiler": {"method": "POST", **be_api_address(os.getenv("CONSOLE_BE_PROFILER_BASE_URL"), "/api/internal/v1/ai/profile/extract-and-pool")},
+            # 11-08: BE → Profiler requests travel over RabbitMQ (no HTTP address to show or copy).
+            "profiler": {"method": "MQ", "state": "message-queue", "url": None, "exchange": "profiling.exchange", "routingKey": "profiling.request"},
         },
     }
 

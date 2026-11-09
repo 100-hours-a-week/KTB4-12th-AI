@@ -28,7 +28,7 @@ def initialize_database(url, python, run):
     with psycopg.connect(url) as db:
         for role in [*ROLES.values(), 'ai_console_service']:
             db.execute(sql.SQL('CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE').format(sql.Identifier(role)))
-    run([str(python), '-B', '-m', 'alembic', 'upgrade', '0011'], ROOT/'profiling', {
+    run([str(python), '-B', '-m', 'alembic', 'upgrade', '0012'], ROOT/'profiling', {
         'PROFILING_DATABASE_URL': url.replace('postgresql://', 'postgresql+psycopg://'),
         'PROFILING_APP_DB_ROLE': ROLES['profiler'], 'PROFILING_TAGGER': 'none',
         'PYTHONPATH': str(ROOT/'profiling/src'),
@@ -49,7 +49,7 @@ def check_database(url):
         with psycopg.connect(url, options='-c default_transaction_read_only=on', connect_timeout=3) as db:
             row = db.execute('''SELECT current_database(),database_name,version,
                 (SELECT version_num FROM public.alembic_version) FROM ai_runtime.database_identity WHERE singleton''').fetchone()
-            if row != ('emmet4930_console', 'emmet4930_console', 'single-server/1', '0011'):
+            if row != ('emmet4930_console', 'emmet4930_console', 'single-server/1', '0012'):
                 raise ValueError('Unexpected fixture database version')
             db.execute('SELECT id,turn,note,created FROM ai_chat.turn_reviews LIMIT 0')
             if db.execute('SELECT count(*) FROM ai_catalog.integration_marker').fetchone()[0] != 1:
@@ -111,8 +111,11 @@ def wait_for_idle(db, profiling_url, timeout=30):
             connection.rollback()
             response = http.get(profiling_url + "/health")
             response.raise_for_status()
-            stats = response.json()["supervisor"]
-            if chat_busy == 0 and stats["running"] == 0 and stats["queued"] == 0:
+            mq = response.json().get("mq") or {}
+            profiler_busy = mq.get("enabled") and (
+                (mq.get("consumer") or {}).get("inflight", 0) or (mq.get("deliveries") or {}).get("open", 0)
+            )
+            if chat_busy == 0 and not profiler_busy:
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -416,15 +419,21 @@ def main():
         marker.write_text(json.dumps(state))
         marker.chmod(0o600)
         token = "synthetic-console-fixture-service"
+        # 11-08: profiling requests/results travel over a disposable local RabbitMQ; the "callback" process is
+        # now the synthetic BE stand-in that publishes requests and records results (Profiler env for pika).
+        from integration.tests import mq_harness
+        mq_url = mq_harness.broker_url()
         start(
             "callback",
             app(
-                "console",
+                "profiling",
                 "console.fixture_callback:app",
                 int(urls["callback"].split(":")[-1]),
             ),
             ROOT,
-            {"CONSOLE_FIXTURE_CALLBACK_STATE": str(scratch / "callback-state.json")},
+            {"CONSOLE_FIXTURE_CALLBACK_STATE": str(scratch / "callback-state.json"),
+             "CONSOLE_FIXTURE_AMQP_URL": mq_url,
+             "PYTHONPATH": os.pathsep.join([str(ROOT), str(ROOT / "profiling/src")])},
         )
         start(
             "search",
@@ -459,8 +468,7 @@ def main():
                 "PROFILING_APP_DB_ROLE": "ai_profiler_service",
                 "PROFILING_TAGGER": "none",
                 "PROFILING_SERVICE_TOKEN": token,
-                "PROFILING_BACKEND_BASE_URL": urls["callback"],
-                "PROFILING_CALLBACK_MAX_ATTEMPTS": "1",
+                **mq_harness.profiler_env(mq_url),
                 "PROFILING_CATALOG_POLL_TTL_S": "0",
                 "PYTHONPATH": os.pathsep.join([str(ROOT),str(ROOT / "profiling/src")]),
             },
@@ -485,8 +493,8 @@ def main():
         )
         config = {
             "label": "로컬 합성 서비스 · 무료 실행기",
-            "targets": {s: urls[s] for s in ["chat", "search", "profiling"]},
-            "tokens": {"chat": token, "profiling": token, "search": token},
+            "targets": {**{s: urls[s] for s in ["chat", "search", "profiling"]}, "backend": urls["callback"]},
+            "tokens": {"chat": token, "profiling": token, "search": token, "backend": token},
             "database": db.replace('fixture_owner@','ai_console_service@'),
             "localFixtureProfilerFree": True,
             "launcherPid": os.getpid(),

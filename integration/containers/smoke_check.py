@@ -47,15 +47,15 @@ def main():
             ).status_code
             == 200
         )
-        assert (
-            http.post(
-                "http://127.0.0.1:8001/api/internal/v1/ai/profile/extract-and-pool",
-                json=body,
-                headers=auth,
-            ).status_code
-            == 202
+        # 11-08: the BE stand-in publishes profiling.request to RabbitMQ; the Profiler consumes it and
+        # publishes profiling.result, which the stand-in consumes into the next Chat context.
+        sent = http.post(
+            "http://127.0.0.1:8002/fixture/recipients/42/profile-request",
+            json=body,
+            headers=auth,
         )
-        for _ in range(100):
+        assert sent.status_code == 200 and sent.json()["published"] is True
+        for _ in range(300):
             data = http.get(
                 "http://127.0.0.1:8002/fixture/recipients/42/chat-context", headers=auth
             ).json()
@@ -117,7 +117,7 @@ def main():
                 "synthetic": True,
                 "paidCalls": 0,
                 "realLedgerWrites": 0,
-                "profileCallbackAndPreparedContext": True,
+                "profileMqResultAndPreparedContext": True,
                 "mockChatSseReplayRetryAndTerminalCancellation": True,
                 "budgetGatewayProcesses": 0,
                 "passed": True,

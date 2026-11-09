@@ -1,4 +1,10 @@
-"""Integrated runtime with provider key limits or an explicitly selected ledger."""
+"""Integrated runtime with provider key limits or an explicitly selected ledger.
+
+11-08: BE ↔ AI profiling is RabbitMQ only (HTTP 7.6/7.7 removed). main.lifespan builds the MQ consumer but does not start
+it (``mq_defer_start``); this lifespan wraps the parts first, wires the two processor hooks — ``mq_record_input``
+(latest recipient input for Chat) and, in shared Search mode, ``mq_admit`` (profiler_rebind.ManagedSearch.job) — and
+then starts consuming.
+"""
 
 import asyncio
 import os
@@ -56,6 +62,7 @@ async def lifespan(app):
         return ProviderLimitedExtractor(*args, **kwargs, credential_source=source)
     original = llm.OpenRouterTagExtractor
     llm.OpenRouterTagExtractor = provider_factory
+    app.state.mq_defer_start = True
     context = main.lifespan(app)
     entered = False
     heartbeat = None
@@ -65,6 +72,7 @@ async def lifespan(app):
         from integration.recipient_data import RecipientInputStore, RecordingRecipientStore
         app.state.recipient_data = RecipientInputStore(settings.DATABASE_URL)
         app.state.recipient_store = RecordingRecipientStore(app.state.recipient_store, app.state.recipient_data)
+        app.state.mq_record_input = lambda rq, input_hash: record_mq_input(app.state.recipient_data, rq, input_hash)
         if settings.CATALOG_SOURCE == "search_http":
             from integration.profiler_rebind import install, keep_binding_alive
             manager = await asyncio.to_thread(install, app, settings)
@@ -97,6 +105,8 @@ async def lifespan(app):
             "budgetGuard": "provider-key-limits",
             "catalogVersionBound": binding.version,
         }
+        if getattr(app.state, "mq", None) is not None:
+            app.state.mq.start()      # only after every part above is wrapped
         yield
     finally:
         if heartbeat is not None:
@@ -105,12 +115,29 @@ async def lifespan(app):
         if entered:
             await context.__aexit__(None, None, None)
         else:
-            for resource in ('catalog', 'embedding', 'backend', 'tagger'):
+            for resource in ('catalog', 'embedding', 'tagger'):
                 close = getattr(getattr(app.state, resource, None), 'close', None)
                 if close: close()
             engine = getattr(app.state, 'engine', None)
             if engine is not None: engine.dispose()
         llm.OpenRouterTagExtractor = original
+
+
+def record_mq_input(store, rq, input_hash):
+    """MQ hook: keep the latest received input for Chat (same payload as the former 7.6 path).
+
+    ⚠️ 11-08: a ``stale`` receipt (older sourceVersion) is still analysed and published — every MQ request needs a result
+    and Backend drops old versions (BE design BC-02/03); recipient_profiles keeps the newer profile by its version guard."""
+    from integration.recipient_data import RecipientInputConflict, RecipientInputInvalid
+    from profiling.mq.process import InputConflict, InputInvalid
+    payload = {"giftPreference": rq.gift_preference, "dislikedCategories": [
+        {"categoryId": item.category_id, "categoryName": item.category_name} for item in rq.disliked_categories]}
+    try:
+        store.record(rq.recipient_user_id, rq.source_version, payload, input_hash)
+    except RecipientInputConflict:
+        raise InputConflict("sourceVersion already has a different input") from None
+    except RecipientInputInvalid:
+        raise InputInvalid("recipient input contains unsupported text") from None
 
 
 app = main.app

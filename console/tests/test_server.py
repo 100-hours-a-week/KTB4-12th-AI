@@ -780,8 +780,10 @@ def test_live_profile_input_is_bound_before_provider_admission(monkeypatch, bind
             calls.append((service, method, path, body))
             if path == '/readyz': return 200, {'ready': True, 'checks': {key: True for key in ('catalog', 'db', 'migration', 'integration_required', 'required_embedding')}}
             if path == '/health': return 200, {'tagger': {'enabled': True, 'required': True, 'model': 'synthetic-profiler'}, 'integration': {'budgetGuard': 'provider-key-limits'}, 'embedding': {'enabled': True}, 'store': {'connected': True}, 'catalog': {'active': True}}
-            if service == 'backend': return binding_status, {'synthetic': True, 'inputBound': binding_status == 200}
-            return 202, {'data': {'profileStatus': 'PENDING'}}
+            if service == 'backend' and method == 'PUT': return binding_status, {'synthetic': True, 'inputBound': binding_status == 200}
+            if service == 'backend' and path.endswith('/profile-request'):   # BE stand-in publishes to RabbitMQ
+                return 200, {'synthetic': True, 'published': True, 'requestId': 'synthetic'}
+            return 500, {}
         backend.check_chat_ready = budget
         backend.request = request
         body = server.ProfileInput(recipientUserId=42, sourceVersion=2, giftPreference='SYNTHETIC')
@@ -790,7 +792,8 @@ def test_live_profile_input_is_bound_before_provider_admission(monkeypatch, bind
             assert result['httpStatus'] == (202 if binding_status == 200 else binding_status)
             assert calls[2][:3] == ('backend', 'PUT', '/fixture/recipients/42/profile-input')
             assert calls[2][3] == body.model_dump()
-            assert any(c[0] == 'profiling' and c[1] == 'POST' for c in calls) == (binding_status == 200)
+            assert any(c[:2] == ('backend', 'POST') for c in calls) == (binding_status == 200)
+            assert not any(c[0] == 'profiling' and c[1] == 'POST' for c in calls)   # no Profiler HTTP intake
             assert ('42:2' in backend.profile_inputs) == (binding_status == 200)
         finally: await backend.http.aclose()
     run(case)

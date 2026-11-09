@@ -13,9 +13,9 @@ from alembic.config import Config
 
 from integration.migrate_single_server import ROOT, ROLES, migrate_connection
 
-TARGET = '0011'
+TARGET = '0012'
 LOCK = 367109731501
-KNOWN = [f'{i:04}' for i in range(1,12)]
+KNOWN = [f'{i:04}' for i in range(1,13)]
 
 
 class MigrationBlocked(ValueError):

@@ -214,10 +214,10 @@ $('chat-products').addEventListener('load',observeImage,true);$('chat-products')
 $('refresh-diagnostics').onclick=()=>refreshDiagnostics();
 async function profileState(){
   if(!state.profile)return;const epoch=state.profileEpoch,key={...state.profile},sequence=state.profileQuerySeq=(state.profileQuerySeq??0)+1;
-  try{const r=await api(`/api/profile/${key.recipientUserId}/${key.sourceVersion}`);if(epoch!==state.profileEpoch||sequence<(state.profileAppliedSeq??0))return;state.profileAppliedSeq=sequence;if(['DELIVERED','FAILED','SUPERSEDED'].includes(state.lastProfileState)&&r.data?.status!==state.lastProfileState)return;
+  try{const r=await api(`/api/profile/${key.recipientUserId}/${key.sourceVersion}`);if(epoch!==state.profileEpoch||sequence<(state.profileAppliedSeq??0))return;state.profileAppliedSeq=sequence;if(['RESULT_READY','DELIVERED','FAILED','SUPERSEDED'].includes(state.lastProfileState)&&r.data?.status!==state.lastProfileState)return;
     $('profile-source').textContent=r.source+' · '+time(r.collectedAt);const row=r.data;$('profile-status').textContent=row?.status??'미수집 / 아직 저장 행 없음';$('profile-attempts').textContent=row?.callbackAttempts??'미수집';
     if(row&&row.status!==state.lastProfileState){state.lastProfileState=row.status;const item=document.createElement('div');item.textContent=time(r.collectedAt)+' 수집 · '+row.status;$('profile-history').prepend(item);}
-    if(row&&['DELIVERED','FAILED','SUPERSEDED'].includes(row.status)){clearInterval(profileTimer);profileTimer=null;}$('profile-json').textContent=JSON.stringify(redact(r),null,2);
+    if(row&&['RESULT_READY','DELIVERED','FAILED','SUPERSEDED'].includes(row.status)){clearInterval(profileTimer);profileTimer=null;}$('profile-json').textContent=JSON.stringify(redact(r),null,2);
   }catch(e){if(epoch!==state.profileEpoch)return;$('profile-status').textContent='수집 실패';$('profile-source').textContent=e.message;}
 }
 $('send-profile').onclick=async()=>{
@@ -227,8 +227,8 @@ $('send-profile').onclick=async()=>{
     const epoch=++state.profileEpoch;clearInterval(profileTimer);profileTimer=null;state.profile=null;state.profileBody=null;state.lastProfileState=null;
     $('profile-history').replaceChildren();$('profile-attempts').textContent='미수집';$('profile-http').textContent='접수 중';$('profile-status').textContent='미접수';$('profile-source').textContent=`시험 수신자 ${body.recipientUserId} / 버전 ${body.sourceVersion} · 접수 대기`;$('profile-json').textContent='새 요청 접수 중';$('refresh-profile').disabled=true;
     state.profileSending=true;$('send-profile').disabled=true;const r=await api('/api/profile','POST',body);if(epoch!==state.profileEpoch)return;
-    $('profile-http').textContent=String(r.httpStatus);$('profile-json').textContent=JSON.stringify(redact(r),null,2);$('profile-note').textContent=r.httpStatus===202?'접수됨 · 아직 결과 생성/전달 완료가 아닙니다.':requestErrorMessage(r.httpStatus,r.body);
-    if(r.httpStatus===202){state.profile=body;state.profileBody=body;$('refresh-profile').disabled=false;await profileState();if(epoch===state.profileEpoch&&!['DELIVERED','FAILED','SUPERSEDED'].includes(state.lastProfileState))profileTimer=setInterval(profileState,1000);}
+    $('profile-http').textContent=String(r.httpStatus);$('profile-json').textContent=JSON.stringify(redact(r),null,2);$('profile-note').textContent=r.httpStatus===202?'MQ 요청 발행됨 · 아직 분석 결과가 아닙니다.':requestErrorMessage(r.httpStatus,r.body);
+    if(r.httpStatus===202){state.profile=body;state.profileBody=body;$('refresh-profile').disabled=false;await profileState();if(epoch===state.profileEpoch&&!['RESULT_READY','DELIVERED','FAILED','SUPERSEDED'].includes(state.lastProfileState))profileTimer=setInterval(profileState,1000);}
     else $('profile-status').textContent='접수 거절';
   }catch(e){toast(e.message);$('profile-note').textContent=e.message;if(!state.profile){$('profile-http').textContent='접수 실패';$('profile-status').textContent='미접수';}}
   finally{state.profileSending=false;$('send-profile').disabled=!state.profileSendAllowed;}

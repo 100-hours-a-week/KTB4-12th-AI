@@ -19,7 +19,9 @@ Search·Profiler·Chat은 같은 PostgreSQL18/pgvector와 Search 상품 카탈�
 | `BE_SERVICE_TOKEN` | Chat·Profiler가 공유하는 기존 BE 서비스 인증 |
 | `OPENROUTER_API_KEY_CHAT`, `OPENROUTER_API_KEY_PROFILER` | 역할별 기존 OpenRouter 키 |
 | `SESSION_SECRET`, `QA_ADMIN_PASSWORD`, `DEMO_ACCESS_TOKEN` | 기존 Chat 세션·관리·체험 경로 인증 |
-| `PROFILING_BACKEND_BASE_URL` | 실제 BE 콜백 origin |
+| `PROFILING_MQ_ENABLED` | 요청 소비 켜기. **기본 `false`**(설계 §7: 브로커 · 큐 · 실패 큐 · 권한 준비 전에는 끔) — 전환 순서(CO-07)에 따라 Cloud 가 `true` 로 켬. 끄면 프로파일 요청을 받지 않음(HTTP 길 없음) |
+| `PROFILING_MQ_URL` | RabbitMQ AI 계정 주소(비밀). 프로파일 요청 · 결과는 HTTP 7.6/7.7 대신 이 브로커로 오감. 켰을 때 비어 있으면 기동 거부 |
+| `PROFILING_MQ_*` 숫자 11개 | 슬롯 · prefetch · 재시도 · 대조 복구 등 배포 설정. 기본값 없음 — 하나라도 빠지면 Profiler 기동 거부 |
 | `AI_ENVIRONMENT` | `local`, `develop`, `production`만 허용. 환경 이름이 staging이면 이 설정에는 `develop` 사용 |
 | `EMMET_MODEL_DIR`, `EMMET_MEDIA_DIR` | 기존 검증된 모델·상품 이미지 폴더 |
 | `EMMET_POSTGRES_VOLUME` | 로컬 Compose에서 사용할 별도 준비된 PG18 볼륨 |
