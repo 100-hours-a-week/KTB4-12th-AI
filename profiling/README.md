@@ -97,6 +97,11 @@ docker compose run --rm -v <합본 폴더>:/b:ro ai-migrate \
 | `PROFILING_TAGGER` | `none` | 태그 추출기 `none` · `openrouter` · `ollama` |
 | `PROFILING_TAGGER_MODEL` | 추출기별 | 비우면 `openrouter` → `google/gemini-3.5-flash-lite` · `ollama` → `gemma4:12b`. 다른 모델은 이름을 직접 |
 | `PROFILING_TAGGER_TIMEOUT_S` | `120` | LLM 한 번 상한(초). **서버는 30** |
+| `PROFILING_TAGGER_STUB` | `false` | **성능 측정 전용 대역.** `true` + `PROFILING_TAGGER=openrouter` 면 모델을 부르지 않고 아래 시간만큼 기다렸다 고정 답(`{"tags": []}`)을 낸다 — 키 없음 · 비용 0 · v3 엔진 안 켬. 검증 · 검색 · 저장 · 결과 전달은 실제 코드(`llm_stub.py`). 실행 기록의 모델 이름은 `stub/v3-latency`. **`AI_ENVIRONMENT=production` 이면 서버가 뜨지 않는다**(운영 차단) |
+| `PROFILING_TAGGER_STUB_P50_S` · `_P95_S` | `4.1` · `6.9` | 대역 응답 시간 중앙값 · 95번째 값(초). 기본 = v3 운영 앱(A100) 8명 동시 실측(11-04) |
+| `PROFILING_TAGGER_STUB_JITTER` | `lognormal` | 흔들림 방식 — `none`(늘 p50) · `lognormal`(p50 · p95 맞춘 로그정규) · `uniform`(p50 · p95 맞춘 균등) |
+| `PROFILING_TAGGER_STUB_MAX_S` | `12.8` | 대역 응답 시간 상한(초, 기본 = v3 실측 가장 느린 한 명). 비우면 자르지 않음 |
+| `PROFILING_TAGGER_STUB_SEED` | (없음) | 주면 뽑는 순서가 매번 같다 |
 | `PROFILING_OPENROUTER_API_KEY` | 없음 | OpenRouter 키. `.env` 에만 둔다 |
 | `PROFILING_TAG_SPEC` | `tag3disliked` | 태그 규격 — `tag3disliked`(카테고리 · IP · 브랜드 + 글 속 비선호, v2 운영) / `tag3`(비선호 없이) / `tag4`(+ 특징) |
 | `PROFILING_EMBEDDING_DIR` | 없음 | 질의 인코더(Node · 모델)가 있는 검색(product-search) 폴더. 주면 태그로 비슷한 상품을 찾는 단계가 켜진다 |

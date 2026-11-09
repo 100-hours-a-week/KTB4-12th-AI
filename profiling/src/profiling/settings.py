@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 추출기별 기본 모델 — TAGGER_MODEL 을 비우면 이것을 쓴다. 추출기와 맞지 않는 모델 이름이 넘어가 요청마다 태그가 실패하는 것을 막는다
@@ -138,6 +138,22 @@ class Settings(BaseSettings):
                     "ollama: gemma4:12b. 다른 모델은 이름을 직접(ollama 예 qwen3.5:9b, openrouter 는 모델 목록의 id)",
     )
     TAGGER_TIMEOUT_S: float = Field(default=120.0, gt=0, description="LLM 호출 한 번의 시간 상한(초)")
+
+    # ---- 태그 추출 대역(성능 측정 전용, 기본 꺼짐 — llm_stub.py). 모델 대신 정한 시간만큼 기다렸다 고정 답. 비용 0
+    TAGGER_STUB: bool = Field(default=False, description="true 면 TAGGER=openrouter 의 전송만 대역으로 — 모델 호출 · 키 없음, "
+                                                         "v3 엔진도 켜지 않음. 나머지(검증 · 검색 · 저장 · 전달)는 실제 코드")
+    TAGGER_STUB_P50_S: float = Field(default=4.1, description="대역 응답 시간 중앙값(초) — 기본 v3 A100 8명 동시 실측(11-04)")
+    TAGGER_STUB_P95_S: float = Field(default=6.9, description="대역 응답 시간 95번째 값(초) — 기본 v3 A100 8명 동시 실측(11-04)")
+    TAGGER_STUB_JITTER: Literal["none", "lognormal", "uniform"] = Field(
+        default="lognormal", description="흔들림 방식 — none: 늘 p50 · lognormal: p50 · p95 맞춘 로그정규 · uniform: p50 · p95 맞춘 균등")
+    TAGGER_STUB_MAX_S: float | None = Field(default=12.8, description="대역 응답 시간 상한(초) — 기본 v3 실측 가장 느린 한 명. 비우면 자르지 않음")
+    TAGGER_STUB_SEED: int | None = Field(default=None, description="뽑기 씨앗 — 주면 뽑는 순서가 매번 같다")
+
+    @field_validator("TAGGER_STUB_MAX_S", "TAGGER_STUB_SEED", mode="before")
+    @classmethod
+    def _stub_blank_is_none(cls, v):
+        """대역 상한 · 씨앗은 환경변수를 비워 두면 '없음'(자르지 않음 · 매번 다름)."""
+        return None if isinstance(v, str) and not v.strip() else v
 
     # ---- v3 태그 엔진(11-03, 11-04 기본 v3 — 배포 대비). TAGGER 추출기는 v3 를 못 쓸 때의 폴백. V3_URL · 키 3개가 다 있어야 실제로 켜지고,
     #      하나라도 비면 기동 로그에 남기고 v2 추출기로만 돈다(로컬 · 시험은 그대로 v2). v2 로 되돌리려면 TAG_ENGINE=v2

@@ -157,11 +157,22 @@ async def lifespan(app: FastAPI):
         app.state.tag_spec = tagging.load_spec()
         sp = app.state.tag_spec
         log.info("태그 규격 %s 축=%s 판=%s 파일=%s", sp.name, "·".join(sp.axes), sp.version, sp.prompt_file)
+    stub_on = settings.TAGGER == "openrouter" and settings.TAGGER_STUB
+    if settings.TAGGER_STUB and not stub_on:
+        log.warning("TAGGER_STUB=true 는 TAGGER=openrouter 일 때만 켜진다 — 지금 TAGGER=%s, 대역 안 씀", settings.TAGGER)
     if settings.TAGGER == "ollama":
         from profiling.llm import OllamaTagExtractor
         app.state.tagger = OllamaTagExtractor(settings.OLLAMA_URL, settings.tagger_model, timeout_s=settings.TAGGER_TIMEOUT_S)
         app.state.tagger.warm_up()
         log.info("태그 추출기 ollama model=%s url=%s", settings.tagger_model, settings.OLLAMA_URL)
+    elif settings.TAGGER == "openrouter" and settings.TAGGER_STUB:
+        # 성능 측정 전용 대역(llm_stub.py) — 전송만 바꾼다. 키를 쓰지 않고(빈 값) 바깥 연결이 없어 비용 0. 설정이 모순이면 ValueError → 기동 실패
+        from profiling import llm_stub
+        from profiling.llm import OpenRouterTagExtractor
+        transport = llm_stub.from_settings(settings)
+        app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, "", llm_stub.STUB_MODEL,
+                                                  timeout_s=settings.TAGGER_TIMEOUT_S, transport=transport)
+        log.warning("태그 추출기 대역(TAGGER_STUB) — 모델 호출 없음 · 고정 답 · %s · v3 엔진 안 켬", transport.delay.describe())
     elif settings.TAGGER == "openrouter":
         if not getattr(app.state, "provider_key", None) and (settings.OPENROUTER_API_KEY is None or not settings.OPENROUTER_API_KEY.get_secret_value().strip()):
             log.error("TAGGER=openrouter 인데 PROFILING_OPENROUTER_API_KEY 가 없음 — 태그 추출기 끈 채로 진행")
@@ -171,7 +182,7 @@ async def lifespan(app: FastAPI):
             app.state.tagger = OpenRouterTagExtractor(settings.OPENROUTER_URL, settings.OPENROUTER_API_KEY.get_secret_value() if settings.OPENROUTER_API_KEY else "",
                                                       settings.tagger_model, timeout_s=settings.TAGGER_TIMEOUT_S)
             log.info("태그 추출기 openrouter model=%s url=%s", settings.tagger_model, settings.OPENROUTER_URL)   # 키는 남기지 않음
-    if settings.TAG_ENGINE == "v3":     # v3 엔진 — TAGGER 추출기는 v3 를 못 쓸 때의 폴백이 된다. 만들지 못하면 v2 추출기 그대로
+    if settings.TAG_ENGINE == "v3" and not stub_on:     # v3 엔진 — TAGGER 추출기는 v3 를 못 쓸 때의 폴백이 된다. 만들지 못하면 v2 추출기 그대로
         app.state.tagger, app.state.tag_spec = _v3_engine(settings, app.state.tagger, app.state.tag_spec)
     if settings.CATALOG_SOURCE == "search_http":
         app.state.embedding = app.state.catalog
@@ -191,7 +202,8 @@ async def lifespan(app: FastAPI):
             log.exception("임베딩을 켜지 못함 — 끈 채로 진행(태그가 있어도 임베딩 단계 없이 D)")
             app.state.embedding_status = {"enabled": False, "reason": type(e).__name__}
     status.LLM.reset()
-    status.LLM.configure(requested=f"v3+{settings.TAGGER}" if getattr(app.state.tagger, "version", None) == "v3" else settings.TAGGER,
+    status.LLM.configure(requested="openrouter-stub" if stub_on else
+                         f"v3+{settings.TAGGER}" if getattr(app.state.tagger, "version", None) == "v3" else settings.TAGGER,
                          enabled=app.state.tagger is not None, model=getattr(app.state.tagger, "model", settings.tagger_model),
                          reason=tagger_reason)
     app.state.recipient_store = DbRecipientProfileStore(app.state.engine)
