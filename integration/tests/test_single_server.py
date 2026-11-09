@@ -47,7 +47,7 @@ def database(monkeypatch, request):
     env.update(PROFILING_DATABASE_URL=owner.replace('postgresql://', 'postgresql+psycopg://'),
                PROFILING_TAGGER='none', PROFILING_APP_DB_ROLE=ROLES['profiler'],
                PYTHONPATH=str(ROOT/'profiling/src'), PYTHONDONTWRITEBYTECODE='1')
-    target='0010' if request.param=='upgrade' else '0011'
+    target='0010' if request.param=='upgrade' else '0012'
     result = subprocess.run([sys.executable, '-B', '-m', 'alembic', 'upgrade', target], cwd=ROOT/'profiling', env=env, capture_output=True)
     assert result.returncode == 0, result.stderr.decode()
     if request.param=='upgrade':
@@ -58,7 +58,7 @@ def database(monkeypatch, request):
     with psycopg.connect(owner) as db:
         db.execute("INSERT INTO ai_profile.recipient_profiles(recipient_user_id,source_version,preferred_tags,disliked_tags) VALUES(42,7,%s,%s)",
                    (Jsonb([{'axis':'카테고리','tag':'꽃','source':'preference','ref':'pref'}]), Jsonb([{'axis':'브랜드','tag':'소니','source':'preference','ref':'pref'}])))
-    result = subprocess.run([sys.executable, '-B', '-m', 'alembic', 'upgrade', '0011'], cwd=ROOT/'profiling', env=env, capture_output=True)
+    result = subprocess.run([sys.executable, '-B', '-m', 'alembic', 'upgrade', '0012'], cwd=ROOT/'profiling', env=env, capture_output=True)
     assert result.returncode == 0, result.stderr.decode()
     monkeypatch.setenv('INTEGRATION_SYNTHETIC_ONLY', '1')
     assert migrate(owner, name)['changed']
@@ -298,20 +298,20 @@ def test_real_cpu_http_and_service_restart(database,source):
 
 
 
-def test_profiler_durable_transition_guard_includes_failed_and_unsent_runs(database):
+def test_profiler_durable_transition_guard_counts_running_mq_analyses(database):
+    # 11-08: profile_runs DELIVERED/SUPERSEDED no longer exist under MQ. Only an analysis still RUNNING in some replica
+    # needs the old Search binding (stored results republish their bytes; retries re-analyse from scratch).
     from integration.profiler_rebind import unfinished_profile_runs
-    from profiling.stores import DbProfileRunStore
-    from profiling.types import ProfileOutcome, RunStatus, SearchResult
     engine=sa.create_engine(database['profiler'].replace('postgresql://','postgresql+psycopg://'))
     try:
-        store=DbProfileRunStore(engine)
-        outcome=ProfileOutcome(recipient_user_id=81,source_version=1,status=RunStatus.RUNNING,input_hash='0'*64)
-        for status in [RunStatus.RUNNING,RunStatus.FAILED,RunStatus.RESULT_READY,RunStatus.DELIVERED]:
-            value=outcome.model_copy(update={'status':status})
-            if status in (RunStatus.RESULT_READY,RunStatus.DELIVERED):
-                value.search=SearchResult(product_ids=[],query_text='',catalog_version_id=uuid4())
-            store.save(value)
-            assert unfinished_profile_runs(engine)==(0 if status is RunStatus.DELIVERED else 1)
+        with engine.begin() as c:
+            for i,state in enumerate(['RECEIVED','RUNNING','RETRY_WAIT','RESULT_READY']):
+                c.execute(sa.text("INSERT INTO ai_profile.mq_deliveries(request_body_sha256,state) VALUES(:h,:s)"),
+                          {'h':f'{i:064d}','s':state})
+        assert unfinished_profile_runs(engine)==1
+        with engine.begin() as c:
+            c.execute(sa.text("UPDATE ai_profile.mq_deliveries SET state='RETRY_WAIT' WHERE state='RUNNING'"))
+        assert unfinished_profile_runs(engine)==0
     finally:engine.dispose()
 
 

@@ -55,7 +55,7 @@ def main():
         "PROFILING_DATABASE_URL": url.replace("postgresql://", "postgresql+psycopg://"),
         "PROFILING_TAGGER": "none", "PROFILING_APP_DB_ROLE": ROLES['profiler'],
     }
-    subprocess.run(["python", "-m", "alembic", "upgrade", "0011"], cwd="/workspace/profiling", env=env, check=True)
+    subprocess.run(["python", "-m", "alembic", "upgrade", "0012"], cwd="/workspace/profiling", env=env, check=True)
     migrate(url, database)
     with psycopg.connect(url) as db:
         db.execute('CREATE TABLE ai_catalog.integration_marker(id boolean PRIMARY KEY CHECK(id))')

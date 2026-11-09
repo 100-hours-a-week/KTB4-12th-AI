@@ -1,4 +1,8 @@
-"""Drain accepted Emmet work before swapping one validated, retained Search binding."""
+"""Drain admitted Emmet work before swapping one validated, retained Search binding.
+
+11-08: BE ↔ AI profiling moved from HTTP 7.6/7.7 to RabbitMQ. The MQ processor enters ``job()`` around each analysis
+(``app.state.mq_admit``), so admission/drain/pinning stay here; the HTTP Supervisor and the 7.7 visibility wrapper are gone.
+"""
 
 import asyncio
 import logging
@@ -11,10 +15,9 @@ from typing import Annotated
 
 import anyio
 from fastapi import Depends, Header, HTTPException, Request
-from profiling.intake import settings_dep
 from profiling.ports import NoActiveCatalog
 from profiling.search_api import SearchCatalog
-from profiling.settings import Settings
+from profiling.settings import Settings, get_settings
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
@@ -28,11 +31,10 @@ class RefreshFailure(Exception):
 
 
 class ManagedSearch:
-    """Stable ports plus a Supervisor gate; upstream jobs keep their original ports."""
+    """Stable ports plus an admission gate; admitted jobs keep their original ports."""
 
-    def __init__(self, catalog, supervisor, factory, *, unfinished_runs=None):
+    def __init__(self, catalog, factory, *, unfinished_runs=None):
         self.current = catalog
-        self.supervisor = supervisor
         self.factory = factory
         self.unfinished_runs = unfinished_runs
         self.condition = threading.Condition()
@@ -126,23 +128,22 @@ class ManagedSearch:
         with self.condition:
             return self._selected().matched
 
-    def submit(self, fn, *args, **kwargs):
+    @contextmanager
+    def job(self):
+        """One analysis pinned to the current binding (MQ processor admission).
+
+        Closed admission raises NoActiveCatalog: the MQ processor keeps the message unacked and retries after
+        its wait interval without spending the analysis budget (mq.process). A refresh drains admitted jobs first."""
         with self.condition:
             if self.paused or self.closing:
                 self.rejected += 1
-                return False
+                raise NoActiveCatalog("Profiler catalog admission is paused")
             self.pending += 1
-            accepted = self.supervisor.submit(self._run, self.current, fn, args, kwargs)
-            if not accepted:
-                self.pending -= 1
-            return accepted
-
-    def _run(self, catalog, fn, args, kwargs):
-        with self.condition:
             self.running += 1
+            catalog = self.current
         self.local.catalog = catalog
         try:
-            return fn(*args, **kwargs)
+            yield catalog
         finally:
             del self.local.catalog
             with self.condition:
@@ -154,16 +155,6 @@ class ManagedSearch:
                 self.condition.notify_all()
             if close:
                 self._close(catalog)
-
-    def stats(self):
-        stats = self.supervisor.stats()
-        with self.condition:
-            return {
-                **stats,
-                "rejected": stats["rejected"] + self.rejected,
-                "catalog_paused": self.paused,
-                "catalog_pending": self.pending,
-            }
 
     def status(self):
         with self.condition:
@@ -240,8 +231,8 @@ class ManagedSearch:
                     pass
                 else:
                     return {**self.status(), "admissionPaused": False, "changed": False}
-            # An empty in-process queue does not prove durable work is finished.
-            # Keep the old binding for failures/retries and unsent callbacks.
+            # An empty in-process gate does not prove other replicas are idle.
+            # Keep the old binding while any MQ analysis is still running.
             changing_generation = self.current.snapshot != expected_snapshot
             if changing_generation and self.unfinished_runs is not None and self.unfinished_runs():
                 raise RefreshFailure("CATALOG_DURABLE_WORK_REMAINS", 409)
@@ -273,21 +264,13 @@ class ManagedSearch:
                 self.condition.notify_all()
             self.refresh_lock.release()
 
-    def stop(self, timeout_s=5.0):
-        with self.condition:
-            self.closing = self.paused = True
-        dropped = self.supervisor.stop(timeout_s)
-        with self.condition:
-            self.pending = self.running
-            self.condition.notify_all()
-        return dropped
-
     def close(self):
         with self.condition:
             self.closed = self.closing = self.paused = True
             if not self.running:
                 self.retired.add(self.current)
             close = self._retire_ready(self.current)
+            self.condition.notify_all()       # wake a draining refresh so it fails fast with PROFILER_CLOSING
         if close:
             self._close(self.current)
 
@@ -335,7 +318,7 @@ async def refresh_catalog(body: RefreshRequest, request: Request):
 
 
 async def require_refresh_token(
-    settings: Annotated[Settings, Depends(settings_dep)],
+    settings: Annotated[Settings, Depends(get_settings)],
     authorization: Annotated[str | None, Header()] = None,
 ):
     token = getattr(settings, "SEARCH_TOKEN", "") or settings.SERVICE_TOKEN
@@ -348,10 +331,14 @@ async def require_refresh_token(
 
 
 def unfinished_profile_runs(engine):
+    """MQ analyses still running in any replica (ai_profile.mq_deliveries, 0012).
+
+    ⚠️ 11-08 interpretation: profile_runs DELIVERED/SUPERSEDED no longer exist under MQ. A RESULT_READY delivery republishes
+    its stored bytes and a retry re-analyses from scratch, so neither needs the old binding — only a RUNNING analysis does."""
     from sqlalchemy import text
     with engine.connect() as connection:
-        return connection.execute(text("""SELECT count(*) FROM ai_profile.profile_runs
-            WHERE status NOT IN ('DELIVERED','SUPERSEDED')""")).scalar_one()
+        return connection.execute(text("""SELECT count(*) FROM ai_profile.mq_deliveries
+            WHERE state = 'RUNNING'""")).scalar_one()
 
 
 def install(app, settings):
@@ -360,14 +347,11 @@ def install(app, settings):
     def factory():
         return load_retained_catalog(settings)
 
-    manager = ManagedSearch(factory(), app.state.supervisor, factory,
+    manager = ManagedSearch(factory(), factory,
                             unfinished_runs=lambda: unfinished_profile_runs(app.state.engine))
     app.state.catalog = app.state.embedding = app.state.shared_catalog = manager
-    app.state.supervisor = manager
+    app.state.mq_admit = manager.job
     plain_catalog.close()
-    from integration.profile_callback import VisibleProductsBackend
-    app.state.backend = VisibleProductsBackend(app.state.backend, settings.SEARCH_BASE_URL,
-        settings.SEARCH_TOKEN.get_secret_value() if settings.SEARCH_TOKEN else settings.SERVICE_TOKEN)
     if not any(getattr(route, "path", None) == REFRESH_PATH for route in app.routes):
         app.add_api_route(
             REFRESH_PATH,

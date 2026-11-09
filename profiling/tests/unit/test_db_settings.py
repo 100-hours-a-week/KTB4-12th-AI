@@ -1,6 +1,6 @@
 """DB 접속 설정(10-13 DB 검토) — 풀 크기 · 시간 상한 · 저장 잠금 키. DB 없이 볼 수 있는 것만(.env 는 읽지 않는다).
 
-풀: 슬롯마다 잠금 커넥션 1개를 분석 내내 쥐고 접수 폴링 · /health 가 IO_THREADS 만큼 더 쓴다 → 기본 = 슬롯 + IO_THREADS, 모자라면 기동 거부.
+풀: MQ 슬롯마다 잠금 커넥션 2개(+ 대조 복구 1)를 쥐고 /health · 조회 API 가 IO_THREADS 만큼 더 쓴다 → 기본 = IO_THREADS + MQ 잠금, 모자라면 기동 거부.
 """
 
 import pytest
@@ -14,15 +14,15 @@ def _s(**kw) -> Settings:
     return Settings(_env_file=None, **kw)
 
 
-def test_pool_defaults_to_slots_plus_io_threads() -> None:
-    assert main.db_pool_size(_s()) == 1 + 4
-    assert main.db_pool_size(_s(PROFILING_SLOTS=8, IO_THREADS=4)) == 12
-    assert main.db_pool_size(_s(PROFILING_SLOTS=8, DB_POOL_SIZE=20)) == 20
+def test_pool_defaults_to_io_threads_plus_mq_locks() -> None:
+    assert main.db_pool_size(_s()) == 4                                               # MQ 꺼짐 — IO_THREADS 만
+    assert main.db_pool_size(_s(MQ_ENABLED=True, MQ_SLOTS=8, IO_THREADS=4)) == 4 + 16 + 1
+    assert main.db_pool_size(_s(MQ_ENABLED=True, MQ_SLOTS=8, DB_POOL_SIZE=40)) == 40
 
 
 def test_too_small_pool_refuses_to_start_before_connecting() -> None:
-    s = _s(PROFILING_SLOTS=8, DB_POOL_SIZE=6, DB_MAX_OVERFLOW=2, DATABASE_URL="postgresql+psycopg://x:y@127.0.0.1:1/none")
-    with pytest.raises(RuntimeError, match="풀이 작다"):        # 6 + 2 < 8 + 4 — 접속을 시도하기 전에 거부
+    s = _s(MQ_ENABLED=True, MQ_SLOTS=8, DB_POOL_SIZE=6, DB_MAX_OVERFLOW=2, DATABASE_URL="postgresql+psycopg://x:y@127.0.0.1:1/none")
+    with pytest.raises(RuntimeError, match="풀이 작다"):        # 6 + 2 < 4 + 17 — 접속을 시도하기 전에 거부
         main._connect_db(s)
 
 

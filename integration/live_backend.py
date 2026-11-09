@@ -1,13 +1,19 @@
-"""Synthetic BE-contract harness: durable callback ingestion -> next Chat snapshot.
+"""Synthetic BE-contract harness: RabbitMQ request publish + durable result ingestion -> next Chat snapshot.
 
 Not the team's Backend. Never reads real preferences or changes a BE repository.
+11-08: the 7.6 webhook / 7.7 callback were replaced by RabbitMQ. Like the BE, this harness declares the
+synthetic topology, publishes ``profiling.request`` and consumes ``profiling.result`` (when LIVE_BACKEND_AMQP_URL is set).
 """
 
+import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import os
 import threading
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -15,11 +21,34 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from integration.profile_contract import ProfileInput
 
-app = FastAPI(docs_url=None, redoc_url=None)
 STATE = Path(os.environ["LIVE_BACKEND_STATE"])
 TOKEN = os.environ["AI_SERVICE_TOKEN"]
 SEARCH = os.environ["SEARCH_URL"]
+AMQP_URL = os.environ.get("LIVE_BACKEND_AMQP_URL", "")
 LOCK = threading.Lock()
+log = logging.getLogger("live_backend")
+
+# BE topology (BE-owned in deployment; declared here only for the synthetic broker).
+EXCHANGE = "profiling.exchange"
+REQUEST, RESULT, FAILED = "profiling.request", "profiling.result", "profiling.request.failed"
+
+
+@contextlib.asynccontextmanager
+async def lifespan(_app):
+    stop, worker = threading.Event(), None
+    if AMQP_URL:
+        declare_topology()
+        worker = threading.Thread(target=consume_results, args=(stop,), name="synthetic-result-consumer", daemon=True)
+        worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        if worker is not None:
+            worker.join(5)
+
+
+app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 def authorized(request):
@@ -62,10 +91,8 @@ def bind_profile_input(recipient: int, body: ProfileInput, request: Request):
     return {"synthetic": True, "sourceVersion": body.sourceVersion, "inputBound": True}
 
 
-@app.post("/api/internal/v1/recipients/{recipient}/profile")
-def callback(recipient: int, body: dict, request: Request):
-    if not authorized(request):
-        return JSONResponse({"message": "Unauthorized"}, status_code=401)
+def apply_result(recipient: int, body: dict):
+    """Validate and persist one successful profiling result (old 7.7 body shape). Returns (status, message)."""
     with LOCK:
         state = json.loads(STATE.read_text())
         if (
@@ -73,13 +100,11 @@ def callback(recipient: int, body: dict, request: Request):
             or recipient != state["recipientUserId"]
             or body.get("recipientUserId") != recipient
         ):
-            return JSONResponse(
-                {"message": "Synthetic recipient mismatch"}, status_code=400
-            )
+            return 400, "Synthetic recipient mismatch"
         version = body.get("sourceVersion")
         binding = state.get("profileInputs", {}).get(str(version))
         if type(version) is not int or version < state["sourceVersion"] or (version != state["sourceVersion"] and not binding):
-            return JSONResponse({"message": "Stale or unbound source version"}, status_code=409)
+            return 409, "Stale or unbound source version"
         ids = body.get("recommendedProductIds", [])
         if (
             set(body)
@@ -95,7 +120,7 @@ def callback(recipient: int, body: dict, request: Request):
             or len(ids) > 30
             or len(set(ids)) != len(ids)
         ):
-            return JSONResponse({"message": "Invalid callback"}, status_code=400)
+            return 400, "Invalid result"
         with httpx.Client(trust_env=False, timeout=10, headers={"Authorization": "Bearer " + TOKEN}) as http:
             meta = http.get(SEARCH + "/v1/metadata")
             meta.raise_for_status()
@@ -112,15 +137,117 @@ def callback(recipient: int, body: dict, request: Request):
             if products is not None and {
                 p["productId"] for p in products.json()["products"]
             } != set(ids):
-                return JSONResponse(
-                    {"message": "Unknown Backend product ID"}, status_code=400
-                )
+                return 400, "Unknown Backend product ID"
         if binding:
             state.update(sourceVersion=version, giftPreference=binding["giftPreference"], dislikedCategories=binding["dislikedCategories"])
         state["callback"] = body
         state["snapshotId"] = snapshot
         save_state(state)
-    return {"message": "Synthetic BE contract callback persisted", "synthetic": True}
+    return 200, "Synthetic BE contract result persisted"
+
+
+def handle_result(raw: bytes) -> int:
+    """One ``profiling.result`` message → state. FAILED outcomes are recorded only; nothing is retried here."""
+    try:
+        doc = json.loads(raw)
+        payload = doc["payload"]
+        recipient, version, outcome = payload["recipientUserId"], payload["sourceVersion"], payload["outcome"]
+    except (ValueError, TypeError, KeyError):
+        return 400
+    if type(recipient) is not int or doc.get("schemaVersion") != 1:
+        return 400
+    if outcome == "FAILED":
+        with LOCK:
+            state = json.loads(STATE.read_text())
+            state["lastFailure"] = {"sourceVersion": version, "code": (payload.get("error") or {}).get("code")}
+            save_state(state)
+        return 200
+    data = payload.get("data")
+    if outcome != "SUCCEEDED" or not isinstance(data, dict) or set(data) != {"recommendedProductIds"}:
+        return 400
+    status, _ = apply_result(recipient, {"recipientUserId": recipient, "sourceVersion": version,
+                                         "profileStatus": "COMPLETED", "recommendedProductIds": data["recommendedProductIds"]})
+    return status
+
+
+def _channel():
+    import pika
+    connection = pika.BlockingConnection(pika.URLParameters(AMQP_URL))
+    return connection, connection.channel()
+
+
+def declare_topology():
+    connection, channel = _channel()
+    try:
+        channel.exchange_declare(EXCHANGE, "direct", durable=True, auto_delete=False)
+        for queue in (REQUEST, RESULT, FAILED):
+            channel.queue_declare(queue, durable=True, arguments={"x-queue-type": "quorum"})
+            channel.queue_bind(queue, EXCHANGE, routing_key=queue)
+    finally:
+        connection.close()
+
+
+def publish_request(body: ProfileInput) -> str:
+    """Publish like the BE: persistent JSON/UTF-8, message_id = requestId, mandatory, publisher confirm."""
+    import pika
+    request_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    message = {"schemaVersion": 1, "requestId": request_id,
+               "createdAt": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z",
+               "payload": body.model_dump()}
+    connection, channel = _channel()
+    try:
+        channel.confirm_delivery()
+        channel.basic_publish(EXCHANGE, REQUEST, json.dumps(message, ensure_ascii=False).encode(),
+                              pika.BasicProperties(content_type="application/json", content_encoding="UTF-8",
+                                                   delivery_mode=2, message_id=request_id), mandatory=True)
+    finally:
+        connection.close()
+    return request_id
+
+
+def consume_results(stop: threading.Event):
+    while not stop.is_set():
+        try:
+            connection, channel = _channel()
+        except Exception:  # noqa: BLE001 — broker not up yet; retry quietly
+            stop.wait(1)
+            continue
+        try:
+            channel.basic_qos(prefetch_count=1)
+            for method, _, raw in channel.consume(RESULT, inactivity_timeout=0.5):
+                if stop.is_set():
+                    break
+                if method is None:
+                    continue
+                status = handle_result(raw)
+                if status != 200:
+                    log.warning("synthetic result rejected (%s)", status)
+                channel.basic_ack(method.delivery_tag)
+        except Exception:  # noqa: BLE001
+            log.exception("synthetic result consumer reconnecting")
+        finally:
+            with contextlib.suppress(Exception):
+                connection.close()
+
+
+
+@app.post("/fixture/recipients/{recipient}/profile-request")
+def request_profile(recipient: int, body: ProfileInput, request: Request):
+    """Publish a bound synthetic input to ``profiling.request`` (the BE's role)."""
+    if not authorized(request):
+        return JSONResponse({"message": "Unauthorized"}, status_code=401)
+    if not AMQP_URL:
+        return JSONResponse({"message": "Synthetic broker not configured"}, status_code=503)
+    fingerprint = hashlib.sha256(json.dumps(body.model_dump(), sort_keys=True).encode()).hexdigest()
+    with LOCK:
+        state = json.loads(STATE.read_text())
+        binding = state.get("profileInputs", {}).get(str(body.sourceVersion))
+    if recipient != state["recipientUserId"] or body.recipientUserId != recipient:
+        return JSONResponse({"message": "Synthetic recipient mismatch"}, status_code=400)
+    if not binding or binding["fingerprint"] != fingerprint:
+        return JSONResponse({"message": "Bind the same input first"}, status_code=409)
+    return {"synthetic": True, "requestId": publish_request(body), "published": True}
 
 
 @app.get("/fixture/recipients/{recipient}/chat-context")

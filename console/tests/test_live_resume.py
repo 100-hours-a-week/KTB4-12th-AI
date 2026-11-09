@@ -99,7 +99,7 @@ def test_stale_pid_resume_and_faults_never_admit_unverified_sends(monkeypatch, f
     async def case():
         config = {'liveModel': True, 'budgetMode': 'guarded', 'launcherPid': 2**30, 'database': 'postgresql://synthetic@127.0.0.1/emmet4930_synthetic',
                   'expectedModel': 'openai/gpt-6-luna', 'budgetAccount': 'gift-chat-harness-2026-10-06', 'budgetExpectedLimitUsd': 5,
-                  'targets': {'chat': 'http://127.0.0.1:1', 'profiling': 'http://127.0.0.1:2'}}
+                  'targets': {'chat': 'http://127.0.0.1:1', 'profiling': 'http://127.0.0.1:2', 'backend': 'http://127.0.0.1:3'}}
         app = configured_app(config)
         mutations, accepted_turns, accepted_profiles = [], set(), set()
         def upstream(request):
@@ -130,14 +130,19 @@ def test_stale_pid_resume_and_faults_never_admit_unverified_sends(monkeypatch, f
                 return httpx.Response(200, json=data)
             if request.method == 'GET' and '/turns/' in path:
                 return httpx.Response(200, json={'data': {'status': 'PROCESSING'}})
+            if request.method == 'GET' and path.endswith('/chat-context'):   # BE stand-in snapshot for Chat
+                return httpx.Response(200, json={'synthetic': True, 'recipientContext': {
+                    'recipientUserId': 42, 'status': 'NONE', 'sourceVersion': 0, 'giftPreference': None, 'dislikedCategories': []}})
             mutations.append((request.method, path))
             if '/turns/' in path:
                 accepted_turns.add(path)
                 return httpx.Response(202, json={'data': {'status': 'PROCESSING'}})
-            if path.endswith('extract-and-pool'):
+            if path.endswith('/profile-input'):
+                return httpx.Response(200, json={'synthetic': True, 'inputBound': True})
+            if path.endswith('/profile-request'):          # BE stand-in publishes profiling.request (RabbitMQ)
                 body = json.loads(request.content)
                 accepted_profiles.add((body['recipientUserId'], body['sourceVersion']))
-                return httpx.Response(202, json={'data': {'profileStatus': 'PENDING'}})
+                return httpx.Response(200, json={'synthetic': True, 'published': True, 'requestId': 'synthetic'})
             return httpx.Response(201, json={'data': {}})
         await app.state.backend.http.aclose()
         app.state.backend.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))

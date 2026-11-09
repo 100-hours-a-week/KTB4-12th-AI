@@ -76,11 +76,14 @@ def snapshot():
                         "giftPreference": "PRIVATE_TASTE",
                     },
                     "store": {"connected": True, "migration": "0007"},
-                    "supervisor": {
-                        "running": 1,
+                    "mq": {
+                        "enabled": True,
+                        "connected": True,
+                        "consuming": True,
+                        "inflight": 1,
                         "slots": 2,
-                        "queued": 3,
-                        "queue_max": 200,
+                        "open": 3,
+                        "dlq_pending": 0,
                     },
                     "tagger": {
                         "enabled": True,
@@ -118,7 +121,7 @@ def snapshot():
                 "id": "synthetic-profile-b",
                 "service": "Profiler",
                 "status": "RESULT_READY",
-                "stage": "분석 완료 · 콜백 전달 대기",
+                "stage": "분석 완료 · 결과 저장(MQ 결과 발행)",
                 "callbackAttempts": 1,
                 "active": False,
                 "elapsedSeconds": None,

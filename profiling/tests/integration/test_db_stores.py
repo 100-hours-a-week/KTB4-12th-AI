@@ -11,7 +11,7 @@ import pytest
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
-from profiling import guard, intake, pipeline
+from profiling import guard, pipeline
 from profiling import stores as stores_mod
 from profiling.catalog import (
     FILE_CATALOG_VERSION_ID,
@@ -21,7 +21,6 @@ from profiling.ports import ProfileRunStore, RecipientProfileStore
 from profiling.settings import get_settings
 from profiling.stores import DbProfileRunStore, DbRecipientProfileStore
 from profiling.types import (
-    CallbackResult,
     CategoryScore,
     DislikedCategory,
     ErrorCode,
@@ -309,15 +308,6 @@ def test_pipeline_with_reviews_writes_scores_and_review_rows(stores, engine) -> 
 # ---------------------------------------------------------------- 앱 전체 (진짜 DB)
 
 
-class RecordingBackend:
-    def __init__(self, result=None):
-        self.sent, self.result = [], result or CallbackResult(status=RunStatus.DELIVERED, http_status=200)
-
-    def send_profile_callback(self, outcome):
-        self.sent.append(outcome)
-        return self.result
-
-
 def test_app_end_to_end_with_db(engine, monkeypatch, alembic_head) -> None:
     monkeypatch.setenv("PROFILING_CATALOG_FILE", FIXTURE)
     get_settings.cache_clear()
@@ -329,21 +319,17 @@ def test_app_end_to_end_with_db(engine, monkeypatch, alembic_head) -> None:
             health = client.get("/health").json()
             assert health["store"]["backend"] == "db" and health["store"]["connected"] is True
             assert health["store"]["migration"] == alembic_head
-            assert isinstance(health["store"]["undelivered"], int)   # 결과는 있는데 못 보낸 행 수
+            assert "undelivered" not in health["store"]              # 옛 7.7 미전달 집계 — 전달 상태는 mq 칸
 
-            fake = RecordingBackend()
-            app.state.backend = fake
-            body = {"recipientUserId": rid, "sourceVersion": 7, "dislikedCategories": [{"categoryId": 9047, "categoryName": "출산·육아용품"}],
-                    "giftPreference": None, "reviews": []}
-            res = client.post(intake.EXTRACT_AND_POOL_PATH, json=body)
-            assert res.status_code == 202
-            t0 = time.monotonic()                                            # 09-28: 워커 스레드가 끝내기를 기다린다
-            while time.monotonic() - t0 < 10 and not (len(fake.sent) == 1 and (r := app.state.store.get(rid)) and r.status is RunStatus.DELIVERED):
-                time.sleep(0.02)
-            assert len(fake.sent) == 1
+            # MQ 처리기가 부르는 것과 같은 분석 — 앱이 조립한 부품(DB 저장소) 그대로
+            rq = ProfileRequest(recipient_user_id=rid, source_version=7, gift_preference=None, reviews=[],
+                                disliked_categories=[DislikedCategory(category_id=9047, category_name="출산·육아용품")])
+            out = pipeline.profile(rq, catalog=app.state.catalog, store=app.state.store,
+                                   recipient_store=app.state.recipient_store, pool_size=30)
+            assert out.status is RunStatus.RESULT_READY
 
-            run = app.state.store.get(rid)                       # 콜백 200 → DELIVERED 가 DB에
-            assert run.status is RunStatus.DELIVERED and run.callback_attempts == 1 and run.source_version == 7
+            run = app.state.store.get(rid)
+            assert run.status is RunStatus.RESULT_READY and run.callback_attempts == 0 and run.source_version == 7
             assert isinstance(run.search.catalog_version_id, UUID) and len(run.search.product_ids) == 30
             prof = app.state.recipient_store.get(rid)
             assert prof.source_version == 7 and prof.disliked_categories == [DislikedCategory(category_id=9047, category_name="출산·육아용품")]
@@ -386,66 +372,6 @@ def test_run_lock_releases_on_exception(engine) -> None:
 
 
 # ---------------------------------------------------------------- 시작 시 정리 · 미전달 수
-
-
-def test_recover_stale_runs_only_touches_old_running(engine, stores) -> None:
-    """끊긴 실행만 FAILED 로. **지금 돌고 있는 것(신선한 RUNNING)은 건드리지 않는다** —
-    다른 인스턴스가 처리 중인 행을 죽이면 그 요청이 통째로 사라진다."""
-    runs, _ = stores
-    rid_old, rid_new = RID + 40, RID + 41
-    try:
-        for rid in (rid_old, rid_new):
-            runs.save(ProfileOutcome(recipient_user_id=rid, source_version=1, status=RunStatus.RUNNING, input_hash="h"))
-        with engine.begin() as c:   # 하나만 과거로 밀어 "끊긴 실행"을 만든다
-            c.execute(sa.text("update ai_profile.profile_runs set updated_at = now() - interval '1 hour' "
-                              "where recipient_user_id = :r"), {"r": rid_old})
-
-        assert runs.recover_stale_runs(300) == 1
-        assert runs.get(rid_old).status is RunStatus.FAILED
-        assert runs.get(rid_old).failure_reason and "시작 시 정리" in runs.get(rid_old).failure_reason
-        assert runs.get(rid_new).status is RunStatus.RUNNING      # 신선한 것은 그대로
-        assert runs.recover_stale_runs(300) == 0                  # 두 번째 호출은 할 일이 없다
-    finally:
-        for rid in (rid_old, rid_new):
-            runs.delete_recipient(rid)
-
-
-def test_undelivered_count_counts_result_ready(engine, stores) -> None:
-    """결과는 있는데 못 보낸 행(RESULT_READY)만 센다 — /health 가 이 숫자를 보여준다."""
-    runs, _ = stores
-    rid = RID + 42
-    search = SearchResult(product_ids=[1, 2], query_text="", catalog_version_id=FILE_CATALOG_VERSION_ID)
-    try:
-        before = runs.undelivered_count()
-        runs.save(ProfileOutcome(recipient_user_id=rid, source_version=1, status=RunStatus.RESULT_READY,
-                                 input_hash="h", search=search))
-        assert runs.undelivered_count() == before + 1
-        runs.save(ProfileOutcome(recipient_user_id=rid, source_version=1, status=RunStatus.DELIVERED,
-                                 input_hash="h", search=search, callback_attempts=1))
-        assert runs.undelivered_count() == before      # 전달되면 빠진다
-    finally:
-        runs.delete_recipient(rid)
-
-
-
-def test_delivered_supersedes_older_undelivered_rows(stores) -> None:
-    """10-08 실측 S3: 콜백 불통으로 v1 이 RESULT_READY 로 남은 채 v2 가 DELIVERED 되면 v1 은 Backend 가 다시 묻지 않는 번호다.
-    save(DELIVERED) 가 그보다 낮은 RESULT_READY 를 SUPERSEDED(CALLBACK_STALE) 로 내려 undelivered 에서 뺀다. 더 높은 번호는 건드리지 않는다."""
-    runs, _ = stores
-
-    def ready(sv: int) -> ProfileOutcome:
-        return ProfileOutcome(recipient_user_id=RID, source_version=sv, status=RunStatus.RESULT_READY, input_hash=f"h{sv}",
-                              search=SearchResult(product_ids=[1], query_text="", catalog_version_id=FILE_CATALOG_VERSION_ID))
-
-    for sv in (1, 2, 3):
-        runs.save(ready(sv))
-    before = runs.undelivered_count()
-    runs.save(ready(2).model_copy(update={"status": RunStatus.DELIVERED, "callback_attempts": 1}))
-    v1, v2, v3 = (runs.get_run(RID, sv) for sv in (1, 2, 3))
-    assert v1.status is RunStatus.SUPERSEDED and v1.failure_code is ErrorCode.CALLBACK_STALE and "v2" in v1.failure_reason
-    assert v2.status is RunStatus.DELIVERED
-    assert v3.status is RunStatus.RESULT_READY                      # 더 높은 번호는 그대로 — 아직 전달 대상
-    assert runs.undelivered_count() == before - 2                   # v1(대체) · v2(전달) 둘이 빠지고 v3 만 남는다
 
 
 def test_run_lock_does_not_leave_transaction_open(engine) -> None:

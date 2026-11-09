@@ -80,7 +80,7 @@ def profile_database(value):
     """Read-only preflight; migrations/roles are an operator's separate action."""
     from integration.audit_profile_database import audit
     if not audit(value)['ready']:
-        raise ValueError('Profiler requires prepared migration 0011 and app-role privileges; no automatic repair')
+        raise ValueError('Profiler requires prepared migration 0012 and app-role privileges; no automatic repair')
 
 
 def prepare_encoder(root, source):

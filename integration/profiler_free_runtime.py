@@ -28,6 +28,7 @@ async def lifespan(app):
         raise RuntimeError(
             "Free fixture requires explicit auth/DB/catalog/encoder configuration"
         )
+    app.state.mq_defer_start = True   # same order as profiler_runtime: consume only after the guards below wrap the parts
     context = main.lifespan(app)
     entered = False
     heartbeat = None
@@ -52,7 +53,7 @@ async def lifespan(app):
         app.state.catalog = GuardedCatalog(app.state.catalog, binding)
         app.state.embedding = GuardedEmbedding(app.state.embedding, binding, execution)
         app.state.store = RequiredStore(
-            app.state.store, execution, binding, required_model=False
+            app.state.store, execution, binding
         )
         app.state.embedding.encode(["합성 임베딩 준비 검증"])
         if settings.CATALOG_SOURCE != "search_http":
@@ -66,6 +67,8 @@ async def lifespan(app):
             "catalogVersionBound": binding.version,
             "synthetic": True,
         }
+        if getattr(app.state, "mq", None) is not None:
+            app.state.mq.start()      # only after every part above is wrapped
         yield
     finally:
         if heartbeat is not None:

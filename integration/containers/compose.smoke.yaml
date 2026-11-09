@@ -30,6 +30,25 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+  rabbitmq:
+    # Synthetic broker only (BE/infra own the real one). Same RabbitMQ line as the BE; credentials are synthetic.
+    image: rabbitmq:4.4.0-management@sha256:af6f50d38098d8bd52fef7f3fa85015dd8b2bf6def58e995bf584ae9ba0f6407
+    networks:
+    - backend
+    environment:
+      INTEGRATION_SYNTHETIC_ONLY: '1'
+      RABBITMQ_DEFAULT_USER: synthetic_mq
+      RABBITMQ_DEFAULT_PASS: example-synthetic-mq
+      RABBITMQ_DEFAULT_VHOST: gift
+    healthcheck:
+      test:
+      - CMD
+      - rabbitmq-diagnostics
+      - -q
+      - check_port_connectivity
+      interval: 3s
+      timeout: 10s
+      retries: 40
   qa-init:
     build:
       context: ../..
@@ -113,7 +132,7 @@ services:
     build:
       context: ../..
       dockerfile: integration/containers/Dockerfile
-      target: console-smoke
+      target: backend-smoke
     command:
     - backend
     depends_on:
@@ -123,11 +142,14 @@ services:
         condition: service_completed_successfully
       search:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       INTEGRATION_SYNTHETIC_ONLY: '1'
       AI_SERVICE_TOKEN_FILE: /run/fixture/ai_service_token
       PORT: '8002'
       LIVE_BACKEND_STATE: /run/fixture/backend-state.json
+      LIVE_BACKEND_AMQP_URL: amqp://synthetic_mq:example-synthetic-mq@rabbitmq:5672/gift
       SEARCH_URL: http://127.0.0.1:8000
       AI_DATABASE_NAME: ai_db_staging
     volumes:
@@ -177,7 +199,19 @@ services:
       PROFILING_DATABASE_URL_FILE: /run/fixture/profiler_db
       OPENROUTER_API_KEY_PROFILER_FILE: /run/fixture/openrouter_key
       EMMET_FIXTURE_MODE: /run/fixture/provider-mode.json
-      PROFILING_BACKEND_BASE_URL: http://127.0.0.1:8002
+      PROFILING_MQ_ENABLED: 'true'
+      PROFILING_MQ_URL: amqp://synthetic_mq:example-synthetic-mq@rabbitmq:5672/gift
+      PROFILING_MQ_PREFETCH: '2'
+      PROFILING_MQ_SLOTS: '2'
+      PROFILING_MQ_RECONNECT_DELAY_S: '1'
+      PROFILING_MQ_SHUTDOWN_GRACE_S: '5'
+      PROFILING_MQ_CONFIRM_TIMEOUT_S: '5'
+      PROFILING_MQ_WAIT_S: '1'
+      PROFILING_MQ_MAX_ANALYSIS_ATTEMPTS: '3'
+      PROFILING_MQ_RETRY_BASE_S: '1'
+      PROFILING_MQ_RETRY_MAX_S: '5'
+      PROFILING_MQ_RECONCILE_AFTER_S: '60'
+      PROFILING_MQ_RECONCILE_INTERVAL_S: '30'
       AI_DATABASE_NAME: ai_db_staging
       PROFILING_APP_DB_ROLE: ai_profiler_service
     volumes:
@@ -382,7 +416,6 @@ services:
       PROFILING_DATABASE_URL_FILE: /run/fixture/unready_db
       OPENROUTER_API_KEY_PROFILER_FILE: /run/fixture/openrouter_key
       EMMET_FIXTURE_MODE: /run/fixture/provider-mode.json
-      PROFILING_BACKEND_BASE_URL: http://127.0.0.1:8002
       AI_DATABASE_NAME: ai_db_staging
       PROFILING_APP_DB_ROLE: ai_profiler_service
     volumes:

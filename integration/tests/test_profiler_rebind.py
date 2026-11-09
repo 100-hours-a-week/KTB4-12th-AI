@@ -1,4 +1,7 @@
-"""Exercise real Emmet worker queues with synthetic catalog adapters and no providers."""
+"""Exercise the Emmet admission gate (MQ processor shape) with synthetic catalog adapters and no providers.
+
+11-08: the HTTP Supervisor queue is gone; ``submit`` below enters ``ManagedSearch.job()`` in a worker thread the way
+profiling.mq.process does around each analysis."""
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -8,9 +11,8 @@ import numpy as np
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from profiling.intake import settings_dep
 from profiling.ports import NoActiveCatalog
-from profiling.supervisor import Supervisor
+from profiling.settings import get_settings
 
 from integration.profiler_rebind import (
     REFRESH_PATH,
@@ -50,12 +52,28 @@ class Catalog:
 @pytest.fixture
 def managed():
     old, new = Catalog("old"), Catalog("new")
-    supervisor = Supervisor(profiling_slots=1, queue_max=4)
-    supervisor.start()
-    manager = ManagedSearch(old, supervisor, lambda: new)
+    manager = ManagedSearch(old, lambda: new)
     yield manager, old, new
-    manager.stop(2)
     manager.close()
+
+
+def submit(manager, fn, *args):
+    """Admit one job like the MQ processor (job() around the analysis); False when admission is closed."""
+    decided, admitted = threading.Event(), []
+
+    def run():
+        try:
+            with manager.job():
+                admitted.append(True)
+                decided.set()
+                fn(*args)
+        except NoActiveCatalog:
+            admitted.append(False)
+            decided.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    assert decided.wait(2)
+    return admitted[0]
 
 
 def wait_paused(manager):
@@ -63,23 +81,23 @@ def wait_paused(manager):
         assert manager.condition.wait_for(lambda: manager.paused, 2)
 
 
-def test_refresh_drains_running_and_queued_jobs_and_rejects_new_admission(managed):
+def test_refresh_drains_admitted_jobs_and_rejects_new_admission(managed):
     manager, old, new = managed
-    entered, release = threading.Event(), threading.Event()
+    entered, release = threading.Semaphore(0), threading.Event()
     completed = []
 
     def job(block=False):
         if block:
-            entered.set()
+            entered.release()
             assert release.wait(2)
         completed.append(manager.active()[0])
 
-    assert manager.submit(job, True) and entered.wait(2)
-    assert manager.submit(job)
+    assert submit(manager, job, True) and submit(manager, job, True)
+    assert entered.acquire(timeout=2) and entered.acquire(timeout=2)
     with ThreadPoolExecutor(1) as pool:
         refresh = pool.submit(manager.refresh, "new", 2)
         wait_paused(manager)
-        assert not manager.submit(job)
+        assert not submit(manager, job)
         with pytest.raises(NoActiveCatalog):
             manager.active()
         assert not old.closed and not completed
@@ -87,7 +105,7 @@ def test_refresh_drains_running_and_queued_jobs_and_rejects_new_admission(manage
         assert refresh.result(2)["changed"]
     assert completed == ["old", "old"] and old.closed == 1
     assert manager.active()[0] == "new" and not manager.status()["admissionPaused"]
-    assert manager.submit(job)
+    assert submit(manager, job)
     with manager.condition:
         assert manager.condition.wait_for(lambda: not manager.pending, 2)
     assert completed[-1] == "new" and not new.closed
@@ -96,7 +114,7 @@ def test_refresh_drains_running_and_queued_jobs_and_rejects_new_admission(manage
 def test_drain_timeout_preserves_binding_and_resumes_admission(managed):
     manager, old, _ = managed
     entered, release = threading.Event(), threading.Event()
-    assert manager.submit(lambda: (entered.set(), release.wait(2)))
+    assert submit(manager, lambda: (entered.set(), release.wait(2)))
     assert entered.wait(2)
     try:
         with pytest.raises(RefreshFailure, match="CATALOG_DRAIN_TIMEOUT"):
@@ -107,7 +125,7 @@ def test_drain_timeout_preserves_binding_and_resumes_admission(managed):
 
 
 @pytest.mark.parametrize('unfinished', [1, 3])
-def test_empty_queue_cannot_rebind_with_durable_unfinished_work(managed, unfinished):
+def test_empty_gate_cannot_rebind_while_other_replicas_run(managed, unfinished):
     manager, old, _ = managed
     manager.unfinished_runs = lambda: unfinished
     assert manager.pending == 0
@@ -167,17 +185,20 @@ def test_nonjob_reader_keeps_old_client_until_read_finishes(managed):
 def test_shutdown_during_refresh_does_not_reopen_admission(managed):
     manager, old, _ = managed
     entered, release = threading.Event(), threading.Event()
-    assert manager.submit(lambda: (entered.set(), release.wait(2)))
+    assert submit(manager, lambda: (entered.set(), release.wait(2)))
     assert entered.wait(2)
     with ThreadPoolExecutor(1) as pool:
         refresh = pool.submit(manager.refresh, "new", 2)
         wait_paused(manager)
-        manager.stop(0)
+        manager.close()                       # main.lifespan closes the shared catalog after the MQ consumer stops
         with pytest.raises(RefreshFailure, match="PROFILER_CLOSING"):
             refresh.result(2)
-        assert not manager.submit(lambda: None)
+        assert not submit(manager, lambda: None)
         assert manager.current is old and not old.closed
         release.set()
+    with manager.condition:
+        assert manager.condition.wait_for(lambda: manager.running == 0, 2)
+    assert old.closed == 1                    # the pinned catalog closes once its last admitted job ends
 
 
 def test_refresh_endpoint_requires_existing_service_auth_and_valid_target(managed):
@@ -185,7 +206,7 @@ def test_refresh_endpoint_requires_existing_service_auth_and_valid_target(manage
     app = FastAPI()
     app.state.shared_catalog = manager
     settings = SimpleNamespace(SERVICE_TOKEN="synthetic")
-    app.dependency_overrides[settings_dep] = lambda: settings
+    app.dependency_overrides[get_settings] = lambda: settings
     app.add_api_route(
         REFRESH_PATH,
         refresh_catalog,
@@ -259,7 +280,6 @@ def health_state(manager, monkeypatch):
     monkeypatch.setattr(main, "_store_health", lambda _: {"connected": True})
     return SimpleNamespace(
         catalog=manager,
-        supervisor=manager,
         shared_catalog=manager,
         embedding_status={
             "enabled": True,
@@ -347,7 +367,7 @@ def test_health_preserves_paused_admission_and_then_new_metadata(managed, monkey
     new.active = lambda: ("new", [None, None])
     state = health_state(manager, monkeypatch)
     entered, release = threading.Event(), threading.Event()
-    assert manager.submit(lambda: (entered.set(), release.wait(2)))
+    assert submit(manager, lambda: (entered.set(), release.wait(2)))
     assert entered.wait(2)
     with ThreadPoolExecutor(1) as pool:
         updating = pool.submit(manager.refresh, "new", 2)

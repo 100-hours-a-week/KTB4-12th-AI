@@ -125,13 +125,13 @@ def _settings(**kw) -> Settings:
 
 
 def test_connect_db_sets_session_timeouts_and_pool_size(engine) -> None:
-    eng = main._connect_db(_settings(PROFILING_SLOTS=3, IO_THREADS=2, DB_STATEMENT_TIMEOUT_MS=4321, DB_LOCK_TIMEOUT_MS=321))
+    eng = main._connect_db(_settings(MQ_ENABLED=True, MQ_SLOTS=1, IO_THREADS=2, DB_STATEMENT_TIMEOUT_MS=4321, DB_LOCK_TIMEOUT_MS=321))
     try:
         with eng.connect() as c:
             assert c.execute(sa.text("show statement_timeout")).scalar() == "4321ms"
             assert c.execute(sa.text("show lock_timeout")).scalar() == "321ms"
             assert c.execute(sa.text("show idle_in_transaction_session_timeout")).scalar() == "1min"
-        assert eng.pool.size() == 3 + 2
+        assert eng.pool.size() == 2 + 1 * 2 + 1                                 # IO_THREADS + MQ 슬롯 × 잠금 2 + 대조 복구 1
     finally:
         eng.dispose()
 

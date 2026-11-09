@@ -1,4 +1,4 @@
-"""파이프라인 — 7.6 요청 한 건을 끝까지 처리한다. 4단계 2.2 `profile()` 의사코드의 자리 (Application Service).
+"""파이프라인 — 프로파일링 요청(RabbitMQ 요청 메시지) 한 건을 끝까지 처리한다. 4단계 2.2 `profile()` 의사코드의 자리 (Application Service).
 
 이 파일은 "무엇을 어떤 순서로"만 안다. 바깥(파일·DB·HTTP)은 ports의 모양으로만 받고(인자 catalog·store), 구현 모듈을 import하지 않는다.
 그래서 단위 테스트는 ports 모양의 가짜(dict 하나짜리 클래스)를 넣어 DB 없이 돈다.
@@ -10,9 +10,9 @@ v2(지금): 리뷰 별점 → 소분류 편향(score_categories)을 풀 순서�
 v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.analyze()(모델) → 검증기 → Search 호출이 들어온다. 나머지 흐름은 그대로.
 
 흐름 (한 건):
-  api.run_and_callback ──▶ profile(rq, catalog=, store=, recipient_store=)
-                            0) store.save(RUNNING)         실행 기록 시작 — profile_runs 한 행 (input_hash 포함). 저장 못 하면 FAILED·콜백 없음
-                            1) catalog.active()            활성 카탈로그 (없으면 NoActiveCatalog — api가 접수 단계에서 이미 걸렀지만 여기서도 FAILED로 기록)
+  mq.process(분석) ────▶ profile(rq, catalog=, store=, recipient_store=)
+                            0) store.save(RUNNING)         실행 기록 시작 — profile_runs 한 행 (input_hash 포함). 저장 못 하면 FAILED(STORE_FAILED — MQ 는 DB 장애로 보고 다시 시도)
+                            1) catalog.active()            활성 카탈로그 (없으면 NoActiveCatalog — MQ 는 /readyz 로 먼저 거르지만 여기서도 FAILED로 기록)
                             2) validation 만들기           v1: 비선호 카테고리 이름만 disliked_category_names 에, 나머지 빈 값
                                category_scores            리뷰 별점 → 소분류 편향 (1)에서 받은 products 로 소분류를 찾는다 — 같은 카탈로그 버전)
                             3) make_pool()                 rank_products()(인기 + 편향 + 감점 순위) → 고르기: PoolStrategy.D(기본, selection.select_pool —
@@ -22,7 +22,7 @@ v3: needs_model()이 True인 분기에 카탈로그 조인 → ProfileModel.anal
                             5) store.save(outcome)         실행 기록 갱신 — callback_payload·hash가 여기서 DB에 먼저 커밋된다 (§16.4)
                             6) recipient_store.upsert()    수신자 프로필 (recipient_profiles, category_scores 포함) — 낮은 버전이면 DB가 무시
                                profile_change 로그     저장 직전 이전 프로필과 비교한 바뀐 내용 한 줄(changes.py, 글 없음 — 10-15)
-                          ◀── outcome  (RESULT_READY면 api가 7.7 콜백, FAILED면 침묵)
+                          ◀── outcome  (MQ 처리기가 결과 메시지로 바꿔 발행 — mq/process.py)
 """
 
 from __future__ import annotations
@@ -44,20 +44,19 @@ from profiling.ports import (
     NoActiveCatalog,
     ProfileRunStore,
     RecipientProfileStore,
+    ResultRefused,
     TagExtractError,
     TagExtractor,
     TagReply,
     TokenUsage,
 )
-from profiling.schemas import ProductRecord, ProfileExtractRequest
+from profiling.schemas import ProductRecord
 from profiling.types import (
     CategoryScore,
-    DislikedCategory,
     ErrorCode,
     ProfileOutcome,
     ProfileRequest,
     RecipientProfile,
-    Review,
     RunStatus,
     SearchResult,
     ValidationResult,
@@ -114,19 +113,8 @@ DISLIKED_CATEGORY_SCORE = -2.0
 
 
 # ---------------------------------------------------------------------------
-# 1) 변환 — HTTP 계약(camelCase) → 내부 자료형(snake_case). 두 세계가 만나는 곳은 여기와 backend.to_callback 뿐
+# 1) 입력 동일성
 # ---------------------------------------------------------------------------
-
-
-def to_internal(body: ProfileExtractRequest) -> ProfileRequest:
-    """7.6 DTO → ProfileRequest. 목록은 항목마다 내부 객체로 바꿔야 한다 — DTO 객체를 그대로 넣으면 pydantic이 거부한다."""
-    return ProfileRequest(
-        recipient_user_id=body.recipientUserId,
-        source_version=body.sourceVersion,
-        gift_preference=body.giftPreference,
-        disliked_categories=[DislikedCategory(category_id=c.categoryId, category_name=c.categoryName) for c in body.dislikedCategories],
-        reviews=[Review(product_id=r.productId, rating=r.rating, review_text=r.reviewText) for r in body.reviews],
-    )
 
 
 def input_hash(rq: ProfileRequest) -> str:
@@ -324,9 +312,9 @@ def profile(
     pool_strategy: PoolStrategy = PoolStrategy.D, embedding: EmbeddingIndex | None = None,
     tagger: TagExtractor | None = None, tag_spec: tagging.TagSpec | None = None, incremental_tags: bool = False,
 ) -> ProfileOutcome:
-    """7.6 요청 한 건 → ProfileOutcome (저장까지). 예외를 밖으로 내지 않고 FAILED로 돌려준다.
+    """요청 한 건 → ProfileOutcome (저장까지). 예외를 밖으로 내지 않고 FAILED로 돌려준다.
 
-    반환의 status가 RESULT_READY면 호출자(api.run_and_callback)가 7.7 콜백을 보내고, FAILED면 보내지 않는다(문서 1: AI는 침묵).
+    반환을 MQ 처리기(mq/process.py)가 결과 메시지(SUCCEEDED · FAILED)로 바꿔 결과 큐에 발행한다.
     catalog·store·recipient_store는 ports 모양이면 무엇이든 된다(파일/DB → 테스트 가짜).
     tag_spec 은 태그 규격(축 · 프롬프트) — 서비스는 기동 때 읽은 것을 넘기고, 없으면 tagging 의 기본 규격.
     incremental_tags 가 True 면 이전 프로필의 태그를 다시 쓰고 바뀐 글만 LLM 에 보낸다(incremental.py, 설정 INCREMENTAL_TAGS · 기본 꺼짐).
@@ -408,6 +396,9 @@ def profile(
     # 5) 실행 기록 갱신 — RESULT_READY + 콜백 본문. 저장 실패는 결과를 FAILED로 (콜백을 보냈는데 우리 쪽에 기록이 없는 상태를 만들지 않기 위해)
     try:
         store.save(outcome)
+    except ResultRefused as e:  # 저장소가 결과를 거절(DB 장애 아님) — 거절한 쪽이 FAILED 를 이미 남겼다
+        log.error("profile recipient=%s 결과 거절: %s", rid, _brief(e))
+        return _fail(rq, store, ErrorCode.PIPELINE_ERROR, _brief(e), save=False)
     except Exception as e:  # noqa: BLE001 — 저장 장애는 FAILED로 반환하며 입력 보호를 위해 traceback을 남기지 않는다.
         log.error("profile recipient=%s 저장 실패: %s", rid, _brief(e))
         return _fail(rq, store, ErrorCode.STORE_FAILED, f"저장 실패: {_brief(e)}", save=False)

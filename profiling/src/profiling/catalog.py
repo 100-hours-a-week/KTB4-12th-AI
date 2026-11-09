@@ -226,7 +226,7 @@ class DbCatalogReader:
     def __init__(self, engine: Engine, *, poll_ttl_s: float = 1.0, clock: Callable[[], float] = time.monotonic) -> None:
         self._engine = engine
         self._poll_ttl_s = poll_ttl_s
-        self._clock = clock                                   # 시험이 시계를 주입한다 (intake._send_and_record 의 sleep 과 같은 방식)
+        self._clock = clock                                   # 시험이 시계를 주입한다
         self._lock = threading.Lock()
         self._version: UUID | None = None
         self._products: list[ProductRecord] = []

@@ -1,9 +1,9 @@
-"""API 경계 DTO — 모델 API 설계 v3.2.7의 7.6 · 7.7 · 7.9를 그대로 옮긴다.
+"""API 경계 DTO — 공통 오류 봉투와 모델 API 설계 v3.2.7의 7.9(상품 export)를 그대로 옮긴다.
 
-필드명은 문서와 1:1(camelCase). 문서가 바뀌면 이 파일만 바뀐다.
-내부 자료형(snake_case)은 types.py에 있고, 변환은 pipeline.to_internal()과 backend.to_callback() 두 곳뿐이다.
+필드명은 문서와 1:1(camelCase). 문서가 바뀌면 이 파일만 바뀐다. 내부 자료형(snake_case)은 types.py에 있다.
+7.6 · 7.7(HTTP 프로파일링 웹훅 · 콜백)은 11-08 RabbitMQ 로 대체하며 지웠다 — 요청 · 결과 메시지 규격은 mq/messages.py · mq/results.py.
 
-구성: 1) 상수·타입 별칭  2) 공통 봉투  3) 7.6  4) 7.7  5) 7.9
+구성: 1) 상수·타입 별칭  2) 공통 봉투  3) 7.9
 """
 
 from __future__ import annotations
@@ -11,39 +11,24 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 # ---------------------------------------------------------------------------
 # 1) 상수 · 타입 별칭 — 클래스 필드가 아님. 응답 본문에 들어가는 값의 "허용 범위"를 정의한다.
 # ---------------------------------------------------------------------------
 
-## §2.3 프로파일 상태 모델. AI가 보내는 값은 7.6 응답 PENDING, 7.7 요청 COMPLETED뿐
-ProfileStatus = Literal["NONE", "PENDING", "COMPLETED", "FAILED"]
-
 ## 재고 상태 — 검색기(product-search)와 같은 3값. 미확인은 unknown으로 두고 추정하지 않는다.
 ## 패키지로 적재한 상품은 재고 정보가 없어 전건 unknown이고, Backend 7.9 export가 available/unavailable로 덮는다.
 Availability = Literal["available", "unavailable", "unknown"]
 
-## 7.6 오류 코드 (7.5 채팅과 같은 체계). 분석이 실패해도 이 엔드포인트나 7.7로 FAILED를 보내지 않는다
-ProfileExtractErrorCode = Literal[
-    "INVALID_REQUEST",  # 400 — 필수 필드 누락·타입 오류·reviews 10개 초과·rating 범위 밖. Backend 재시도 안 함
-    "UNAUTHORIZED",  # 401 — 서비스 토큰 오류
-    "FORBIDDEN",  # 403 — 접근 권한 없음
-    "INTERNAL_SERVER_ERROR",  # 500 — Backend: 재시도 가능 실패 → 틱 중단 + 디바운스 재시작 1회, 두 번째 실패면 접음(통합 수정점 v0.7 ②③, 10-08 실측)
-    "SERVICE_UNAVAILABLE",  # 503 — 활성 카탈로그 없음·대기열 가득. Backend 처리는 500과 같다(Retry-After 는 읽지 않음).
-                             #       카탈로그 없음은 보통 /health 핑(catalog.active=false)에서 먼저 걸러져 7.6 자체가 오지 않는다
-]
-
-## 7.7 오류 코드 — AI가 콜백을 보낸 뒤 Backend에게 받는 것
-ProfileCallbackErrorCode = Literal[
-    "RECIPIENT_ID_MISMATCH",  # 400 — 재시도하지 않음. AI 쪽 버그로 간주
-    "INVALID_REQUEST",  # 400 — 재시도하지 않음
-    "STALE_SOURCE_VERSION",  # 409 — 순서 역전. 재시도하지 않고 결과 폐기(SUPERSEDED)
-    "UNAUTHORIZED",  # 401
-    "FORBIDDEN",  # 403
-    "INTERNAL_SERVER_ERROR",  # 500 — 최대 3회 재시도
-    "SERVICE_UNAVAILABLE",  # 503 — 최대 3회 재시도
-]
 
 
 # ---------------------------------------------------------------------------
@@ -71,97 +56,7 @@ class ErrorResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 3) 7.6 수신자 비동기 프로파일링 웹훅 — Backend → AI
-# POST /api/internal/v1/ai/profile/extract-and-pool
-# ---------------------------------------------------------------------------
-
-
-## 7.6 본문의 모르는 필드는 거부하지 않고 받아 둔다(extra="allow") — Backend가 필드를 추가해도 연동이 안 깨지게.
-## 대신 intake.py가 unknown_fields()로 찾아 ErrorCode.CONTRACT_7_6_UNKNOWN_FIELD 경고를 남긴다. 필수 누락·타입 오류만 400.
-_ALLOW = ConfigDict(extra="allow")
-
-
-## 비선호 카테고리
-class DislikedCategoryDto(BaseModel):
-    model_config = _ALLOW
-
-    categoryId: int = Field(gt=0, description="안전한 양의 정수; 비선호 판정 키(위키 7.6: 감점 대상 판정 키). BE는 대분류(root) id 1~10만 보낸다(09-27) — "
-                                         "AI는 그 하위 소분류 전체를 비선호로 본다. v1은 제외, v2는 감점(settings.DISLIKE_MODE)")
-    categoryName: str = Field(description="LLM이 의미를 이해하는 용도")
-
-
-## 리뷰
-class ReviewDto(BaseModel):
-    model_config = _ALLOW
-
-    productId: int = Field(gt=0)
-    rating: int = Field(ge=1, le=5)
-    reviewText: str | None = Field(default=None, description="리뷰 본문. 글이 없으면 null (별점 필수·글 선택)")
-
-
-## 프로파일 추출 요청 — 값이 꼭 있어야 하는 건 recipientUserId·sourceVersion 둘뿐이지만, 입력 세 칸은 **키를 반드시 보내고 값은 비어도 된다**([]·null·[]).
-## 키가 빠지면 Backend 쪽 결함으로 보고 400 — 분석하지 않는다(10-09 결정: 빈 값을 "일부러" 보냈다는 것이 드러나게). 세 칸이 전부 비어도 접수한다(인기순 30개).
-## **전환 2단계(10-09):** 1단계(지금) dislikedCategories 키 필수. giftPreference·reviews 는 지금 Backend 가 세 필드만 보내므로 생략을 허용한다.
-##   2단계(Backend V2 배포와 같은 시점) 두 칸도 키 필수로 올린다 — 아래 두 줄의 default 를 지우고 test_schemas 의 콜드 스타트 시험을 뒤집는다.
-class ProfileExtractRequest(BaseModel):
-    model_config = _ALLOW
-
-    recipientUserId: int = Field(gt=0)
-    sourceVersion: int = Field(ge=0, description="호출 시점의 최신 값. 등록 데이터가 없으면 0")
-    dislikedCategories: list[DislikedCategoryDto] = Field(
-        max_length=5,
-        description="비선호 대분류. 키 필수, 값은 [] 가능 — 키가 빠지면 400(10-09). 최대 5 — BE PreferencePolicy.MAX_SELECTABLE_COUNT 와 같은 값(09-27 결정), 6개 이상은 400")
-    giftPreference: str | None = Field(default=None, description="취향 자유 텍스트. 없으면 null. 키 생략은 Backend V2 배포 전까지만 허용(전환 2단계에서 필수로)")
-    reviews: list[ReviewDto] = Field(default_factory=list, max_length=10, description="작성일 최신순 최대 10개(상품당 최신 1건). 없으면 []. 키 생략은 Backend V2 배포 전까지만 허용(전환 2단계에서 필수로). 11개 이상은 400(자르지 않음, 10-09 D5)")
-
-
-def unknown_fields(body: ProfileExtractRequest) -> dict[str, list[str]]:
-    """7.6 본문에서 계약에 없는 필드 이름 — {"": [최상위], "dislikedCategories": [...], "reviews": [...]}. 없으면 {}.
-    intake.py가 접수 로그에 남긴다(무시하고 진행). 하위 목록은 항목들을 합쳐 이름만 모은다."""
-    out: dict[str, list[str]] = {}
-    if body.model_extra:
-        out[""] = sorted(body.model_extra)
-    for name, items in (("dislikedCategories", body.dislikedCategories), ("reviews", body.reviews)):
-        names = sorted({k for it in items if it.model_extra for k in it.model_extra})
-        if names:
-            out[name] = names
-    return out
-
-
-## 프로파일 접수 응답 data (202) — 요청 값을 그대로 돌려주고 profileStatus는 항상 PENDING
-class ProfileAccepted(BaseModel):
-    recipientUserId: int
-    sourceVersion: int
-    profileStatus: Literal["PENDING"] = "PENDING"
-
-
-# ---------------------------------------------------------------------------
-# 4) 7.7 30개 추천풀 콜백 저장 — AI → Backend
-# POST /api/internal/v1/recipients/{recipientUserId}/profile
-# ---------------------------------------------------------------------------
-
-
-## 프로파일 콜백 요청 — 태그는 보내지 않는다(AI ai_profile.recipient_profiles에 보관, DR-035).
-## Body의 recipientUserId는 Path의 {recipientUserId}와 같아야 한다(다르면 400 RECIPIENT_ID_MISMATCH).
-## recommendedProductIds는 배열 순서가 곧 추천 순위, 최대 30개.
-class ProfileCallbackRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    recipientUserId: int = Field(gt=0)
-    sourceVersion: int = Field(ge=0, description="7.6 요청으로 받은 값을 그대로")
-    profileStatus: Literal["COMPLETED"] = "COMPLETED"
-    recommendedProductIds: list[int] = Field(max_length=30)
-
-
-## 프로파일 콜백 응답 data (200)
-class ProfileCallbackAccepted(BaseModel):
-    recipientUserId: int
-    sourceVersion: int
-    profileStatus: Literal["COMPLETED"]
-
-
-# ---------------------------------------------------------------------------
-# 5) 7.9 상품 전체 export — Backend → AI Catalog CLI
+# 3) 7.9 상품 전체 export — Backend → AI Catalog CLI
 # GET /internal/v1/ai/products/export
 # ---------------------------------------------------------------------------
 

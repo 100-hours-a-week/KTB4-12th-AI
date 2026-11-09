@@ -127,13 +127,15 @@ def main():
             expected_ids={101,102};first_id=101
         result['catalogBinding'] = binding
         passed('single_canonical_product_and_real_encoder_vector_generation')
-        search_port, profile_port, chat_port, callback_port = [free_port() for _ in range(4)]
-        search_url, profile_url, chat_url, callback_url = [f'http://127.0.0.1:{p}' for p in [search_port, profile_port, chat_port, callback_port]]
+        search_port, profile_port, chat_port = [free_port() for _ in range(3)]
+        search_url, profile_url, chat_url = [f'http://127.0.0.1:{p}' for p in [search_port, profile_port, chat_port]]
+        # 11-08: profiling requests/results go through a disposable local RabbitMQ instead of a callback server.
+        from integration.tests import mq_harness
+        mq_url = mq_harness.broker_url(); mq_harness.declare(mq_url)
         # Synthetic credentials exist only in this test process, never in defaults.
         service_token = 'synthetic-integration-' + uuid.uuid4().hex
         def service_cmd(service, module, p):
             return [python[service], '-B', '-m', 'uvicorn', module, '--host', '127.0.0.1', '--port', str(p), '--workers', '1', '--no-access-log']
-        start('callback', service_cmd('profiling', 'callback_app:app', callback_port), ROOT/'integration/tests', {})
         search_db = url.replace('fixture_owner@', 'ai_search_service@')
         start('search', service_cmd('product-search', 'app:app', search_port), ROOT/'product-search', {
             'SEARCH_CATALOG_DATABASE_URL': search_db, 'SEARCH_QA_DATABASE_URL': search_db, 'SEARCH_RUNTIME_ROOT': str(runtime), 'SEARCH_MEDIA_ROOT': str(media)})
@@ -142,9 +144,9 @@ def main():
             'PYTHONPATH':os.pathsep.join([str(ROOT),str(ROOT/'profiling/src')]),
             'PROFILING_DATABASE_URL': profile_db.replace('postgresql://', 'postgresql+psycopg://'),
             'PROFILING_CATALOG_SOURCE': 'db', 'PROFILING_DB_REFUSE_SUPERUSER': 'true',
-            'PROFILING_SERVICE_TOKEN': service_token, 'PROFILING_BACKEND_BASE_URL': callback_url,
+            'PROFILING_SERVICE_TOKEN': service_token, **mq_harness.profiler_env(mq_url),
             'PROFILING_TAGGER': 'none', 'PROFILING_EMBEDDING_DIR': str(runtime), 'PROFILING_EMBEDDING_REQUIRED': 'true',
-            'PROFILING_CALLBACK_MAX_ATTEMPTS': '1', 'PROFILING_CATALOG_POLL_TTL_S': '0'}
+            'PROFILING_CATALOG_POLL_TTL_S': '0'}
         profile_process = start('profiling', service_cmd('profiling', 'integration.profiler_free_runtime:app', profile_port), ROOT/'profiling', profile_variables)
         chat_db = url.replace('fixture_owner@', 'ai_chat_service@') + '?options=-csearch_path%3Dai_chat,public'
         start('chat', service_cmd('chat', 'app.main:app', chat_port), ROOT/'chat', {
@@ -156,7 +158,6 @@ def main():
             def ready_json(url, check=lambda data: True):
                 response = http.get(url)
                 return response.json() if response.status_code == 200 and check(response.json()) else None
-            until(lambda: http.get(callback_url+'/health').status_code==200)
             search_ready = until(lambda: ready_json(search_url+'/readyz'))
             profile_ready = until(lambda: ready_json(profile_url+'/health', lambda data: data['catalog']['active'] and data['store']['connected']))
             auth = {'Authorization': 'Bearer '+service_token}
@@ -198,29 +199,22 @@ def main():
                     return row[0] if row else None
             def request(rid):
                 return {'recipientUserId':rid,'sourceVersion':1,'giftPreference':'합성 휴대용 선물','dislikedCategories':[], 'reviews':[]}
-            path = profile_url+'/api/internal/v1/ai/profile/extract-and-pool'
-            assert http.post(path,json=request(901)).status_code==401
-            assert http.post(path,json=request(901),headers=auth).status_code==202
-            until(lambda:status(901)=='DELIVERED')
-            with psycopg.connect(url) as db:
-                saved=db.execute('SELECT recommended_product_ids FROM ai_profile.recipient_profiles WHERE recipient_user_id=901').fetchone()
-                assert saved and set(saved[0]) <= expected_ids
-            passed('profiling_auth_result_saved_and_callback_delivered')
-            http.put(callback_url+'/fixture/mode/902/503')
-            assert http.post(path,json=request(902),headers=auth).status_code==202
-            until(lambda:status(902)=='RESULT_READY')
-            http.put(callback_url+'/fixture/mode/902/200')
-            assert http.post(path,json=request(902),headers=auth).status_code==202
-            until(lambda:status(902)=='DELIVERED')
-            calls=http.get(callback_url+'/fixture/calls').json()['902'];assert len(calls)==2 and calls[0]==calls[1]
-            passed('profiling_callback_failure_retains_result_same_payload_retry')
-            http.put(callback_url+'/fixture/mode/903/400')
-            assert http.post(path,json=request(903),headers=auth).status_code==202
-            until(lambda:status(903)=='FAILED')
-            http.put(callback_url+'/fixture/mode/903/200')
-            assert http.post(path,json=request(903),headers=auth).status_code==202
-            until(lambda:status(903)=='DELIVERED')
-            passed('profiling_failed_result_persisted_then_same_request_recovery')
+            with mq_harness.Results(mq_url) as results:
+                mq_harness.publish(mq_url, request(901))
+                until(lambda:status(901)=='RESULT_READY')
+                first = results.wait(1, 30)[0]
+                assert first['payload']['outcome']=='SUCCEEDED'
+                with psycopg.connect(url) as db:
+                    saved=db.execute('SELECT recommended_product_ids FROM ai_profile.recipient_profiles WHERE recipient_user_id=901').fetchone()
+                    assert saved and set(saved[0]) <= expected_ids
+                passed('profiling_mq_request_result_saved_and_published')
+                mq_harness.publish(mq_url, request(901))
+                assert results.wait(2, 30)[1]['payload']==first['payload']
+                passed('profiling_duplicate_input_reuses_stored_result')
+                mq_harness.publish(mq_url, request(901) | {'giftPreference': '다른 합성 취향'})
+                conflict = results.wait(3, 30)[2]['payload']
+                assert conflict['outcome']=='FAILED' and conflict['error']['code']=='REQUEST_CONFLICT'
+                passed('profiling_same_version_different_input_is_conflict_result')
             # Real chat PostgreSQL events, fixture-only HTTP and streaming.
             cid,tid=str(uuid.uuid4()),str(uuid.uuid4());base=chat_url+'/v1/chat/test/conversations/'+cid
             assert http.put(base,json={'senderUserId':7,'recipientUserId':42},headers=auth).status_code==201

@@ -22,7 +22,7 @@ COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=encoder /usr/local/bin/node /usr/local/bin/node
 COPY --from=encoder /opt/encoder /opt/encoder
 # Only runtime/migration adapters; historical launchers and fake BE stay out.
-COPY integration/audit_profile_database.py integration/database_identity.py integration/migrate_single_server.py integration/profile_callback.py integration/profile_contract.py integration/profiler_boundary.py integration/profiler_generation.py integration/profiler_health.py integration/profiler_rebind.py integration/profiler_runtime.py integration/search_sync.py integration/shared_search_binding.py /workspace/integration/
+COPY integration/audit_profile_database.py integration/database_identity.py integration/migrate_single_server.py integration/profile_contract.py integration/profiler_boundary.py integration/profiler_generation.py integration/profiler_health.py integration/profiler_rebind.py integration/profiler_runtime.py integration/search_sync.py integration/shared_search_binding.py /workspace/integration/
 COPY integration/provider_key.py integration/service_token.py integration/aws_credentials.py /workspace/integration/
 COPY integration/containers/entrypoint.py integration/containers/health.py /workspace/integration/containers/
 COPY integration/recipient_data.py integration/recipient_profile.sql /workspace/integration/
@@ -115,9 +115,16 @@ CMD ["chat-smoke"]
 
 FROM console AS console-smoke
 USER root
+RUN touch /workspace/integration/containers/smoke_only
+USER 10001:10001
+
+# Synthetic BE stand-in: publishes profiling.request / consumes profiling.result, so it needs the Profiler's pika.
+FROM profiler AS backend-smoke
+USER root
 COPY integration/live_backend.py /workspace/integration/
 RUN touch /workspace/integration/containers/smoke_only
 USER 10001:10001
+CMD ["backend"]
 
 FROM profiler AS migrate
 COPY integration/migration_upgrade.py integration/catalog_transition.py /workspace/integration/
