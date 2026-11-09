@@ -53,6 +53,9 @@ async def lifespan(app):
     if main.strict_problems(settings, managed_auth=shared_auth):
         raise RuntimeError("Integrated strict startup settings invalid")
     def provider_factory(*args, **kwargs):
+        # 성능 측정 대역(PROFILING_TAGGER_STUB): 전송이 대역이라 키를 쓰지 않는다 — 주소 · 세대 검사(PreflightTransport)는 그대로
+        if getattr(settings, "TAGGER_STUB", False):
+            return ProviderLimitedExtractor(*args, **kwargs)
         return ProviderLimitedExtractor(*args, **kwargs, credential_source=source)
     original = llm.OpenRouterTagExtractor
     llm.OpenRouterTagExtractor = provider_factory
