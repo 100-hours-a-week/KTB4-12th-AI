@@ -204,7 +204,10 @@ async def test_demo_proxy_omits_false_marker_and_preserves_explicit_check(monkey
         forwarded.append((path, body))
         return {'synthetic': True}
 
-    monkeypatch.setattr(main.app, 'state', State({'store': DemoStore()}))
+    store = DemoStore()
+    runtime = Runtime.__new__(Runtime)
+    runtime.init_state(store, None, 'synthetic-owner')
+    monkeypatch.setattr(main.app, 'state', State({'store': store, 'runtime': runtime}))
     monkeypatch.setattr(main, 'throttle', lambda *args: None)
     monkeypatch.setattr(main, 'proxied', capture)
     payload = {'message': 'synthetic'}

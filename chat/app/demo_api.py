@@ -8,6 +8,7 @@ from pydantic import UUID4, Field, field_validator
 from app.models import PutConversation, StrictModel, PutTurn
 from app.security import SIGNER, same_origin, valid_token, throttle
 from app.errors import APIError
+from app.resource_limits import limits_for
 
 router=APIRouter(include_in_schema=False)
 bearer=HTTPBearer(auto_error=False)
@@ -18,13 +19,20 @@ async def trial_owner(request:Request,credentials:Annotated[HTTPAuthorizationCre
         raise APIError(401,'체험 코드가 필요합니다.')
     try:sid=SIGNER.loads(request.cookies.get('chat_session',''),salt='demo',max_age=86400*30)
     except (BadSignature,SignatureExpired):raise APIError(401,'먼저 /demo/session에서 체험 코드를 입력하고 쿠키를 유지해 주세요.')
+    if request.method=='PUT' and request.url.path.rsplit('/',2)[-2]=='turns':
+        return await limits_for(request.app.state.runtime).preflight(request.app.state.store,'session',sid=sid)
     return await request.app.state.store.call('session',sid=sid)
 Owner=Annotated[int,Depends(trial_owner)]
 LIVE='/demo/api/conversations';FREE='/demo/api/test/conversations'
-async def owned(request,cid,sender):
+async def owned(request,cid,sender,*,preflight=False):
     store=request.app.state.store
-    await store.call('owned',cid=cid,sender=sender)
-    binding=await store.call('binding',cid=cid)
+    if preflight:
+        limits=limits_for(request.app.state.runtime)
+        await limits.preflight(store,'owned',cid=cid,sender=sender)
+        binding=await limits.preflight(store,'binding',cid=cid)
+    else:
+        await store.call('owned',cid=cid,sender=sender)
+        binding=await store.call('binding',cid=cid)
     fixture=request.url.path.startswith(FREE)
     if bool(binding.get('protocolFixture'))!=fixture:raise APIError(409,'대화를 시작한 실행 경로를 사용해 주세요.')
     return fixture
@@ -65,7 +73,7 @@ class TrialTurn(StrictModel):
 @router.put(FREE+'/{cid}/turns/{tid}')
 async def turn(cid:UUID4,tid:UUID4,body:TrialTurn,request:Request,sender:Owner):
     from app.main import proxied,BASE,TEST_BASE
-    fixture=await owned(request,str(cid),sender);throttle(('turns',sender),30,3600)
+    fixture=await owned(request,str(cid),sender,preflight=True);throttle(('turns',sender),30,3600)
     # Use the deployed admission/budget/fixture implementation unchanged.
     return await proxied(f'{TEST_BASE if fixture else BASE}/{cid}/turns/{tid}',body.model_dump())
 

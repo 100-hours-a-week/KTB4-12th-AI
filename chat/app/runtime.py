@@ -126,7 +126,7 @@ class Runtime:
   # is full, the model is unavailable, or paid reservations are halted.
   if tid not in self.admissions:
    async with asyncio.timeout(10):
-    existing = await self.store.call(
+    existing = await self.resource_limits.preflight(self.store,
      "existing_turn", cid=cid, tid=tid, message=message, model=model,
      recipient_context=recipient_context,
      **({"prepared_context": prepared_context} if prepared_context is not None else {}),
@@ -209,7 +209,7 @@ class Runtime:
   try:
    admission = self.admissions[tid]
    async with asyncio.timeout(10):
-    existing = await self.store.call(
+    existing = await self.resource_limits.preflight(self.store,
      "existing_turn",
      cid=cid,
      tid=tid,
