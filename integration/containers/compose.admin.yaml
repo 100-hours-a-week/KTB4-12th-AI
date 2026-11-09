@@ -32,7 +32,7 @@ services:
       APP_REVISION: ${APP_REVISION:-}
       OPENROUTER_MANAGED_KEY_DIR: /run/provider-key
       BE_SERVICE_TOKEN_DIR: /run/provider-key
-      AI_ENVIRONMENT: ${AI_ENVIRONMENT:?local, develop, or production}
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:?local, develop, staging, or production}
     secrets: [console_target, console_admin_hash]
     volumes:
     - console-cache:/runtime

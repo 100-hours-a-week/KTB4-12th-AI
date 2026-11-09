@@ -214,6 +214,7 @@ services:
     environment:
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?existing migration role DSN}
       AI_DATABASE_HOST: ${AI_DATABASE_HOST:-postgres}
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:-develop}
     restart: 'no'
 volumes:
   postgres-data:
