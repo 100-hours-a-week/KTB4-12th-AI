@@ -102,7 +102,7 @@ class FakeModal:
 def _engine(server, laya=None, fallback=None, timeout_s=240.0, structured="grammar", modal_fail=None, spec=DIS):
     vllm = V3Client("http://vllm.test", structured=structured, transport=httpx.MockTransport(server), sleep=lambda s: None)
     modal = FakeModal(Core(vllm, laya or FakeLaya(), spec), fail=modal_fail)
-    client = V3Client("http://v3.test", "k", proxy_key="wk-test", proxy_secret="ws-test", transport=httpx.MockTransport(modal), sleep=lambda s: None)
+    client = V3Client("https://v3.test", "k", proxy_key="wk-test", proxy_secret="ws-test", transport=httpx.MockTransport(modal), sleep=lambda s: None)
     eng = V3Engine(client, DIS, timeout_s=timeout_s, fallback=fallback)
     eng.modal = modal       # 시험에서 보려고
     return eng
@@ -203,7 +203,7 @@ def test_client_connect_error_and_4xx_are_unavailable() -> None:
 
 def test_client_yes_prob_and_body_shape() -> None:
     srv = FakeServer(yes={"향수": 0.8})
-    c = V3Client("http://v3.test", "sekret-test-key", transport=httpx.MockTransport(srv), sleep=lambda s: None)
+    c = V3Client("https://v3.test", "sekret-test-key", transport=httpx.MockTransport(srv), sleep=lambda s: None)
     p, _ = c.yes_prob("base", [{"role": "user", "content": "'향수'"}], deadline=Deadline(240))
     assert p == pytest.approx(0.8)
     assert srv.bodies[0]["top_logprobs"] == 10 and srv.bodies[0]["chat_template_kwargs"] == {"enable_thinking": False}
@@ -351,7 +351,7 @@ def test_settings_default_is_v3() -> None:
 def test_main_turns_v3_on_only_with_url_and_three_keys(env, on, caplog) -> None:
     from profiling.main import _v3_engine
     from profiling.settings import Settings
-    kw = {"TAG_ENGINE": "v3", "V3_URL": "http://v3.test", "V3_API_KEY": "k", "V3_PROXY_KEY": "wk-test", "V3_PROXY_SECRET": "ws-test", **env}
+    kw = {"TAG_ENGINE": "v3", "V3_URL": "https://v3.test", "V3_API_KEY": "k", "V3_PROXY_KEY": "wk-test", "V3_PROXY_SECRET": "ws-test", **env}
     s = Settings(_env_file=None, DATABASE_URL="postgresql://x", **{k: v for k, v in kw.items() if v is not None})
     v2 = FakeTagger([])
     with caplog.at_level("INFO", logger="profiling.main"):
