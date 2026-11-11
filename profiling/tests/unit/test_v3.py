@@ -292,8 +292,15 @@ def test_pipeline_v3_without_fallback_continues_without_tags() -> None:
 
 def test_pipeline_v3_skips_model_when_no_signal() -> None:
     srv = FakeServer()
-    out, _ = _profile(_rq(reviews=[Review(product_id=3, rating=2, review_text="별로")]), PRODUCTS, tagger=_engine(srv), tag_spec=DIS)
+    out, _ = _profile(_rq(reviews=[Review(product_id=3, rating=2, review_text=None)]), PRODUCTS, tagger=_engine(srv), tag_spec=DIS)
     assert out.tag_status == "skip_no_signal" and srv.bodies == []
+
+
+def test_pipeline_v3_calls_model_for_low_star_review_text() -> None:
+    """1~3점 리뷰 글뿐이어도 비선호 규격이면 v3 를 부른다(11-07 — 비선호는 낮은 별점 리뷰 글에서도 나온다)."""
+    srv = FakeServer()
+    out, _ = _profile(_rq(reviews=[Review(product_id=3, rating=2, review_text="별로")]), PRODUCTS, tagger=_engine(srv), tag_spec=DIS)
+    assert out.tag_status != "skip_no_signal" and srv.bodies
 
 
 def test_engine_rejects_non_disliked_spec() -> None:
