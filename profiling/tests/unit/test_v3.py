@@ -292,8 +292,15 @@ def test_pipeline_v3_without_fallback_continues_without_tags() -> None:
 
 def test_pipeline_v3_skips_model_when_no_signal() -> None:
     srv = FakeServer()
-    out, _ = _profile(_rq(reviews=[Review(product_id=3, rating=2, review_text="별로")]), PRODUCTS, tagger=_engine(srv), tag_spec=DIS)
+    out, _ = _profile(_rq(reviews=[Review(product_id=3, rating=2, review_text=None)]), PRODUCTS, tagger=_engine(srv), tag_spec=DIS)
     assert out.tag_status == "skip_no_signal" and srv.bodies == []
+
+
+def test_pipeline_v3_calls_model_for_low_star_review_text() -> None:
+    """1~3점 리뷰 글뿐이어도 비선호 규격이면 v3 를 부른다(11-07 — 비선호는 낮은 별점 리뷰 글에서도 나온다)."""
+    srv = FakeServer()
+    out, _ = _profile(_rq(reviews=[Review(product_id=3, rating=2, review_text="별로")]), PRODUCTS, tagger=_engine(srv), tag_spec=DIS)
+    assert out.tag_status != "skip_no_signal" and srv.bodies
 
 
 def test_engine_rejects_non_disliked_spec() -> None:
@@ -336,7 +343,7 @@ def test_engine_rejects_bad_modal_response() -> None:
 def test_settings_default_is_v3() -> None:
     from profiling.settings import Settings
     s = Settings(_env_file=None, DATABASE_URL="postgresql://x")
-    assert s.TAG_ENGINE == "v3" and not s.V3_URL and s.V3_TIMEOUT_S < s.RUNNING_STALE_S and s.V3_FALLBACK
+    assert s.TAG_ENGINE == "v3" and not s.V3_URL and s.V3_FALLBACK
 
 
 @pytest.mark.parametrize(("env", "on"), [({}, True), ({"V3_PROXY_SECRET": None}, False), ({"V3_PROXY_KEY": None}, False), ({"V3_API_KEY": None}, False),
@@ -353,18 +360,6 @@ def test_main_turns_v3_on_only_with_url_and_three_keys(env, on, caplog) -> None:
     assert "wk-test" not in caplog.text and "ws-test" not in caplog.text            # 키는 로그에 안 남김
     if on:
         tagger.close()
-
-
-@pytest.mark.parametrize(("tagger_timeout", "warned"), [(30.0, False), (120.0, True)])
-def test_main_warns_when_v3_plus_fallback_exceeds_stale(tagger_timeout, warned, caplog) -> None:
-    from profiling.main import _v3_engine
-    from profiling.settings import Settings
-    s = Settings(_env_file=None, DATABASE_URL="postgresql://x", TAG_ENGINE="v3", V3_URL="http://v3.test", V3_API_KEY="k",
-                 V3_PROXY_KEY="wk-test", V3_PROXY_SECRET="ws-test", TAGGER_TIMEOUT_S=tagger_timeout)
-    with caplog.at_level("WARNING", logger="profiling.main"):
-        tagger, _ = _v3_engine(s, FakeTagger([]), DIS)
-    assert ("RUNNING_STALE_S" in caplog.text) is warned       # develop 은 30(240 + 30 < 300) — 코드 기본 120 이면 경고
-    tagger.close()
 
 
 def test_bind_generation_checks_before_modal_and_forwards_to_fallback() -> None:

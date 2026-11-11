@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 
+import pytest
+
 from profiling import vocab
 from profiling.schemas import ProductRecord
 
@@ -177,3 +179,79 @@ def test_query_text_spells_out_one_letter_preferred_tags():
     assert "맥(MAC)" in (vocab.query_text("브랜드", "맥") or "")
     assert vocab.query_text("카테고리", "꿀") == "벌꿀 허니"                            # 꿀 묶음(10-17 재생 시험: 빼면 꿀스틱이 빠졌다)
     assert vocab.query_text("카테고리", "죽") is None and vocab.query_text("IP", "꿀") is None   # '죽' 은 '가죽' 과 겹쳐 묶음을 두지 않음
+
+
+# ---- 카탈로그에 없는 비선호 말 → 머리말 물러남(11-07)
+
+_CAT = [_p(name="클래식 가죽 시계", kind="패션시계", cat="시계"), _p(name="원목 벽시계", kind="벽시계", cat="인테리어소품"),
+        _p(name="소가죽 반지갑", kind="반지갑", cat="지갑·벨트"), _p(name="슬림 카드지갑", kind="카드지갑", cat="지갑·벨트"),
+        _p(name="콜드브루 원액", kind="콜드브루", cat="커피·음료"), _p(name="쑥 가래떡", kind="떡", cat="떡·한과"),
+        _p(name="딸기 생크림 케이크", kind="케이크", cat="케이크")]
+
+
+@pytest.fixture
+def catalog_words(monkeypatch):
+    monkeypatch.setattr(vocab, "HEAD_MAX_SHARE", 1.0)          # 상품 7개짜리 시험 카탈로그 — 넓은 말 상한은 따로 본다
+    vocab.set_catalog_words(_CAT)
+    yield
+    vocab.set_catalog_words([])
+
+
+def _hits(text: str) -> list[str]:
+    m = vocab.matcher("카테고리", text)
+    return [p.name for p in _CAT if m(p)]
+
+
+def test_disliked_tag_absent_from_catalog_backs_off_to_head_word(catalog_words) -> None:
+    assert _hits("손목시계") == ["클래식 가죽 시계"]                           # 소분류 '시계' — '벽시계' 는 낱말이 달라 아님
+    assert _hits("장지갑") == ["소가죽 반지갑", "슬림 카드지갑"]              # 소분류 조각 '지갑'
+    assert _hits("탄산음료") == ["콜드브루 원액"]                              # 소분류 '커피·음료' 의 조각
+    assert vocab.head_word("손목시계", vocab._WORDS_KEY[0]) == "시계"
+
+
+def test_disliked_tag_in_catalog_keeps_plain_match(catalog_words) -> None:
+    assert _hits("카드지갑") == ["슬림 카드지갑"]                             # 카탈로그에 있는 말은 그대로 — 넓히지 않는다
+
+
+def test_backoff_skips_tails_that_are_not_words(catalog_words) -> None:
+    assert _hits("콘플레이크") == []                                           # '이크' 는 낱말이 아니다(케이크에 걸면 안 됨)
+    assert _hits("흑임자떡") == []                                             # 한 글자 머리말(떡)로는 물러나지 않는다
+    assert _hits("매니큐어") == []                                             # 카탈로그에 없는 물건은 그대로 0개
+    vocab.set_catalog_words([])
+    assert _hits("손목시계") == []                                             # 목록이 없으면(시험 · 적재 전) 글자 대조만
+
+
+def test_backoff_stops_at_broad_head_word(monkeypatch) -> None:
+    monkeypatch.setattr(vocab, "HEAD_MAX_SHARE", 0.2)          # 7개 × 0.2 → 상한 1개
+    vocab.set_catalog_words(_CAT)
+    try:
+        assert _hits("손목시계") == ["클래식 가죽 시계"]                       # '시계' 1개 — 상한 안
+        assert _hits("장지갑") == []                                           # '지갑' 2개 — 넓은 말이라 물러나지 않음
+    finally:
+        vocab.set_catalog_words([])
+
+
+# ---- 큰 분류 이름 비선호 → 그 큰 분류 상품 전체(11-10 밤: '취미·여가 선물' 이 상품 0개에 걸림)
+
+_TOPS = [_p(name="캠핑 의자", kind="캠핑체어", cat="스포츠·레저용품", top="취미·여가"), _p(name="보드게임 세트", kind="보드게임", cat="보드게임·퍼즐", top="취미·여가"),
+         _p(name="한우 선물세트", kind="한우", cat="정육·수산", top="식품"), _p(name="딸기 생크림 케이크", kind="케이크", cat="케이크", top="카페·디저트"),
+         _p(name="향초", kind="캔들", cat="홈프래그런스", top="생활")]
+
+
+def _top_hits(text: str) -> list[str]:
+    m = vocab.matcher("카테고리", text)
+    return [p.name for p in _TOPS if m(p)]
+
+
+def test_disliked_parent_category_name_hits_whole_parent() -> None:
+    vocab.set_catalog_words(_TOPS)
+    try:
+        assert _top_hits("취미·여가 선물") == ["캠핑 의자", "보드게임 세트"]      # 꼬리 '선물' 떼고 큰 분류 이름
+        assert _top_hits("취미·여가용품") == ["캠핑 의자", "보드게임 세트"]       # 꼬리 '용품'
+        assert _top_hits("식품 선물") == ["한우 선물세트"]
+        assert _top_hits("카페") == ["딸기 생크림 케이크"]                       # 가운뎃점 조각
+        assert _top_hits("생활용품") == ["향초"]
+        assert _top_hits("캠핑") == ["캠핑 의자"]                                 # 묶음(@캠핑용품)이 먼저 — 큰 분류로 넓히지 않음
+    finally:
+        vocab.set_catalog_words([])
+    assert _top_hits("취미·여가 선물") == []                                      # 목록이 없으면 큰 분류 대조 안 함

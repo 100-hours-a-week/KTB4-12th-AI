@@ -62,7 +62,6 @@ def compose_check():
             CONSOLE_ADMIN_ORIGIN="https://console.example.invalid", CONSOLE_TRUSTED_PROXY_IPS="127.0.0.1",
             EMMET_POSTGRES_VOLUME="ai-rc-config-not-created",
             EMMET_MODEL_DIR=tmp, EMMET_MEDIA_DIR=tmp,
-            PROFILING_BACKEND_BASE_URL="http://127.0.0.1:8002",
             BACKEND_EXPORT_URL="https://example.invalid/products",
             BACKEND_CATEGORIES_URL="https://example.invalid/categories",
         )

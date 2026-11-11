@@ -12,38 +12,38 @@ from fastapi.testclient import TestClient
 from console import launch_fixture
 
 
-def test_callback_calls_and_failure_modes_survive_reload(tmp_path, monkeypatch):
+def test_mq_stand_in_binds_publishes_and_result_log_survives_reload(tmp_path, monkeypatch):
+    """11-08: the fixture BE stand-in publishes profiling.request and records profiling.result (no HTTP callback)."""
     path = tmp_path / "callback.json"
     monkeypatch.setenv("CONSOLE_FIXTURE_CALLBACK_STATE", str(path))
+    monkeypatch.setenv("CONSOLE_FIXTURE_AMQP_URL", "amqp://synthetic.invalid/gift")
+    from integration.tests import mq_harness
+    published = []
+    monkeypatch.setattr(mq_harness, "declare", lambda *a, **k: None)
+    monkeypatch.setattr(mq_harness, "publish", lambda url, body: published.append(body) or "synthetic-request")
+
+    class NoResults:
+        items = []
+        def __init__(self, url): pass
+        def __enter__(self): return self
+        def __exit__(self, *exc): pass
+
+    monkeypatch.setattr(mq_harness, "Results", NoResults)
     from console import fixture_callback
 
     importlib.reload(fixture_callback)
+    body = {"recipientUserId": 42, "sourceVersion": 1, "giftPreference": "SYNTHETIC"}
     with TestClient(fixture_callback.app) as http:
-        assert http.put("/fixture/mode/42/503").status_code == 200
-        assert (
-            http.post(
-                "/api/internal/v1/recipients/42/profile", json={"synthetic": True}
-            ).status_code
-            == 503
-        )
+        assert http.post("/fixture/recipients/42/profile-request", json=body).status_code == 409   # not bound
+        assert http.put("/fixture/recipients/42/profile-input", json=body).json()["inputBound"] is True
+        assert http.put("/fixture/recipients/42/profile-input", json=body | {"giftPreference": "x"}).status_code == 409
+        assert http.post("/fixture/recipients/42/profile-request", json=body).json()["requestId"] == "synthetic-request"
+        fixture_callback.record({"payload": {"recipientUserId": 42, "sourceVersion": 1, "outcome": "SUCCEEDED"}})
     importlib.reload(fixture_callback)
     with TestClient(fixture_callback.app) as http:
-        assert http.get("/fixture/calls").json() == {"42": [{"synthetic": True}]}
-        assert (
-            http.post(
-                "/api/internal/v1/recipients/42/profile", json={"synthetic": True}
-            ).status_code
-            == 503
-        )
-        assert http.put("/fixture/mode/42/200").status_code == 200
-        assert (
-            http.post(
-                "/api/internal/v1/recipients/42/profile", json={"synthetic": True}
-            ).status_code
-            == 200
-        )
-    state = json.loads(path.read_text())
-    assert len(state["calls"]["42"]) == 3 and state["modes"]["42"] == 200
+        assert http.get("/fixture/calls").json() == {"42": [{"recipientUserId": 42, "sourceVersion": 1, "outcome": "SUCCEEDED"}]}
+        assert http.post("/fixture/recipients/42/profile-request", json=body).status_code == 200   # binding persisted
+    assert [b["recipientUserId"] for b in published] == [42, 42]
     assert path.stat().st_mode & 0o777 == 0o600
 
 
@@ -65,7 +65,7 @@ def test_shutdown_uses_live_workers_not_result_ready_and_has_deadline(monkeypatc
         def rollback(self):
             pass
 
-    stats = {"running": 0, "queued": 0}
+    stats = {"inflight": 0}
 
     class Http(Connection):
         def get(self, url):
@@ -76,12 +76,12 @@ def test_shutdown_uses_live_workers_not_result_ready_and_has_deadline(monkeypatc
             pass
 
         def json(self):
-            return {"supervisor": stats}
+            return {"mq": {"enabled": True, "consumer": stats, "deliveries": {"open": 0}}}
 
     monkeypatch.setattr(launch_fixture.psycopg, "connect", lambda *a, **k: Connection())
     monkeypatch.setattr(launch_fixture.httpx, "Client", lambda **k: Http())
     assert launch_fixture.wait_for_idle("synthetic", "http://127.0.0.1:1", timeout=0)
-    stats["running"] = 1
+    stats["inflight"] = 1
     assert not launch_fixture.wait_for_idle(
         "synthetic", "http://127.0.0.1:1", timeout=0
     )
@@ -106,7 +106,7 @@ def test_fresh_fixture_uses_current_migrations_and_application_roles(monkeypatch
     roles = '\n'.join(statements)
     assert '"ai_profiler_service"' in roles and '"ai_console_service"' in roles
     assert '"ai_app"' not in roles
-    assert commands[0][0][-3:] == ['alembic', 'upgrade', '0011']
+    assert commands[0][0][-3:] == ['alembic', 'upgrade', '0012']
     assert commands[0][1]['PROFILING_APP_DB_ROLE'] == 'ai_profiler_service'
     assert commands[1][0][-3:] == ['integration.migrate_single_server', '--database', 'emmet4930_console']
     assert commands[1][1]['INTEGRATION_SYNTHETIC_ONLY'] == '1'
@@ -132,7 +132,7 @@ def test_resume_preflight_is_read_only_and_rejects_unprepared_state(monkeypatch,
         def fetchone(self):
             if 'count(*)' in statements[-1]:
                 return (1,)
-            return ('emmet4930_console', 'emmet4930_console', 'single-server/1', '0008' if fault == 'legacy' else '0011')
+            return ('emmet4930_console', 'emmet4930_console', 'single-server/1', '0008' if fault == 'legacy' else '0012')
 
     def connect(url, **kwargs):
         assert kwargs['options'] == '-c default_transaction_read_only=on'
@@ -214,6 +214,7 @@ def test_startup_failure_stops_owned_children_and_pg_without_idle_probe(tmp_path
     monkeypatch.setattr(launch_fixture, 'port', lambda: next(numbers))
     monkeypatch.setattr(launch_fixture, 'initialize_database', lambda *args: None)
     monkeypatch.setattr(launch_fixture, 'check_database', lambda *args: None)
+    monkeypatch.setenv('INTEGRATION_TEST_AMQP_URL', 'amqp://synthetic.invalid/gift')
 
     def idle(*args):
         pytest.fail('No request was admitted; failed startup must not query an unavailable app')

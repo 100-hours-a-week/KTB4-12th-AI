@@ -174,7 +174,7 @@ def test_native_similarity_failure_keeps_develop_rank_fallback():
 @pytest.mark.parametrize(
     ("spec_name", "review", "expected_calls"),
     [
-        ("tag3disliked", "소니 제품은 싫어요", 0),
+        ("tag3disliked", "소니 제품은 싫어요", 1),   # 11-07: 비선호 규격은 1~3점 리뷰 글에서도 비선호를 뽑으므로 부른다(worth_llm)
         ("tag3", "소니 제품은 싫어요", 0),
         ("tag3disliked", None, 0),
         ("tag3disliked", "ㅋㅋㅋㅋ", 0),
@@ -236,7 +236,7 @@ def test_g5_truncation_keeps_develop_mask_then_prefix_policy(where):
     store=FakeStore();profiles=FakeRecipientStore()
     result=pipeline.profile(rq,catalog=FakeCatalog([_p(1)]),store=store,recipient_store=profiles,tagger=tagger)
     assert result.status is RunStatus.RESULT_READY and result.failure_reason is None
-    assert len(calls) == (1 if where == 'preference' else 0)
+    assert len(calls) == 1    # 11-07: 1점 리뷰 글도 비선호 규격(기본)에선 LLM 을 부른다(worth_llm) — 잘린 글만 간다
     if calls:
         assert '하지만 소니 제품은 절대 싫어요.' not in calls[0][1]
     profile = profiles.get(1)

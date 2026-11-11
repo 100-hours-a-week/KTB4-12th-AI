@@ -1,7 +1,7 @@
 """포트 — 업무 코드(pipeline.py)가 바깥에 요구하는 "모양". 구현은 catalog.py · stores.py · backend.py 에 있고, 조립은 main.py에서만 한다.
 
 typing.Protocol 이라 상속이 필요 없다: 메서드 이름·인자·반환이 같으면 어떤 클래스든 이 자리에 꽂힌다
-(catalog.py·stores.py·backend.py의 실제 구현, tests/의 가짜, 팀원의 어댑터 전부). pipeline.py는 이 파일만 import하고
+(catalog.py·stores.py의 실제 구현, tests/의 가짜, 팀원의 어댑터 전부). pipeline.py는 이 파일만 import하고
 구현 모듈을 import하지 않는다 — 그래야 카탈로그를 파일에서 DB로 바꿔도 pipeline이 안 바뀐다.
 
 이름은 팀원 3단계 구현 상세 §4와 맞춘다. 확정 전이라 오늘은 여기 이름이 기준이고, 합칠 때 그쪽 이름으로 바꾼다
@@ -17,7 +17,7 @@ from contextlib import AbstractContextManager
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from profiling.schemas import ProductRecord
-from profiling.types import CallbackResult, ProfileOutcome, RecipientProfile
+from profiling.types import ProfileOutcome, RecipientProfile
 
 # ---------------------------------------------------------------------------
 # 예외 — 포트가 던지고 Transport(api/)가 HTTP 상태로 바꾼다
@@ -64,7 +64,7 @@ class ProfileRunStore(Protocol):
         """마지막으로 저장된 결과. 없으면 None. Chat이 대화 시작 시 읽는 것이 이것(6단계 1.2)."""
         ...
 
-    def run_lock(self, recipient_user_id: int, source_version: int) -> AbstractContextManager[bool]:
+    def run_lock(self, recipient_user_id: int, source_version: int, *, strict: bool = False) -> AbstractContextManager[bool]:
         """그 (수신자, 원본 버전)에 대한 **배타 잠금**. `with store.run_lock(rid, sv) as got:` 로 쓴다.
 
         `got=False` 면 다른 실행이 이미 그 키를 처리하고 있다는 뜻이므로 아무것도 하지 않는다.
@@ -82,20 +82,6 @@ class ProfileRunStore(Protocol):
         접수 단계 중복 판정이 쓴다 — Backend가 같은 sourceVersion으로 복구 전송하면(PENDING이 maximum-window ⚙6h를 넘었을 때, v0.7 ⑤)
         이미 도는 분석을 또 돌리거나 이미 만든 결과를 다시 만들지 않기 위해. get()은 "최신 한 건"이라 키를 지정해 찾을 수 없다.
         반환값의 updated_at으로 RUNNING이 아직 살아 있는지 본다.
-        """
-        ...
-
-
-@runtime_checkable
-class BackendPort(Protocol):
-    """Backend 정본으로 나가는 HTTP. 구현: backend.HttpBackendPort."""
-
-    def send_profile_callback(self, outcome: ProfileOutcome) -> CallbackResult:
-        """7.7 POST 한 번 → 실행 기록의 다음 상태 + 사유(3단계 §10.2). 예외를 밖으로 내지 않는다.
-
-        status: DELIVERED(200) · SUPERSEDED(409, 폐기) · FAILED(4xx, 재시도 없음) · RESULT_READY(5xx·네트워크, 아직 전달 못 함 = 재시도 대상).
-        code: CALLBACK_STALE(409) · CONTRACT_7_7_REJECTED(4xx) · CALLBACK_UNREACHABLE(5xx·네트워크) · DELIVERED면 None.
-        오늘은 1회만 보낸다. 재시도·백오프(#23)는 RESULT_READY를 받은 쪽이 아니라 이 adapter 안에서.
         """
         ...
 
@@ -153,6 +139,11 @@ class TagReply(NamedTuple):
 
     text: str
     usage: TokenUsage | None = None
+
+
+class ResultRefused(RuntimeError):
+    """저장소가 결과(RESULT_READY)를 받기를 거절했다 — DB 장애가 아니다. 거절한 쪽이 FAILED 기록을 이미 남겼다.
+    예: 배포 런타임이 모델 · 임베딩 실행을 확인하지 못함. 일시적 분석 실패로 다룬다(MQ 는 백오프 뒤 다시 분석)."""
 
 
 class TagExtractError(Exception):

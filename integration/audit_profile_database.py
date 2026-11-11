@@ -12,11 +12,12 @@ def audit(url):
         checks={}
         for table,privilege in [('ai_profile.recipient_profiles','SELECT'),
                 ('ai_profile.profile_runs','SELECT'),('ai_profile.profile_runs','INSERT'),
-                ('ai_profile.profile_runs','UPDATE'),('ai_profile.recipient_reviews','DELETE')]:
+                ('ai_profile.profile_runs','UPDATE'),('ai_profile.recipient_reviews','DELETE'),
+                ('ai_profile.mq_deliveries','SELECT'),('ai_profile.mq_deliveries','INSERT'),('ai_profile.mq_deliveries','UPDATE')]:
             checks[table+':'+privilege]=db.execute('SELECT has_table_privilege(current_user,%s,%s)',(table,privilege)).fetchone()[0]
         return {'migration':version,'superuser':superuser,'checks':checks,
-                'ready':version=='0011' and not superuser and all(checks.values()),
-                'changed':False,'note':'0011 is required. Changes to 0007 do not replay on an existing DB; no role/grant repair is performed.'}
+                'ready':version=='0012' and not superuser and all(checks.values()),
+                'changed':False,'note':'0012 (MQ deliveries) is required. Changes to 0007 do not replay on an existing DB; no role/grant repair is performed.'}
 
 
 if __name__=='__main__':

@@ -145,6 +145,7 @@ class FileCatalogReader:
         self._products = products
         self._by_id = {p.productId: p for p in products}
         vocab.set_catalog_brands(p.brand for p in products)   # 협업 상대 확인용(상품 태그는 그 자리에서 계산)
+        vocab.set_catalog_words(products)                     # 카탈로그에 없는 비선호 말 → 머리말 물러남(11-07)
         self.loaded_at = datetime.now(UTC)
         self.version_label = str(doc.get("schema_version") or doc.get("category_version") or "") if isinstance(doc, dict) else ""
         log.info("FileCatalogReader 로드 %s: 상품 %d건 (형식 오류 %d · 중복 %d · 재고 available %d · unknown %d) label=%s",
@@ -226,7 +227,7 @@ class DbCatalogReader:
     def __init__(self, engine: Engine, *, poll_ttl_s: float = 1.0, clock: Callable[[], float] = time.monotonic) -> None:
         self._engine = engine
         self._poll_ttl_s = poll_ttl_s
-        self._clock = clock                                   # 시험이 시계를 주입한다 (intake._send_and_record 의 sleep 과 같은 방식)
+        self._clock = clock                                   # 시험이 시계를 주입한다
         self._lock = threading.Lock()
         self._version: UUID | None = None
         self._products: list[ProductRecord] = []
@@ -307,6 +308,7 @@ class DbCatalogReader:
         products.sort(key=lambda p: p.productId)        # 7.9 export와 같은 순서
         by_id = {p.productId: p for p in products}      # products.id 가 PK 라 겹칠 수 없다
         vocab.set_catalog_brands(p.brand for p in products)   # 협업 상대 확인용 — 적재 도구가 태그를 계산할 때와 같은 목록
+        vocab.set_catalog_words(products)                     # 카탈로그에 없는 비선호 말 → 머리말 물러남(11-07)
 
         self._products, self._by_id, self._version = products, by_id, version
         self._snapshot = (version, products)                  # 튜플 하나를 통째로 바꿔 "버전은 옛것, 상품은 새것"인 순간이 없다

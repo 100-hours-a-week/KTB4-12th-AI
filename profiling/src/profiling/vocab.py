@@ -19,6 +19,9 @@
            상품명 규칙(N:, 종류 칸이 '카페세트' 처럼 뭉뚱그려진 상품 — 10-17)에 맞으면 `via=name`.
            상품 종류 자체는 `product_kind` 열에 있으므로 태그로 넣지 않는다.
 사람 태그가 대표 이름으로 안 바뀌면(어휘에 없음) 글자 대조(#13 규칙: 종류 · 소분류 · 상품명에 들어 있으면, '세트 · 장비' 꼬리 떼고)로 본다.
+  카테고리 태그의 글자가 **카탈로그 어디에도 없으면**(11-07 — 기록 368명의 정답 비선호 62% 가 상품 0개: 장지갑 · 손목시계 · 탄산음료)
+  뒷말(머리말)로 물러난다: 태그 끝부분 중 카탈로그에서 낱말(종류 · 소분류 조각 · 상품명 낱말)로 쓰이는 가장 긴 것(장지갑 → 지갑,
+  손목시계 → 시계), 그 낱말을 가진 상품에 건다. 카탈로그의 5% 넘게 걸리는 넓은 말이면 물러나지 않는다. 목록은 `set_catalog_words` 로 준다.
 두 글자 미만은 대조하지 않는다(카테고리 묶음 말 '옷' · '술' · '차' 는 예외).
 선호 태그의 검색어(`query_text`): 한 글자 태그는 묶음 이름 · 브랜드 대표 이름으로 풀어 쓰고, 못 풀면 검색어에서 뺀다(10-17).
 
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import cache, lru_cache
@@ -373,16 +377,100 @@ def _group_of(text: str) -> Group | None:
 
 
 def _category_fallback(text: str) -> Matcher | None:
-    """어휘(묶음)에 없는 카테고리 태그 — 꼬리('세트 · 장비')를 뗀 글자가 종류 · 소분류 이름 · 상품명에 들어 있으면."""
+    """어휘(묶음)에 없는 카테고리 태그 — 꼬리('세트 · 장비')를 뗀 글자가 종류 · 소분류 이름 · 상품명에 들어 있으면.
+    그 글자가 카탈로그 어디에도 없으면 머리말(head_word)로 물러난다 — 그 낱말이 종류 · 소분류 조각 · 상품명 낱말인 상품."""
     t = norm(text)
     if len(t) < MIN_LEN:
         return None
     stem = _SUFFIX.sub("", t)
     stem = stem if len(stem) >= MIN_LEN else t
+    head = head_word(stem, _WORDS_KEY[0])
+    if head is not None:
+        return lambda p: head in _words_of(p)
 
     def plain(p: Product) -> bool:
         return any(stem in norm(f) for f in (p.productKind, p.categoryName, p.name) if f and len(norm(f)) >= MIN_LEN)
     return plain
+
+
+# 카탈로그 말 목록(비선호 머리말 물러남용, 11-07) — 카탈로그를 읽는 쪽(DbCatalogReader · FileCatalogReader)이 넣는다. 비어 있으면 물러나지 않는다
+HEAD_MAX_SHARE = 0.05              # 머리말이 카탈로그의 이 비율보다 많은 상품에 걸리면 물러나지 않는다(넓은 말: 용품 · 기기)
+_CAT_SPLIT = re.compile(r"[·/,&]")
+_WORDS: dict[str, object] = {"text": "", "count": {}, "cap": 0, "tops": {}}
+_TOP_TAIL = re.compile(r"(용품|제품)$")
+_WORDS_KEY = [0]
+
+
+def _words_of(p: Product) -> frozenset[str]:
+    """상품 하나가 '낱말로' 가진 말 — 종류 이름 · 소분류 이름 조각(가운뎃점 · 빗금으로 나눔) · 상품명 낱말(띄어쓰기로 나눔). 두 글자 이상."""
+    out = {norm(p.productKind)}
+    out.update(norm(x) for x in _CAT_SPLIT.split(p.categoryName or ""))
+    out.update(norm(x) for x in (p.name or "").split())
+    return frozenset(w for w in out if len(w) >= MIN_LEN)
+
+
+def set_catalog_words(products) -> None:
+    """카테고리 비선호 태그가 카탈로그에 아예 없는 말인지 · 물러날 머리말이 있는지 볼 목록. 바뀌면 판을 올리고 대조 기억을 비운다."""
+    count: Counter = Counter()
+    text = []
+    n = 0
+    products_tops: set[str] = set()
+    for p in products:
+        n += 1
+        count.update(_words_of(p))
+        if p.parentCategoryName:
+            products_tops.add(p.parentCategoryName)
+        text.extend(norm(f) for f in (p.productKind, p.categoryName, p.name) if f)
+    new = {"text": "\x00".join(text), "count": dict(count), "cap": int(n * HEAD_MAX_SHARE), "tops": _top_keys(products_tops)}
+    if new != _WORDS:
+        _WORDS.update(new)
+        _WORDS_KEY[0] += 1
+        matcher.cache_clear()          # 비선호 대조 기억(matcher)은 이 목록에 기대므로 판이 바뀌면 비운다
+
+
+def _top_keys(tops) -> dict[str, str]:
+    """큰 분류 이름 → 그 이름(정규형). 열쇠 = 이름 전체 + 가운뎃점 조각(두 글자 이상, 두 큰 분류에 겹치면 뺌) — '카페·디저트' 의 '카페'."""
+    out: dict[str, str] = {}
+    clash: set[str] = set()
+    for top in tops:
+        full = norm(top)
+        out[full] = full
+        for part in {norm(x) for x in _CAT_SPLIT.split(top)}:
+            if len(part) < MIN_LEN or part == full:
+                continue
+            if part in out and out[part] != full:
+                clash.add(part)
+            out.setdefault(part, full)
+    return {k: v for k, v in out.items() if k not in clash}
+
+
+def _top_of(text: str) -> str | None:
+    """비선호 카테고리 태그가 큰 분류 이름이면 그 이름(정규형) — '취미·여가 선물' · '생활용품' · '카페'(11-10 밤: 넓은 말 거절이 상품에 안 걸림).
+    꼬리('선물 · 세트 · 장비', 그다음 '용품 · 제품')를 떼어 본다. 카탈로그 목록이 비면 None."""
+    tops = _WORDS["tops"]
+    if not tops:
+        return None
+    t = norm(text)
+    stem = _SUFFIX.sub("", t)
+    for k in (t, stem, _TOP_TAIL.sub("", stem)):
+        if len(k) >= MIN_LEN and k in tops:
+            return tops[k]
+    return None
+
+
+@lru_cache(maxsize=4096)
+def head_word(stem: str, words_key: int = 0) -> str | None:
+    """카탈로그에 없는 카테고리 태그(정규형) → 머리말. 태그 글자가 카탈로그 어디에 들어 있거나 목록이 비면 None(글자 대조).
+    한국어 합성어는 뒷말이 머리라(장지갑 → 지갑, 손목시계 → 시계) **끝부분** 중 카탈로그에서 낱말로 쓰이는 가장 긴 것.
+    낱말로 쓰이지 않는 끝부분(콘플레이크 → '이크')은 건너뛰고, 가장 긴 것이 넓은 말(HEAD_MAX_SHARE 넘음)이면 물러나지 않는다."""
+    text, count = _WORDS["text"], _WORDS["count"]
+    if not text or stem in text:
+        return None
+    for i in range(1, len(stem) - MIN_LEN + 1):
+        w = stem[i:]
+        if w in count:
+            return w if count[w] <= _WORDS["cap"] else None
+    return None
 
 
 # ---- 상품 태그 · 사람 태그 맞추기
@@ -480,6 +568,9 @@ def matcher(axis: str, text: str) -> Matcher:
     if keys:
         return lambda p: not keys.isdisjoint(tag_set(p))
     if axis == "카테고리" or axis not in AXES:
+        top = _top_of(text)
+        if top is not None:
+            return lambda p: norm(p.parentCategoryName) == top
         return _category_fallback(text) or _never
     if len(norm(text)) < MIN_LEN:
         return _never

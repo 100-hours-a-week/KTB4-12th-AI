@@ -92,7 +92,7 @@ def test_provider_key_is_still_redacted():
 
 def test_other_prefixed_settings_keep_their_names(monkeypatch):
     monkeypatch.setenv("PROFILING_POOL_SIZE", "12")
-    monkeypatch.setenv("PROFILING_SLOTS", "4")
+    monkeypatch.setenv("PROFILING_MQ_SLOTS", "4")
     settings = Settings(_env_file=None)
     assert settings.POOL_SIZE == 12
-    assert settings.PROFILING_SLOTS == 4
+    assert settings.MQ_SLOTS == 4

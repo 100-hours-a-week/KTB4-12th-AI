@@ -69,7 +69,9 @@ def main():
     export=json.loads((ROOT/'product-search/examples/products-export.json').read_text())
     categories=json.loads((ROOT/'product-search/examples/categories.json').read_text())
     for i,p in enumerate(export['data']['products']):p['viewCount']=50-i
-    callbacks=[];blocked=threading.Event();release=threading.Event();mode={'fail':False,'slow':False}
+    from integration.tests import mq_harness  # 11-08: profiling requests/results over a disposable local RabbitMQ
+    mq_url=mq_harness.broker_url();mq_harness.declare(mq_url)
+    blocked=threading.Event();release=threading.Event();mode={'fail':False,'slow':False}
     class BE(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
         def do_GET(self):
@@ -80,9 +82,6 @@ def main():
                 blocked.set();release.wait(10)
             value=export if self.path=='/export' else categories
             raw=json.dumps(value).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(raw)
-        def do_POST(self):
-            callbacks.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
-            self.send_response(200);self.end_headers();self.wfile.write(b'{}')
     backend=ThreadingHTTPServer(('127.0.0.1',0),BE);threading.Thread(target=backend.serve_forever,daemon=True).start()
     base=f'http://127.0.0.1:{backend.server_port}'
     fetch=fetcher(base+'/export',base+'/categories','synthetic-contract')
@@ -135,25 +134,26 @@ def main():
         subprocess.run([str(PG/'pg_ctl'),'-D',str(cluster),'-l',str(OUT/'postgres.log'),'-o',f"-k {sockdir} -c listen_addresses=''",'-w','start'],check=True,stdout=subprocess.DEVNULL);started=True
         os.environ.update(PROFILING_DATABASE_URL=f'postgresql+psycopg://fixture_owner@/emmet4930_shared_fresh?host={sockdir}',
             PROFILING_SERVICE_TOKEN='synthetic-contract',PROFILING_CATALOG_SOURCE='search_http',
-            PROFILING_SEARCH_BASE_URL=search_url,PROFILING_BACKEND_BASE_URL=base,
+            PROFILING_SEARCH_BASE_URL=search_url,**mq_harness.profiler_env(mq_url),
             PROFILING_TAGGER='none',PROFILING_STRICT_STARTUP='true')
         from profiling.settings import get_settings
         get_settings.cache_clear()
         from integration.profiler_free_runtime import app as profiler
-        with TestClient(profiler) as client:
+        with TestClient(profiler) as client, mq_harness.Results(mq_url) as results:
             body={'recipientUserId':args.recipient_id,'sourceVersion':1,'dislikedCategories':[], 'giftPreference':'합성 취향', 'reviews':[]}
-            path='/api/internal/v1/ai/profile/extract-and-pool';headers={'Authorization':'Bearer synthetic-contract'}
-            response=client.post(path,json=body,headers=headers);assert response.status_code==202,response.text
+            headers={'Authorization':'Bearer synthetic-contract'}
+            mq_harness.publish(mq_url,body)
             deadline=time.monotonic()+10;status=None
             while time.monotonic()<deadline:
                 with psycopg.connect(dbname='emmet4930_shared_fresh',user='fixture_owner',host=str(sockdir)) as db:
                     row=db.execute('SELECT status FROM ai_profile.profile_runs WHERE recipient_user_id=%s AND source_version=1',(args.recipient_id,)).fetchone()
                     status=row[0] if row else None
-                if status in ('DELIVERED','FAILED'):break
+                if status in ('RESULT_READY','FAILED'):break
                 time.sleep(.02)
-            assert status=='DELIVERED' and len(callbacks)==1,(status,callbacks)
-            again=client.post(path,json=body,headers=headers);assert again.status_code in (200,202)
-            time.sleep(.1);assert len(callbacks)==2 and callbacks[0]==callbacks[1]
+            first=results.wait(1,10)[0]
+            assert status=='RESULT_READY' and first['payload']['outcome']=='SUCCEEDED',(status,first)
+            mq_harness.publish(mq_url,body)
+            assert results.wait(2,10)[1]['payload']==first['payload']
             # Publication preserves the retained generation until explicit drain/rebind.
             export['data']['products'][0]['viewCount']+=1
             sync(runtime,fetch,embed=embed,fingerprint=lambda *_:'f'*64,apply=True)
@@ -162,17 +162,16 @@ def main():
             refreshed=client.post('/api/internal/v1/ai/profile/catalog/refresh',json={
                 'expectedSnapshotId':owner.current.snapshot_id,'drainTimeoutSeconds':5},headers=headers)
             assert refreshed.status_code==200 and refreshed.json()['changed'],refreshed.text
-            after=client.post(path,json={**body,'sourceVersion':2},headers=headers)
-            assert after.status_code==202,after.text
+            mq_harness.publish(mq_url,{**body,'sourceVersion':2})
             deadline=time.monotonic()+10
             while time.monotonic()<deadline:
                 with psycopg.connect(dbname='emmet4930_shared_fresh',user='fixture_owner',host=str(sockdir)) as db:
                     row=db.execute('SELECT status,catalog_version_id FROM ai_profile.profile_runs WHERE recipient_user_id=%s AND source_version=2',(args.recipient_id,)).fetchone()
-                if row and row[0]=='DELIVERED':break
+                if row and row[0]=='RESULT_READY':break
                 time.sleep(.02)
-            assert row and row[0]=='DELIVERED' and str(row[1])==profiler.state.shared_catalog.check()
-            assert len(callbacks)==3
-            result['profiler']={'httpAccepted':202,'persisted':'DELIVERED','callbacks':3,
+            assert row and row[0]=='RESULT_READY' and str(row[1])==profiler.state.shared_catalog.check()
+            assert len(results.wait(3,10))==3
+            result['profiler']={'mqPublished':3,'persisted':'RESULT_READY','results':3,
                 'duplicateResendsSameStoredResult':True,'controlledRebind':200,'newWorkSavedWithNewGeneration':True,
                 'modelEnabled':False,'searchOwnsEncoder':True}
         result.update(passed=True,synthetic=True,externalProviderCalls=0,realBEConnected=False,containersStarted=False)

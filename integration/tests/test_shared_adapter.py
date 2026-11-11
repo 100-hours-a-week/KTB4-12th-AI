@@ -73,7 +73,7 @@ def test_shared_category_mapping_distinguishes_empty_from_unknown(shared):
 
 
 def test_retained_profiler_refresh_and_same_snapshot_search_restart(shared, tmp_path, monkeypatch):
-    """Real HTTP router + retained client + Emmet workers; no sockets or provider."""
+    """Real HTTP router + retained client + Emmet admission gate (MQ shape); no sockets or provider."""
     import copy
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -81,7 +81,6 @@ def test_retained_profiler_refresh_and_same_snapshot_search_restart(shared, tmp_
     from integration.profiler_rebind import ManagedSearch, load_retained_catalog
     from profiling.ports import NoActiveCatalog
     from profiling.search_api import SearchCatalog
-    from profiling.supervisor import Supervisor
     from search.reloading import ReloadingSearch
 
     source, unused = shared
@@ -126,10 +125,26 @@ def test_retained_profiler_refresh_and_same_snapshot_search_restart(shared, tmp_
         monkeypatch.setattr('integration.profiler_rebind.SearchCatalog', http_catalog)
         settings = SimpleNamespace(SEARCH_BASE_URL='http://testserver', SEARCH_TOKEN=None, SERVICE_TOKEN='synthetic')
         factory = lambda: load_retained_catalog(settings)
-        supervisor = Supervisor(profiling_slots=1, queue_max=3)
-        supervisor.start()
-        manager = ManagedSearch(factory(), supervisor, factory)
+        manager = ManagedSearch(factory(), factory)
         entered, release = threading.Event(), threading.Event()
+
+        def submit(fn, *args):
+            # Same shape as profiling.mq.process: job() wraps one analysis in a worker thread.
+            decided, admitted = threading.Event(), []
+
+            def run():
+                try:
+                    with manager.job():
+                        admitted.append(True)
+                        decided.set()
+                        fn(*args)
+                except NoActiveCatalog:
+                    admitted.append(False)
+                    decided.set()
+
+            threading.Thread(target=run, daemon=True).start()
+            assert decided.wait(2)
+            return admitted[0]
 
         def job(block=False):
             version, products = manager.active()
@@ -145,8 +160,8 @@ def test_retained_profiler_refresh_and_same_snapshot_search_restart(shared, tmp_
 
         try:
             old_version = manager.check()
-            assert manager.submit(job, True) and entered.wait(2)
-            assert manager.submit(job)
+            assert submit(job, True) and entered.wait(2)
+            assert submit(job)
             client.portal.call(owner.refresh)
             assert not closed and old in owner.retired
             assert client.get('/v1/catalog/contract').json()['snapshotId'] == 'new'
@@ -154,7 +169,7 @@ def test_retained_profiler_refresh_and_same_snapshot_search_restart(shared, tmp_
                 updating = pool.submit(manager.refresh, 'new', 3)
                 with manager.condition:
                     assert manager.condition.wait_for(lambda: manager.paused, 2)
-                assert not manager.submit(job)
+                assert not submit(job)
                 assert not updating.done() and manager.current.snapshot == 'old'
                 release.set()
                 assert updating.result(3)['changed']
@@ -171,13 +186,14 @@ def test_retained_profiler_refresh_and_same_snapshot_search_restart(shared, tmp_
             assert manager.refresh('new', 2)['changed']
             assert clients[1].closed and not manager.paused
             assert manager.current.snapshot == 'new'
-            assert manager.submit(job)
+            assert submit(job)
             with manager.condition:
                 assert manager.condition.wait_for(lambda: manager.pending == 0, 2)
             assert completed[-1] == manager.check()
         finally:
             release.set()
-            manager.stop(3)
+            with manager.condition:
+                manager.condition.wait_for(lambda: manager.running == 0, 3)
             manager.close()
             client.portal.call(owner.close)
         assert all(view.closed for view in clients)

@@ -63,7 +63,7 @@ def test_known_versions_preserve_data_and_repeat(database,revision):
         upstream(url,revision)
         with psycopg.connect(url) as db:seed(db,revision)
     receipt=upgrade.run_upgrade(url,name,upstream=True)
-    assert receipt['alembicBefore']==revision and receipt['alembicAfter']=='0011' and receipt['recipientFunctionApplied'] and receipt['atomic']
+    assert receipt['alembicBefore']==revision and receipt['alembicAfter']=='0012' and receipt['recipientFunctionApplied'] and receipt['atomic']
     with psycopg.connect(url) as db:
         if revision:
             assert db.execute('SELECT source_version,disliked_categories FROM ai_profile.recipient_profiles WHERE recipient_user_id=42').fetchone()==(7,[{'category_id':11,'category_name':'합성 비선호'}])
@@ -79,7 +79,7 @@ def test_known_versions_preserve_data_and_repeat(database,revision):
         db.execute("INSERT INTO ai_chat.events(turn,seq,kind,payload) VALUES(%s,1,'turn.finished','{\"status\":\"COMPLETED\"}')",(tid,))
         db.execute("CREATE OR REPLACE FUNCTION ai_profile.chat_recipient_snapshot(conversation_id uuid) RETURNS jsonb LANGUAGE SQL AS $$ SELECT '{\"outdated\":true}'::jsonb $$")
     again=upgrade.run_upgrade(url,name,upstream=True)
-    assert again['alembicBefore']=='0011' and again['recipientFunctionApplied']
+    assert again['alembicBefore']=='0012' and again['recipientFunctionApplied']
     with psycopg.connect(url) as db:
         assert db.execute('SELECT state,context FROM ai_chat.turns WHERE id=%s',(tid,)).fetchone()==(state,{'synthetic':'kept'})
         assert db.execute('SELECT count(*) FROM ai_chat.events WHERE turn=%s',(tid,)).fetchone()[0]==1

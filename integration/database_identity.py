@@ -4,6 +4,8 @@ import re
 from urllib.parse import urlsplit, parse_qs
 import psycopg
 
+from integration.provider_key import environment
+
 DEFAULT_HOST = "postgres"
 
 
@@ -12,10 +14,13 @@ DEPLOYMENT_DATABASES = frozenset({"ai_db_develop", "ai_db_staging", "ai_db_produ
 
 
 def validate_database_name(name):
-    """Allow explicit environment DBs; retain legacy names only for synthetic tests."""
+    """Bind deployed environments to their own DB; retain local synthetic names."""
+    deployment = environment()
     if name in DEPLOYMENT_DATABASES:
+        if deployment != "local" and name != f"ai_db_{deployment}":
+            raise ValueError("AI_DATABASE_NAME must match AI_ENVIRONMENT")
         return name
-    if os.environ.get("INTEGRATION_SYNTHETIC_ONLY") == "1" and re.fullmatch(
+    if deployment == "local" and os.environ.get("INTEGRATION_SYNTHETIC_ONLY") == "1" and re.fullmatch(
         r"emmet4930_[a-z0-9_]+", name
     ):
         return name
@@ -31,6 +36,7 @@ def configured_host():
 
 
 def validate_dsn(value, expected_database, expected_role, *, host=None, port=5432):
+    validate_database_name(expected_database)
     host = host or configured_host()
     parsed = urlsplit(value.replace("postgresql+psycopg://", "postgresql://"))
     query = parse_qs(parsed.query)
@@ -42,6 +48,7 @@ def validate_dsn(value, expected_database, expected_role, *, host=None, port=543
 
 
 def audit(value, expected_database):
+    validate_database_name(expected_database)
     with psycopg.connect(value.replace("postgresql+psycopg://", "postgresql://"), connect_timeout=3) as db:
         actual, declared, version = db.execute("""SELECT current_database(),database_name,version
             FROM ai_runtime.database_identity WHERE singleton""").fetchone()

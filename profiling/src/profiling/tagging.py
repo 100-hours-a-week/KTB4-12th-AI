@@ -146,6 +146,7 @@ class Prepared(NamedTuple):
     has_pref: bool
     guard: dict[str, Any]
     products: dict[str, int]           # r1 → 그 리뷰의 상품 번호. 저장 때 ref 를 상품 번호로 바꾼다(profile_tags, 10-28)
+    texts: frozenset[str] = frozenset()   # 정리 뒤 글이 남은 리뷰 ref — 1~3점 리뷰 글도 비선호 근거가 된다(worth_llm, 11-07)
 
 
 def prepare(rq: ProfileRequest, by_id: dict[int, ProductRecord], *, only: Collection[int] | None = None, with_pref: bool = True,
@@ -166,7 +167,7 @@ def prepare(rq: ProfileRequest, by_id: dict[int, ProductRecord], *, only: Collec
         return r.text
 
     pref = take(rq.gift_preference, "pref") if with_pref else None
-    lines, ratings, products, seen = [], {}, {}, set()
+    lines, ratings, products, seen, texts = [], {}, {}, set(), set()
     for rv in rq.reviews:
         if rv.product_id in seen or rv.product_id not in by_id:
             continue
@@ -178,11 +179,13 @@ def prepare(rq: ProfileRequest, by_id: dict[int, ProductRecord], *, only: Collec
         ratings[ref] = rv.rating
         products[ref] = rv.product_id
         text = take(rv.review_text, "review")
+        if text:
+            texts.add(ref)
         lines.append(f"{ref}. 별점 {rv.rating}점 · 상품명: {p.name} · 브랜드: {p.brand} · 분류: {p.parentCategoryName} > {p.categoryName}"
                      f" · 종류: {p.productKind} · 리뷰 글: {text or '(없음)'}")
     body = f"취향 문장(pref): {pref or '(없음)'}\n" + (f"{note}\n" if note else "") + "리뷰:\n" + ("\n".join(lines) if lines else "(없음)")
     prompt = body + '\n\nJSON 으로만 답하라: {"tags": [{"axis": ..., "tag": ..., "ref": ..., "evidence": ...}]}'
-    return Prepared(prompt, ratings, pref is not None, {"version": guard.GUARD_VERSION, "flags": dict(flags), "counts": dict(counts)}, products)
+    return Prepared(prompt, ratings, pref is not None, {"version": guard.GUARD_VERSION, "flags": dict(flags), "counts": dict(counts)}, products, frozenset(texts))
 
 
 def kept_note(kept: Sequence[dict]) -> str:
@@ -198,10 +201,13 @@ def build_prompt(rq: ProfileRequest, by_id: dict[int, ProductRecord]) -> tuple[s
     return prep.prompt, prep.ratings
 
 
-def worth_llm(prep: Prepared) -> bool:
+def worth_llm(prep: Prepared, spec: TagSpec | None = None) -> bool:
     """LLM 을 부를 값이 있나 — 근거가 될 수 있는 것(정리 뒤 취향 문장 · 별점 4~5점 리뷰)이 하나도 없으면 부르지 않는다.
-    규칙 1(1~3점 리뷰로는 선호 태그를 만들지 않음) 때문에 1~3점 리뷰뿐인 사람은 LLM 결과가 어차피 비어야 한다."""
-    return prep.has_pref or any(r >= 4 for r in prep.ratings.values())
+    규칙 1(1~3점 리뷰로는 선호 태그를 만들지 않음) 때문에 비선호 없는 규격에선 1~3점 리뷰뿐인 사람은 LLM 결과가 어차피 비어야 한다.
+    비선호 규격(tag3disliked, DR-043)은 1~3점 리뷰 **글**에서도 비선호를 뽑으므로(검증기도 받음) 그런 글이 하나라도 남았으면 부른다(11-07 —
+    기록 368명에서 1~3점 리뷰뿐인 8명의 비선호 4개를 놓침). 글 없는 별점만으로는 근거가 없어 부르지 않는다."""
+    spec = spec or SPEC
+    return prep.has_pref or any(r >= 4 for r in prep.ratings.values()) or bool(spec.disliked and prep.texts)
 
 
 def validate(tags: Sequence[dict[str, Any]], ratings: dict[str, int], has_pref: bool,

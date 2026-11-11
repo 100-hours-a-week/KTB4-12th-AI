@@ -119,8 +119,22 @@ services:
       PROFILING_APP_DB_ROLE: ai_profiler_service
       OPENROUTER_API_KEY_PROFILER: ${OPENROUTER_API_KEY_PROFILER:?existing Profiler provider key}
       BE_SERVICE_TOKEN: ${BE_SERVICE_TOKEN:?existing common BE service token}
-      PROFILING_BACKEND_BASE_URL: ${PROFILING_BACKEND_BASE_URL:?authorized Backend
-        callback origin}
+      # Design §7: consumer OFF until broker · queues · DLQ · permissions are ready; Cloud turns it on in the CO-07 order.
+      # When enabled, a missing URL or any missing MQ number refuses startup.
+      PROFILING_MQ_ENABLED: ${PROFILING_MQ_ENABLED:-false}
+      PROFILING_MQ_URL: ${PROFILING_MQ_URL:-}
+      # MQ numbers are deployment settings (no defaults); startup refuses when any is missing.
+      PROFILING_MQ_PREFETCH:
+      PROFILING_MQ_SLOTS:
+      PROFILING_MQ_RECONNECT_DELAY_S:
+      PROFILING_MQ_SHUTDOWN_GRACE_S:
+      PROFILING_MQ_CONFIRM_TIMEOUT_S:
+      PROFILING_MQ_WAIT_S:
+      PROFILING_MQ_MAX_ANALYSIS_ATTEMPTS:
+      PROFILING_MQ_RETRY_BASE_S:
+      PROFILING_MQ_RETRY_MAX_S:
+      PROFILING_MQ_RECONCILE_AFTER_S:
+      PROFILING_MQ_RECONCILE_INTERVAL_S:
       PORT: '8001'
       AI_DATABASE_NAME: ${AI_DATABASE_NAME:?one prepared application database}
       AI_DATABASE_HOST: ${AI_DATABASE_HOST:-postgres}
@@ -214,6 +228,7 @@ services:
     environment:
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?existing migration role DSN}
       AI_DATABASE_HOST: ${AI_DATABASE_HOST:-postgres}
+      AI_ENVIRONMENT: ${AI_ENVIRONMENT:-develop}
     restart: 'no'
 volumes:
   postgres-data:

@@ -2,8 +2,8 @@
 
 All requests/products are synthetic. Chat mock transport, Profiler tagger off.
 Never claims paid-model quality, final Linux image or real BE integration.
+11-08: profiling requests/results travel over a disposable local RabbitMQ (INTEGRATION_TEST_AMQP_URL).
 """
-import copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -18,6 +18,7 @@ from uuid import uuid4
 import httpx
 
 from integration.search_sync import validated_fetcher
+from integration.tests import mq_harness
 from tools.sync_postgres import sync
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -31,7 +32,8 @@ def run(database, source, *, live=False, live_options=None):
     for name in ('service.mjs','runtime.mjs','documents.mjs'):
         shutil.copyfile(ROOT/'product-search/embedding'/name,runtime/'embedding'/name)
     for name in ('models','node_modules'):(runtime/'embedding'/name).symlink_to(assets/name,target_is_directory=True)
-    callbacks=[];blocked=threading.Event();release=threading.Event();mode={'fail':False,'slow':False}
+    blocked=threading.Event();release=threading.Event();mode={'fail':False,'slow':False}
+    mq_url=mq_harness.broker_url();mq_harness.declare(mq_url)
     token='synthetic-single-server-contract'
     class Backend(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
@@ -42,10 +44,6 @@ def run(database, source, *, live=False, live_options=None):
             if mode['slow']:blocked.set();release.wait(15)
             body=export if self.path=='/export' else categories
             raw=json.dumps(body).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(raw)
-        def do_POST(self):
-            if not self.authorized():self.send_error(401);return
-            callbacks.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
-            self.send_response(200);self.end_headers();self.wfile.write(b'{}')
     backend=ThreadingHTTPServer(('127.0.0.1',0),Backend)
     backend_thread=threading.Thread(target=backend.serve_forever,daemon=True);backend_thread.start()
     be=f'http://127.0.0.1:{backend.server_port}'
@@ -88,7 +86,7 @@ def run(database, source, *, live=False, live_options=None):
             assert pure.status_code==200 and len(pure.json()['hits'])==2
             if live:
                 from integration.tests.live_single_server import run_models
-                result=run_models(database,export,contract,search_url,be,callbacks,token,output,start,wait,**(live_options or {}))
+                result=run_models(database,export,contract,search_url,mq_url,token,output,start,wait,**(live_options or {}))
                 return result
             mode['fail']=True
             try:sync(runtime,database['sync'],fetch,apply=True)
@@ -126,20 +124,19 @@ def run(database, source, *, live=False, live_options=None):
                 'PYTHONPATH':os.pathsep.join(map(str,[ROOT/'profiling/src',ROOT,ROOT/'product-search'])),
                 'PROFILING_DATABASE_URL':database['profiler'].replace('postgresql://','postgresql+psycopg://'),
                 'PROFILING_APP_DB_ROLE':'ai_profiler_service','PROFILING_SERVICE_TOKEN':token,
-                'PROFILING_BACKEND_BASE_URL':be,'PROFILING_TAGGER':'none','PROFILING_TAG_SPEC':'tag3disliked',
+                **mq_harness.profiler_env(mq_url),'PROFILING_TAGGER':'none','PROFILING_TAG_SPEC':'tag3disliked',
                 'PROFILING_CATALOG_SOURCE':'search_http','PROFILING_SEARCH_BASE_URL':search_url,
                 'PROFILING_SEARCH_TOKEN':token,'PROFILING_STRICT_STARTUP':'true'})
             wait(http,profile_url,profile)
             body={'recipientUserId':777,'sourceVersion':1,'giftPreference':'합성 컵 선물','dislikedCategories':[],'reviews':[]}
-            endpoint=profile_url+'/api/internal/v1/ai/profile/extract-and-pool'
-            assert http.post(endpoint,json=body).status_code==202
-            deadline=time.monotonic()+15
-            while not callbacks and time.monotonic()<deadline:time.sleep(.05)
-            assert callbacks
-            first=copy.deepcopy(callbacks[0]);assert http.post(endpoint,json=body).status_code==202
-            deadline=time.monotonic()+10
-            while len(callbacks)<2 and time.monotonic()<deadline:time.sleep(.05)
-            assert callbacks==[first,first]
+            with mq_harness.Results(mq_url) as results:
+                ids=[mq_harness.publish(mq_url,body)]
+                first=results.wait(1,15)[0]
+                assert first['payload']['outcome']=='SUCCEEDED' and first['requestId']==ids[0]
+                # A second request for the same input reuses the stored result: same payload, new requestId.
+                ids.append(mq_harness.publish(mq_url,body))
+                second=results.wait(2,10)[1]
+                assert second['requestId']==ids[1] and second['payload']==first['payload']
             chat,chat_url=start('chat','chat','app.main:app',{
                 'PYTHONPATH':os.pathsep.join(map(str,[ROOT/'chat',ROOT])),
                 'STORE_MODE':'postgres','DATABASE_URL':database['chat']+'?options=-csearch_path%3Dai_chat,public',
@@ -165,7 +162,7 @@ def run(database, source, *, live=False, live_options=None):
             assert http.put(chat_url2+'/v1/chat/conversations/'+cid+'/turns/'+tid,json={'message':'/mock cards'}).json()['data']==saved
             result={'passed':True,'synthetic':True,'actualCPUEncoder':True,'pgCanonicalGeneration':True,
                     'searchDuringBlockedSyncSeconds':elapsed,'beFetchFailurePreservesGeneration':True,
-                    'pureVectorLimit2':True,'hybridLimit1':True,'profileDuplicateCallbackIdentical':True,
+                    'pureVectorLimit2':True,'hybridLimit1':True,'profileDuplicateMqResultIdentical':True,
                     'chatStoredSseRetryCancellationOwnershipRestart':True,'profileTagger':'none',
                     'searchRestartAfterCacheLoss':True,
                     'chatMode':'mock','paidCalls':0,'realBEConnected':False,'linuxImagesVerified':False}

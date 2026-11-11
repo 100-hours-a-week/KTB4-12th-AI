@@ -6,8 +6,8 @@ from uuid import UUID
 import pytest
 
 from profiling import pipeline, selection
-from profiling.ports import NoActiveCatalog, TagExtractError
-from profiling.schemas import ProductRecord, ProfileExtractRequest
+from profiling.ports import NoActiveCatalog, ResultRefused, TagExtractError
+from profiling.schemas import ProductRecord
 from profiling.types import (
     CategoryScore,
     DislikedCategory,
@@ -83,15 +83,7 @@ def _rq(disliked=(), pref=None, reviews=()) -> ProfileRequest:
                           reviews=list(reviews))
 
 
-# ---------------------------------------------------------------- to_internal · needs_model
-
-
-def test_to_internal_converts_nested_items() -> None:
-    body = ProfileExtractRequest(recipientUserId=1, sourceVersion=2, dislikedCategories=[{"categoryId": 701, "categoryName": "도서·음반"}],
-                                 giftPreference=None, reviews=[{"productId": 10, "rating": 5, "reviewText": None}])
-    rq = pipeline.to_internal(body)
-    assert rq.recipient_user_id == 1 and rq.source_version == 2 and rq.gift_preference is None
-    assert rq.disliked_categories[0].category_name == "도서·음반" and rq.reviews[0].product_id == 10
+# ---------------------------------------------------------------- needs_model
 
 
 @pytest.mark.parametrize("pref,reviews,expected", [
@@ -349,15 +341,15 @@ def test_profile_v1_happy_path() -> None:
 
 
 def test_profile_empty_pool_is_result_ready_with_empty_list(caplog) -> None:
-    """비선호로 전부 걸러져 0개여도 실패가 아니다 — 빈 배열을 7.7로 보낸다(Backend 인기순 대체). 경고 로그 한 줄."""
-    from profiling.backend import callback_body
+    """비선호로 전부 걸러져 0개여도 실패가 아니다 — 빈 배열 결과를 낸다(Backend 인기순 대체). 경고 로그 한 줄."""
+    from profiling.stores import result_payload
     store = FakeStore()
     only_beauty = [_product(1, 100, "뷰티", views=5), _product(2, 100, "뷰티", views=3)]
     with caplog.at_level("WARNING", logger="profiling.pipeline"):
         out = pipeline.profile(_rq(disliked=[(100, "뷰티")]), catalog=FakeCatalog(only_beauty), store=store,
                                recipient_store=FakeRecipientStore(), pool_size=30)
     assert out.status is RunStatus.RESULT_READY and out.search.product_ids == []
-    assert callback_body(out).recommendedProductIds == []                       # 본문도 빈 배열 (스키마가 허용)
+    assert result_payload(out)["recommendedProductIds"] == []                   # 저장 본문도 빈 배열
     assert any("풀 0개" in rec.message for rec in caplog.records)
 
 
@@ -478,6 +470,24 @@ def test_profile_recipient_store_failure_is_failed_no_callback() -> None:
     out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=FakeRecipientStore(fail=True))
     assert out.status is RunStatus.FAILED and "프로필 저장 실패" in out.failure_reason
     assert store.history[-1] is RunStatus.FAILED                                  # 실행 기록도 FAILED로 되돌림
+
+
+def test_result_refused_is_pipeline_error_not_store_failed(monkeypatch) -> None:
+    """저장소가 결과를 거절(ResultRefused) — DB 장애가 아니므로 STORE_FAILED 로 바꾸지 않는다(MQ 가 전체 소비를 멈추지 않게).
+    거절한 쪽이 FAILED 를 이미 남겼으니 다시 저장하지 않는다."""
+    store, recipients = FakeStore(), FakeRecipientStore()
+    save = store.save
+
+    def refuse(outcome):
+        if outcome.status is RunStatus.RESULT_READY:
+            save(outcome.model_copy(update={"status": RunStatus.FAILED}))
+            raise ResultRefused("model not verified")
+        save(outcome)
+
+    monkeypatch.setattr(store, "save", refuse)
+    out = pipeline.profile(_rq(), catalog=FakeCatalog(PRODUCTS), store=store, recipient_store=recipients)
+    assert out.status is RunStatus.FAILED and out.failure_code is ErrorCode.PIPELINE_ERROR
+    assert store.history == [RunStatus.RUNNING, RunStatus.FAILED] and not recipients.rows
 
 
 @pytest.mark.parametrize("stage,code,history", [

@@ -31,7 +31,6 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 
-from profiling.backend import callback_body
 from profiling.types import (
     CategoryScore,
     DislikedCategory,
@@ -107,17 +106,6 @@ _RUN_UPSERT = sa.text(f"""
         updated_at         = now()
     returning id, attempt""")
 
-## 더 새 번호가 Backend 에 반영됐을 때(DELIVERED · 409 SUPERSEDED) 그보다 낮은 번호의 미전달(RESULT_READY) 행 — Backend 는 최신 번호만
-## 복구 전송하므로 다시 묻지 않는 번호다. 그대로 두면 /health 의 undelivered 가 영영 1 이상으로 고정된다(10-08 실측 S3: v1).
-_SUPERSEDE_OLDER = sa.text(f"""
-    update {RUNS_TABLE}
-       set status = 'SUPERSEDED',
-           error = cast(:error as jsonb),
-           updated_at = now()
-     where recipient_user_id = :rid
-       and source_version < :sv
-       and status = 'RESULT_READY'""")
-
 _RUN_COLUMNS = ("recipient_user_id, source_version, input_hash, status, catalog_version_id, "
                 "callback_payload, callback_attempts, error, updated_at, tag_status, prompt_version, validator_version, llm_cost_usd")
 
@@ -126,7 +114,7 @@ _RUN_LATEST = sa.text(f"""
     from {RUNS_TABLE} where recipient_user_id = :rid
     order by source_version desc, updated_at desc limit 1""")
 
-## 접수 단계 중복 판정용 — 키로 딱 한 행 (Backend가 같은 sourceVersion으로 재전송할 때)
+## 키로 딱 한 행 — MQ 처리기가 같은 입력의 저장된 결과를 재사용할 때(mq.process.reusable_ids)
 _RUN_BY_KEY = sa.text(f"""
     select {_RUN_COLUMNS}
     from {RUNS_TABLE} where recipient_user_id = :rid and source_version = :sv""")
@@ -142,8 +130,19 @@ def _lock_key(recipient_user_id: int, source_version: int) -> int:
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
+def result_payload(outcome: ProfileOutcome) -> dict[str, Any]:
+    """profile_runs.callback_payload 에 저장하는 결과 본문 — 추천 30개(순서 = 순위). 태그는 넣지 않는다(DR-035).
+
+    열 이름 · 모양은 옛 7.7 콜백 본문 그대로다(11-08 HTTP 경로 제거 뒤에도 옛 행과 같은 모양으로 읽고 쓰려고). MQ 결과 메시지는
+    mq.results 가 따로 만든다 — 이 본문은 저장된 결과 재사용(_to_outcome) · 챗봇 조회용이다."""
+    if outcome.search is None:
+        raise ValueError("저장할 검색 결과(search)가 없다")
+    return {"recipientUserId": outcome.recipient_user_id, "sourceVersion": outcome.source_version,
+            "profileStatus": "COMPLETED", "recommendedProductIds": list(outcome.search.product_ids[:30])}
+
+
 def payload_hash(payload: dict[str, Any]) -> str:
-    """콜백 본문의 sha256 — 키 순서를 고정해 같은 내용이면 같은 값. 재전송 시 "같은 payload" 확인용(§16.4)."""
+    """결과 본문의 sha256 — 키 순서를 고정해 같은 내용이면 같은 값(profile_runs.callback_hash)."""
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -151,7 +150,7 @@ def _to_outcome(row: Any) -> ProfileOutcome | None:
     """profile_runs 한 행 → ProfileOutcome. 없으면 None. get()·get_run()이 같이 쓴다.
 
     validation(태그)은 복원하지 않는다 — 실행 기록에 저장하지 않기 때문(태그는 recipient_profiles에 있다).
-    search는 저장해 둔 콜백 본문에서 되살린다 — 그래야 **재분석 없이 같은 본문으로 재전송**할 수 있다.
+    search는 저장해 둔 결과 본문에서 되살린다 — 그래야 MQ 재배달 때 **재분석 없이 같은 결과**를 낼 수 있다.
     """
     if row is None:
         return None
@@ -185,7 +184,7 @@ class DbProfileRunStore:
 
         payload: dict[str, Any] | None = None
         if outcome.search is not None:                                   # RESULT_READY 이후에는 항상 있음
-            payload = callback_body(outcome).model_dump()
+            payload = result_payload(outcome)
         error = None
         if outcome.failure_code or outcome.failure_reason:
             error = {"code": outcome.failure_code.value if outcome.failure_code else None, "reason": outcome.failure_reason}
@@ -204,16 +203,6 @@ class DbProfileRunStore:
         run_id, attempt = _one(self._engine, _RUN_UPSERT, params, lambda r: r.one(), write=True)
         log.debug("profile_runs recipient=%s source_version=%s → %s (id=%s attempt=%s callback_attempts=%s)",
                   outcome.recipient_user_id, outcome.source_version, outcome.status, run_id, attempt, outcome.callback_attempts)
-        if outcome.status in (RunStatus.DELIVERED, RunStatus.SUPERSEDED):
-            # 이 번호가 Backend 에 반영됐다(또는 더 새 것이 이미 있다) → 낮은 번호의 미전달 행은 다시 보낼 일이 없다. 문장 하나, 멱등.
-            reason = f"더 새 번호 v{outcome.source_version}가 Backend에 반영됨 — Backend가 다시 묻지 않는 번호"
-            superseded = _one(self._engine, _SUPERSEDE_OLDER,
-                              {"rid": outcome.recipient_user_id, "sv": outcome.source_version,
-                               "error": json.dumps({"code": ErrorCode.CALLBACK_STALE.value, "reason": reason}, ensure_ascii=False)},
-                              lambda r: r.rowcount, write=True)
-            if superseded:
-                log.info("profile_runs recipient=%s: v%s 보다 낮은 미전달 행 %d건을 SUPERSEDED 로 내림",
-                         outcome.recipient_user_id, outcome.source_version, superseded)
 
     def get(self, recipient_user_id: int) -> ProfileOutcome | None:
         row = _one(self._engine, _RUN_LATEST, {"rid": recipient_user_id}, lambda r: r.mappings().first(), write=False)
@@ -224,7 +213,7 @@ class DbProfileRunStore:
         return _to_outcome(row)
 
     @contextmanager
-    def run_lock(self, recipient_user_id: int, source_version: int) -> Iterator[bool]:
+    def run_lock(self, recipient_user_id: int, source_version: int, *, strict: bool = False) -> Iterator[bool]:
         """(수신자, 버전) 배타 잠금 — PostgreSQL advisory lock. 얻으면 True, 이미 누가 잡고 있으면 False.
 
         **세션 단위** 잠금(`pg_try_advisory_lock`)이라 커넥션 하나를 잠금이 풀릴 때까지 들고 있는다. 그래서
@@ -235,7 +224,7 @@ class DbProfileRunStore:
           - 잠금 커넥션은 **AUTOCOMMIT** 으로 쓴다(`execution_options`, 첫 질의 전에). 트랜잭션을 아예 열지 않으므로 작업 내내
             `idle in transaction` 이 생기지 않고(VACUUM·세션 타임아웃 문제 없음) BEGIN/COMMIT 왕복도 없다 — 잠금·해제가
             각각 문장 하나다. 세션 잠금은 트랜잭션과 무관하다. (09-27 에는 "잠금 직후 커밋"이었다 — 09-28 왕복 줄이기.)
-          - 잠금을 **못 걸면 진행한다** — 커넥션이든 질의든. 잠금은 중복을 줄이는 장치이지 접수를 막는 장치가
+          - `strict=False` 면 잠금을 **못 걸어도 진행한다** — 커넥션이든 질의든. `strict=True`(MQ 처리기)면 예외를 그대로 낸다. 잠금은 중복을 줄이는 장치이지 접수를 막는 장치가
             아니다(최악이 분석 한 번 더). `execution_options` 의 오류는 SQLAlchemyError 가 아니라 psycopg 원본이라
             `Exception` 으로 받는다.
           - 해제에 실패한 커넥션은 **버린다**(invalidate). 풀에 돌려보내면 세션 잠금이 살아 있어 그 키가 영영 막힌다.
@@ -248,10 +237,14 @@ class DbProfileRunStore:
             conn = self._engine.connect()                                     # pre-ping 은 여기서 끝난다(스스로 autocommit 을 켰다 끈다)
             conn.execution_options(isolation_level="AUTOCOMMIT")              # 첫 execute 전에. 트랜잭션을 열지 않으니 BEGIN/COMMIT 왕복이 없다
             got = bool(conn.execute(sa.text("select pg_try_advisory_lock(:k)"), {"k": key}).scalar_one())
-        except Exception as e:  # noqa: BLE001 — 원본 드라이버 오류도 기존대로 처리하며 입력이 실릴 수 있는 traceback은 남기지 않는다.
-            log.error("잠금을 걸지 못함 recipient=%s source_version=%s — 잠금 없이 진행: %s", recipient_user_id, source_version, type(e).__name__)
+        except Exception as e:  # 원본 드라이버 오류도 기존대로 처리하며 입력이 실릴 수 있는 traceback은 남기지 않는다.
             if conn is not None:
                 conn.close()
+            if strict:   # MQ 경로(설계 §4): DB 잠금 · 조회 장애에서 분석을 강행하지 않는다 — 부른 쪽이 소비를 멈추고 다시 시도
+                log.error("잠금을 걸지 못함 recipient=%s source_version=%s — 진행하지 않음(strict): %s", recipient_user_id, source_version,
+                          type(e).__name__)
+                raise
+            log.error("잠금을 걸지 못함 recipient=%s source_version=%s — 잠금 없이 진행: %s", recipient_user_id, source_version, type(e).__name__)
             yield True
             return
 
@@ -271,39 +264,6 @@ class DbProfileRunStore:
                               type(e).__name__)
                     conn.invalidate()
             conn.close()                                                      # 풀로 돌아가며 격리 수준은 기본값으로 복원된다(왕복 없음)
-
-    # ---- 운영 -------------------------------------------------------------------
-
-    def recover_stale_runs(self, older_than_s: int) -> int:
-        """끊긴 실행(오래된 RUNNING)을 FAILED 로 내린다. 바꾼 행 수. 시작할 때 한 번 부른다.
-
-        프로세스가 죽으면 그 행은 RUNNING 인 채 남고, 중복 판정이 "이미 분석 중"으로 읽어 Backend 재전송을
-        계속 건너뛴다. **`older_than_s` 보다 오래된 것만** 건드린다 — 다른 인스턴스가 지금 돌리고 있는 행을
-        죽이지 않기 위해서다(그래서 중복 판정의 기준과 같은 값을 쓴다).
-
-        FAILED 로 두면 Backend 가 다시 보낼 때 새로 분석한다. AI 는 FAILED 를 콜백하지 않는다(침묵).
-        """
-        with self._engine.begin() as conn:
-            return conn.execute(sa.text(f"""
-                update {RUNS_TABLE}
-                   set status = 'FAILED',
-                       error = cast(:error as jsonb),
-                       updated_at = now()
-                 where status = 'RUNNING'
-                   and updated_at < now() - make_interval(secs => :secs)"""),
-                {"secs": older_than_s,
-                 "error": json.dumps({"code": ErrorCode.PIPELINE_ERROR.value,
-                                      "reason": "프로세스가 끝나 실행 기록만 남음 — 시작 시 정리"}, ensure_ascii=False)},
-            ).rowcount
-
-    def undelivered_count(self) -> int:
-        """결과는 있는데 Backend 에 전달하지 못한 행 수(RESULT_READY). /health 가 보여준다.
-
-        0 이 정상이다. 늘어나면 7.7 경로(네트워크·Backend 5xx)에 문제가 있다는 뜻이고, 그 행들은 Backend 가
-        같은 번호로 복구 전송할 때 재전송된다. 더 새 번호가 반영돼 다시 묻지 않을 행은 save() 가 SUPERSEDED 로 내려 여기 세지 않는다(10-08).
-        """
-        return _one(self._engine, sa.text(f"select count(*) from {RUNS_TABLE} where status = 'RESULT_READY'"), {},
-                    lambda r: r.scalar_one(), write=False)
 
     # ---- 편의 (시험·운영) ---------------------------------------------------------
 

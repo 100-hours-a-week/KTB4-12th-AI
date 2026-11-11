@@ -103,7 +103,7 @@ async def main(args):
         await page.locator('[data-page="profile"]').click()
         await page.fill("#recipient", str(args.recipient))
         await page.locator("#send-profile").click()
-        await expect(page.locator("#profile-status")).to_have_text("DELIVERED")
+        await expect(page.locator("#profile-status")).to_have_text("RESULT_READY")
         assert await page.locator("#profile-http").inner_text() == "202"
         results.append("profile202/result/callback tracked separately")
         if args.demo:

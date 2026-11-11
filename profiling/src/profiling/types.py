@@ -1,7 +1,7 @@
 """내부 자료형 — 파이프라인 단계 사이를 오가는 값. 외부 계약(schemas.py)과 독립.
 
 이름 규칙(팀 결정 2026-09-21): Python 내부는 **snake_case**, HTTP 요청·응답(schemas.py)만 **camelCase**.
-두 세계의 변환은 pipeline.to_internal()(7.6 DTO → ProfileRequest)과 backend.to_callback()(ProfileOutcome → 7.7 DTO) 두 곳뿐.
+두 세계의 변환은 mq/messages.py(요청 메시지 → ProfileRequest)와 mq/results.py(ProfileOutcome → 결과 메시지) 두 곳뿐.
 
 근거 문서: 4단계 2.2(흐름·의사코드), 5단계 1.2(프로필 테이블)·3.2(모델 입력), 6단계 1.2·3.2.
 리뷰 신호(별점 → 카테고리 편향 · 리뷰 행 보관 — 원문은 빼고 해시만, 10-11 결정 B)는 2026-10-07 결정 — 규칙표_별점x글 §3·§4(팀 폴더 일일작업물/첨부/2026-10-07_리뷰_신호_처리).
@@ -187,7 +187,11 @@ class SearchResult(BaseModel):
 
 
 class RunStatus(StrEnum):
-    """실행 기록 상태 (3단계 구현 상세 §10.2)."""
+    """실행 기록 상태 (3단계 구현 상세 §10.2).
+
+    DELIVERED · SUPERSEDED 는 옛 HTTP 7.7 콜백 경로(11-08 MQ 로 대체 · 제거)가 남긴 값이다. 새로 만들지 않지만 DB 에 남은 옛 행을
+    읽어야 하므로 값은 둔다(같은 이유로 ErrorCode 의 CONTRACT_7_* · CALLBACK_* 도 둔다). 전달 상태는 이제 mq_deliveries 가 가진다.
+    """
 
     RUNNING = "RUNNING"
     RESULT_READY = "RESULT_READY"
@@ -213,20 +217,11 @@ class ErrorCode(StrEnum):
     PIPELINE_ERROR = "PIPELINE_ERROR"                           # 그 밖의 처리 중 예외
 
 
-class CallbackResult(BaseModel):
-    """BackendPort.send_profile_callback()의 결과 — 실행 기록의 다음 상태 + 왜 그런지."""
-
-    status: RunStatus
-    http_status: int | None = None
-    code: ErrorCode | None = None          # DELIVERED면 None
-    message: str | None = None             # Backend 응답의 error.code·message 등 사람이 읽을 한 줄
-
-
 class ProfileOutcome(BaseModel):
     """`profile()` 한 건의 결과 — 저장·콜백의 입력. 실행 기록(ai_profile.profile_runs) 한 행과 1:1.
 
     status가 바뀔 때마다 같은 객체를 model_copy(update=…)로 복사해 store.save()에 넘긴다:
-      RUNNING(접수) → RESULT_READY(결과) → DELIVERED | SUPERSEDED | FAILED(콜백 뒤)  — 3단계 구현 상세 §10.2
+      RUNNING(분석 시작) → RESULT_READY(결과) | FAILED — 결과 전달(MQ 발행)은 mq_deliveries 가 따로 기록한다
     """
 
     recipient_user_id: int
@@ -237,7 +232,7 @@ class ProfileOutcome(BaseModel):
     search: SearchResult | None = None
     failure_code: ErrorCode | None = None   # 실패·미전달의 분류 (profile_runs.error.code)
     failure_reason: str | None = None       # 사람이 읽을 사유 (profile_runs.error.reason)
-    callback_attempts: int = 0          # 7.7 시도 횟수. run_and_callback이 콜백 뒤 +1 해서 저장
+    callback_attempts: int = 0          # 옛 7.7 시도 횟수 열(profile_runs.callback_attempts). MQ 경로는 늘 0 — 시도 예산은 mq_deliveries
     prompt_version: str | None = None
     validator_version: str | None = None
     tag_status: str | None = None       # 태그 단계 결과 — ok · empty · bad_json · fail:<종류> · skip_no_signal · off · skip

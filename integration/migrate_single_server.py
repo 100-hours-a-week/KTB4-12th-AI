@@ -1,6 +1,6 @@
 """Explicit migration for the configured database; applications never execute DDL.
 
-The --emmet job upgrades known Alembic history through 0011 in the same transaction. Roles must already exist; this command
+The --emmet job upgrades known Alembic history through 0012 in the same transaction. Roles must already exist; this command
 never creates credentials or makes an existing role LOGIN/superuser.
 """
 import argparse
@@ -58,8 +58,8 @@ def migrate_connection(db, expected_database):
     if name != expected_database or (owner != "ai_migrator" and not (owner == "fixture_owner" and os.getenv("INTEGRATION_SYNTHETIC_ONLY") == "1")):
         raise ValueError("Wrong migration database/role")
     db.execute("SELECT pg_advisory_xact_lock(367109731501)")
-    if db.execute("SELECT version_num FROM public.alembic_version").fetchone()[0] != "0011":
-        raise ValueError("Emmet migration0011 must be applied first")
+    if db.execute("SELECT version_num FROM public.alembic_version").fetchone()[0] != "0012":
+        raise ValueError("Emmet migration0012 must be applied first")
     for role in ROLES.values():
         row = db.execute("SELECT rolsuper,rolcreatedb,rolcreaterole FROM pg_roles WHERE rolname=%s", (role,)).fetchone()
         if row is None or any(row):

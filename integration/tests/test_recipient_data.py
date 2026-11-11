@@ -564,20 +564,11 @@ async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_i
                 if input_mode == "long_raw":
                     private_text += " 커피와 머그컵을 좋아해요" * 90
                 if input_mode == "profile_intake":
-                    # Exercise the normal intake boundary: it saves the current
-                    # input before analysis, without any per-Chat preference body.
-                    class Catalog:
-                        def active(self):
-                            return uuid4(), []
-
-                    body = intake_body(rid, 1, private_text)
-                    body = type(body).model_validate(body.model_dump() | {
-                        "dislikedCategories": payload(private_text, excluded)["dislikedCategories"]})
-                    queue = IntakeQueue()
-                    accepted = await asyncio.to_thread(intake_call, body, Catalog(),
-                        RecipientInputStore(database["profiler"]), queue)
-                    assert accepted.data.recipientUserId == rid
-                    assert accepted.data.sourceVersion == 1 and len(queue.jobs) == 1
+                    # Exercise the normal MQ input boundary: the processor's record_input
+                    # hook saves the current input before analysis, without any per-Chat body.
+                    rq = mq_request(rid, 1, private_text,
+                                    payload(private_text, excluded)["dislikedCategories"])
+                    await asyncio.to_thread(mq_record, RecipientInputStore(database["profiler"]), rq)
                     assert "PRIVATE_REVIEW_NOT_COPIED" not in json.dumps(raw_row(database, rid)[1])
                 else:
                     record(database, rid, 1, payload(private_text, excluded))
@@ -681,56 +672,30 @@ async def test_real_low_latency_runtime_uses_only_bound_friends_private_search_i
         store.close()
 
 
-class IntakeQueue:
-    def __init__(self, accept=True):
-        self.jobs, self.accept = [], accept
-
-    def submit(self, fn, *args, **kwargs):
-        if not self.accept:
-            return False
-        self.jobs.append((fn, args, kwargs))
-        return True
-
-    def run(self):
-        for fn, args, kwargs in self.jobs:
-            fn(*args, **kwargs)
+def mq_request(rid=401, version=1, text="합성 프로파일 취향", disliked=None):
+    """MQ 요청 메시지를 파싱한 결과(profiling.mq.messages → ProfileRequest)와 같은 모양."""
+    from profiling.types import DislikedCategory, ProfileRequest, Review
+    disliked = disliked if disliked is not None else [{"categoryId": 20, "categoryName": "합성"}]
+    return ProfileRequest(recipient_user_id=rid, source_version=version, gift_preference=text,
+        disliked_categories=[DislikedCategory(category_id=d["categoryId"], category_name=d["categoryName"])
+                             for d in disliked],
+        reviews=[Review(product_id=1, rating=5, review_text="PRIVATE_REVIEW_NOT_COPIED")])
 
 
-def intake_body(rid=401, version=1, text="합성 프로파일 취향"):
-    from profiling.schemas import ProfileExtractRequest
-    return ProfileExtractRequest(recipientUserId=rid, sourceVersion=version,
-        giftPreference=text, dislikedCategories=[{"categoryId": 20, "categoryName": "합성"}],
-        reviews=[{"productId": 1, "rating": 5, "reviewText": "PRIVATE_REVIEW_NOT_COPIED"}])
+def mq_record(inputs, rq):
+    """The processor's record_input hook as wired by integration.profiler_runtime."""
+    from integration.profiler_runtime import record_mq_input
+    from profiling import pipeline
+    return record_mq_input(inputs, rq, pipeline.input_hash(rq))
 
 
-def intake_call(body, catalog, inputs, supervisor, *, run_store=None, recipient_store=None):
-    import anyio
-    from profiling import intake
-    from profiling.settings import Settings
-    return asyncio.run(intake.extract_and_pool(body=body, catalog=catalog,
-        store=run_store or object(), recipient_store=recipient_store or object(),
-        backend=object(), supervisor=supervisor, settings=Settings(_env_file=None),
-        io_limiter=anyio.CapacityLimiter(1), recipient_data=inputs))
-
-
-@pytest.mark.parametrize("failure", ["catalog", "queue", "conflict", "database", "stale", "invalid"])
-def test_intake_records_before_downstream_failure_and_stops_invalid_work(database, failure):
-    from fastapi import HTTPException
-    from profiling.ports import NoActiveCatalog
-    body = intake_body()
+@pytest.mark.parametrize("failure", ["none", "conflict", "database", "stale", "invalid"])
+def test_mq_input_hook_records_before_analysis_and_maps_failures(database, failure):
+    from profiling.mq.process import InputConflict, InputInvalid
+    rq = mq_request()
     if failure == "invalid":
-        body = intake_body(text="수신할 수 없는 NUL\x00 글")
-    calls = []
-
-    class Catalog:
-        def active(self):
-            calls.append("catalog")
-            if failure == "catalog":
-                raise NoActiveCatalog("synthetic missing catalog")
-            return uuid4(), []
-
+        rq = mq_request(text="수신할 수 없는 NUL\x00 글")
     inputs = RecipientInputStore(database["profiler"])
-    supervisor = IntakeQueue(accept=failure != "queue")
     if failure == "conflict":
         record(database, 401, 1, payload("다른 원문"))
     elif failure == "stale":
@@ -740,18 +705,16 @@ def test_intake_records_before_downstream_failure_and_stops_invalid_work(databas
             def record(self, *args):
                 raise RuntimeError("synthetic database unavailable")
         inputs = BrokenInput()
-    if failure == "stale":
-        result = intake_call(body, Catalog(), inputs, supervisor)
-        assert result.data.sourceVersion == 1
+    expected = {"conflict": InputConflict, "invalid": InputInvalid, "database": RuntimeError}.get(failure)
+    if expected is None:
+        mq_record(inputs, rq)            # stale: kept as history, latest pointer unchanged, no exception
     else:
-        with pytest.raises(HTTPException) as denied:
-            intake_call(body, Catalog(), inputs, supervisor)
-        assert denied.value.status_code == {"conflict": 409, "invalid": 400}.get(failure, 503)
-    assert not supervisor.jobs
-    assert calls == (["catalog"] if failure in {"catalog", "queue"} else [])
+        # conflict → REQUEST_CONFLICT · invalid → INVALID_REQUEST · anything else → DB down (no ACK, retry)
+        with pytest.raises(expected):
+            mq_record(inputs, rq)
     current = raw_row(database, 401)
-    if failure in {"catalog", "queue"}:
-        assert current[0] == 1 and current[1]["giftPreference"] == body.giftPreference
+    if failure == "none":
+        assert current[0] == 1 and current[1]["giftPreference"] == rq.gift_preference
         assert set(current[1]) == {"giftPreference", "dislikedCategories"}
         assert "PRIVATE_REVIEW_NOT_COPIED" not in json.dumps(current[1])
     elif failure in {"database", "invalid"}:
@@ -762,60 +725,23 @@ def test_intake_records_before_downstream_failure_and_stops_invalid_work(databas
         assert current[0] == 2
 
 
-def test_queued_old_input_skips_analysis_and_duplicate_failure_can_retry(database, monkeypatch):
-    from profiling import intake, pipeline
-    from profiling.stores import DbProfileRunStore
-    from profiling.types import ProfileOutcome, RunStatus
-    body = intake_body(402)
-    request = pipeline.to_internal(body)
-    engine = sa.create_engine(database["profiler"].replace("postgresql://", "postgresql+psycopg://"))
-    calls = []
-    inputs, queue = RecipientInputStore(database["profiler"]), IntakeQueue()
-
-    class Catalog:
-        def active(self):
-            return uuid4(), []
-
-    monkeypatch.setattr(intake, "run_and_callback", lambda *args, **kwargs: calls.append("analysis"))
-    monkeypatch.setattr(intake, "resend_callback", lambda *args, **kwargs: calls.append("callback"))
-    try:
-        runs = DbProfileRunStore(engine)
-        runs.save(ProfileOutcome(recipient_user_id=402, source_version=1,
-            status=RunStatus.FAILED, input_hash=pipeline.input_hash(request)))
-        intake_call(body, Catalog(), inputs, queue, run_store=runs)
-        queue.run()
-        assert calls == ["analysis"]  # Identical failed requests retain retry behavior.
-        calls.clear()
-        record(database, 402, 2, payload("큐 대기 중 바뀐 최신 취향"))
-        queue.run()
-        assert not calls  # No callback or model for a superseded queued request.
-    finally:
-        engine.dispose()
-
-
-def test_legacy_delivered_replay_recovers_exact_analysis_without_new_model(database, monkeypatch):
-    from integration.recipient_data import RecordingRecipientStore, migrate
-    from profiling import intake, pipeline
+def test_legacy_delivered_run_is_reused_and_restores_chat_snapshot(database):
+    """A pre-MQ DELIVERED run of the same input is reused by the MQ processor (no new model call),
+    and recording the input again restores the Chat snapshot."""
+    from integration.recipient_data import migrate
+    from profiling import pipeline
+    from profiling.mq.process import reusable_ids
     from profiling.stores import DbProfileRunStore, DbRecipientProfileStore
     from profiling.types import ProfileOutcome, RecipientProfile, RunStatus, SearchResult
-    body = intake_body(403)
-    request = pipeline.to_internal(body)
+    rq = mq_request(403)
     engine = sa.create_engine(database["profiler"].replace("postgresql://", "postgresql+psycopg://"))
-    calls, queue = [], IntakeQueue()
     inputs = RecipientInputStore(database["profiler"])
     store = chat_store(database)
     cid = str(uuid4())
-
-    class Catalog:
-        def active(self):
-            return uuid4(), []
-
-    monkeypatch.setattr(intake, "run_and_callback", lambda *args, **kwargs: calls.append("analysis"))
-    monkeypatch.setattr(intake, "resend_callback", lambda *args, **kwargs: calls.append("callback"))
     try:
         runs, profiles = DbProfileRunStore(engine), DbRecipientProfileStore(engine)
         runs.save(ProfileOutcome(recipient_user_id=403, source_version=1,
-            status=RunStatus.DELIVERED, input_hash=pipeline.input_hash(request), tag_status="ok",
+            status=RunStatus.DELIVERED, input_hash=pipeline.input_hash(rq), tag_status="ok",
             search=SearchResult(product_ids=[1], query_text="", catalog_version_id=uuid4())))
         profiles.upsert(RecipientProfile(recipient_user_id=403, source_version=1, tag_status="ok",
             preferred_tags=[{"axis": "카테고리", "tag": "LEGACY_SUCCESS", "source": "review_text", "ref": "r1"}]))
@@ -823,10 +749,8 @@ def test_legacy_delivered_replay_recovers_exact_analysis_without_new_model(datab
             migrate(db)
         store.conversation(cid, 900, 403)
         assert snapshot(database, cid)["status"] == "NOT_PROVIDED"
-        intake_call(body, Catalog(), inputs, queue, run_store=runs,
-                    recipient_store=RecordingRecipientStore(profiles, inputs))
-        queue.run()
-        assert calls == ["callback"]
+        mq_record(inputs, rq)
+        assert reusable_ids(runs.get_run(403, 1), pipeline.input_hash(rq)) == [1]
         restored = snapshot(database, cid)
         assert restored["analysisCurrent"] and restored["analysisSourceVersion"] == 1
         assert "LEGACY_SUCCESS" in json.dumps(restored["data"])

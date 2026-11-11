@@ -1,6 +1,7 @@
 """Cost and mandatory-execution guards around unmodified Emmet adapters/pipeline."""
 
 import copy
+import logging
 import json
 import math
 import threading
@@ -8,7 +9,10 @@ from urllib.parse import urlsplit
 
 import httpx
 from profiling.llm import OpenRouterTagExtractor as UpstreamExtractor
+from profiling.ports import ResultRefused
 from profiling.types import RunStatus, ErrorCode
+
+log = logging.getLogger(__name__)
 
 
 # Guards that make the model a required, cost-capped dependency (see profiler_runtime).
@@ -85,13 +89,17 @@ class ExecutionState(threading.local):
 
 
 class RequiredStore:
-    """Reject degraded RESULT_READY before its durable commit or callback; leave core ranking unchanged."""
+    """Refuse a RESULT_READY only when the catalog generation changed during analysis (stale ranking).
 
-    def __init__(self, store, state, binding=None, required_model=True):
+    Design CO-01 (BE position, 11-08 user decision A1): a valid recommendation produced through the fallback chain
+    (v3 -> v2 -> no tags, or ranking without embedding similarity) is SUCCEEDED. Model/embedding adapters are still
+    required at startup (/ready); a runtime model or embedding failure only degrades the ranking and is logged.
+    """
+
+    def __init__(self, store, state, binding=None):
         self.store = store
         self.state = state
         self.binding = binding
-        self.required_model = required_model
 
     def __getattr__(self, name):
         return getattr(self.store, name)
@@ -105,21 +113,18 @@ class RequiredStore:
                 self.binding.check()
             except Exception:
                 self.state.failure = "generation_changed"
-        if status == "RESULT_READY" and (
-            self.state.failure
-            or self.required_model
-            and outcome.tag_status not in ("ok", "empty", "skip", "skip_no_signal")
-        ):
+        if status == "RESULT_READY" and self.state.failure == "generation_changed":
             failed = copy.copy(outcome)
             failed.status = RunStatus.FAILED
             failed.search = None
             failed.validation = None
             failed.failure_code = ErrorCode.PIPELINE_ERROR
-            failed.failure_reason = (
-                "Required model/embedding execution was not verified"
-            )
+            failed.failure_reason = "Catalog generation changed during analysis"
             failed.callback_attempts = 0
             # Upstream intentionally does not retry a failed RESULT_READY store write. Persist the refusal first.
             self.store.save(failed)
-            raise RuntimeError("Required model/embedding execution was not verified")
+            raise ResultRefused("Catalog generation changed during analysis")
+        if status == "RESULT_READY" and (self.state.failure or outcome.tag_status not in ("ok", "empty", "skip", "skip_no_signal")):
+            log.warning("profile recipient=%s fallback result accepted (tag_status=%s, execution=%s)",
+                        getattr(outcome, "recipient_user_id", None), outcome.tag_status, self.state.failure or "ok")
         return self.store.save(outcome)

@@ -32,12 +32,11 @@ def test_explicit_bases_allow_deployment_prefixes_without_dns_or_http(value):
     assert be_api_address(value, "/route") == {"state": "configured", "url": value.rstrip("/")+"/route"}
 
 
-@pytest.mark.parametrize("env", ["local", "develop", "production"])
+@pytest.mark.parametrize("env", ["local", "develop", "staging", "production"])
 def test_authenticated_snapshot_uses_only_explicit_deployment_urls(monkeypatch, env):
     async def case():
         monkeypatch.setenv("AI_ENVIRONMENT", env)
         monkeypatch.setenv("CONSOLE_BE_CHAT_BASE_URL", "https://ai.example.invalid/chat")
-        monkeypatch.setenv("CONSOLE_BE_PROFILER_BASE_URL", "https://ai.example.invalid/profiler")
         monkeypatch.setenv("APP_REVISION", "a"*40)
         app = configured_app()
         async def no_new_probe(*a, **kw): pytest.fail("Connection panel must not probe any address")
@@ -49,8 +48,7 @@ def test_authenticated_snapshot_uses_only_explicit_deployment_urls(monkeypatch, 
             info = response.json()["integration"]
             assert info["environment"] == env and info["revision"] == "a"*40
             assert info["api"]["chat"]["url"] == "https://ai.example.invalid/chat/v1/chat/conversations/{conversationId}"
-            from profiling.intake import EXTRACT_AND_POOL_PATH
-            assert info["api"]["profiler"]["url"] == "https://ai.example.invalid/profiler"+EXTRACT_AND_POOL_PATH
+            assert info["api"]["profiler"] == {"method": "MQ", "state": "message-queue", "url": None, "exchange": "profiling.exchange", "routingKey": "profiling.request"}
             assert info["authentication"] == "Authorization: Bearer <service_token>"
             assert info["readiness"]["beConnection"] == "unverified"
             assert info["readiness"]["database"] == "synthetic"
@@ -61,8 +59,7 @@ def test_authenticated_snapshot_uses_only_explicit_deployment_urls(monkeypatch, 
 
 def test_no_fallback_from_internal_targets_browser_or_invalid_config(monkeypatch):
     async def case():
-        monkeypatch.delenv("CONSOLE_BE_CHAT_BASE_URL", raising=False)
-        monkeypatch.setenv("CONSOLE_BE_PROFILER_BASE_URL", "https://SYNTHETIC_PASSWORD@example.invalid?token=SYNTHETIC_QUERY")
+        monkeypatch.setenv("CONSOLE_BE_CHAT_BASE_URL", "https://SYNTHETIC_PASSWORD@example.invalid?token=SYNTHETIC_QUERY")
         monkeypatch.setenv("APP_REVISION", "SYNTHETIC_SECRET_REVISION")
         app = configured_app({"targets": {"chat": "http://127.0.0.1:7860"}, "tokens": {"chat": "SYNTHETIC_PRIVATE_TOKEN"}})
         async def snapshot():
@@ -71,9 +68,9 @@ def test_no_fallback_from_internal_targets_browser_or_invalid_config(monkeypatch
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://127.0.0.1:9000") as client:
             await login(client)
             result = (await client.get("/api/snapshot")).json()["integration"]
-            assert result["api"]["chat"] == {"method": "PUT", "state": "missing", "url": None}
-            assert result["api"]["profiler"]["url"] is None
-            assert result["api"]["profiler"]["state"] == "invalid"
+            assert result["api"]["chat"]["url"] is None
+            assert result["api"]["chat"]["state"] == "invalid"
+            assert result["api"]["profiler"]["url"] is None and result["api"]["profiler"]["method"] == "MQ"
             assert result["revisionSource"] == "console-build"
             assert result["readiness"] == {"database": "unready", "products": "unknown", "productCount": None, "beConnection": "unverified"}
             assert "SYNTHETIC_" not in json.dumps(result) and "127.0.0.1" not in json.dumps(result)

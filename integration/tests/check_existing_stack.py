@@ -23,7 +23,9 @@ def check(args):
         raise ValueError('Only synthetic fixture credentials are accepted')
     urls = {key: 'http://127.0.0.1:'+str(port) for key, port in endpoints['ports'].items()}
     database = 'postgresql://fixture_owner@'+endpoints['databaseIP']+':5432/postgres'
-    callback = 'http://'+endpoints['callbackIP']+':8080'
+    # 11-08: the stack's Profiler consumes a disposable local RabbitMQ (no callback container).
+    from integration.tests import mq_harness
+    mq_url = mq_harness.broker_url()
     expected_ids = {p['id'] for p in json.loads(args.catalog.read_text())['products']}
     result = {'passed':False, 'tests':[], 'paidModelCalls':0, 'existingProductionServicesChanged':False}
     def passed(name):
@@ -82,22 +84,17 @@ def check(args):
                 db.execute('UPDATE ai_catalog.products SET unit_price=%s WHERE backend_product_id=%s',(original_price,first))
         until(lambda:http.get(urls['search']+'/readyz').status_code==200)
         passed('catalog_hash_fault_rejected_and_original_price_restored')
-        path = urls['profiling']+'/api/internal/v1/ai/profile/extract-and-pool'
         def request(rid):
             return {'recipientUserId':rid,'sourceVersion':1,'giftPreference':'합성 컵','dislikedCategories':[],'reviews':[]}
-        assert http.post(path,json=request(9901)).status_code==401
-        assert http.post(path,json=request(9901),headers=auth).status_code==202
-        until(lambda:status(9901)=='DELIVERED')
-        passed('profile_auth_and_result_callback_in_containers')
-        http.put(callback+'/fixture/mode/9902/503')
-        assert http.post(path,json=request(9902),headers=auth).status_code==202
-        until(lambda:status(9902)=='RESULT_READY')
-        http.put(callback+'/fixture/mode/9902/200')
-        assert http.post(path,json=request(9902),headers=auth).status_code==202
-        until(lambda:status(9902)=='DELIVERED')
-        calls = http.get(callback+'/fixture/calls').json()['9902']
-        assert len(calls)==2 and calls[0]==calls[1]
-        passed('profile_callback_failure_same_payload_retry')
+        with mq_harness.Results(mq_url) as results:
+            mq_harness.publish(mq_url, request(9901))
+            until(lambda:status(9901)=='RESULT_READY')
+            first = results.wait(1, 30)[0]
+            assert first['payload']['outcome']=='SUCCEEDED'
+            passed('profile_mq_request_and_result_in_containers')
+            mq_harness.publish(mq_url, request(9901))
+            assert results.wait(2, 30)[1]['payload']==first['payload']
+            passed('profile_duplicate_input_reuses_stored_result')
         cid, tid = str(uuid.uuid4()),str(uuid.uuid4())
         base = urls['chat']+'/v1/chat/test/conversations/'+cid
         assert http.put(base,json={'senderUserId':7,'recipientUserId':42},headers=auth).status_code==201

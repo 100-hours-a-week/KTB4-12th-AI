@@ -1,4 +1,6 @@
-"""Synthetic BE harness contract tests; no production BE or model calls."""
+"""Synthetic BE harness contract tests; no production BE, broker or model calls.
+
+11-08: profiling results arrive as RabbitMQ ``profiling.result`` messages; ``deliver`` feeds one to the harness."""
 
 import asyncio
 import importlib.util
@@ -62,8 +64,20 @@ def harness(tmp_path, monkeypatch):
     return module, state, seen
 
 
+def deliver(module, body):
+    """Wrap an old 7.7-shaped body as the AI's MQ result message and hand it to the harness consumer."""
+    payload = {"recipientUserId": body["recipientUserId"], "sourceVersion": body["sourceVersion"]}
+    if body.get("profileStatus") == "COMPLETED":
+        payload |= {"outcome": "SUCCEEDED", "data": {"recommendedProductIds": body["recommendedProductIds"]}}
+    else:
+        payload |= {"outcome": "FAILED", "error": {"code": "ANALYSIS_FAILED", "message": "synthetic"}}
+    message = {"schemaVersion": 1, "requestId": "00000000-0000-4000-8000-000000000001",
+               "createdAt": "2026-11-08T00:00:00.000Z", "payload": payload}
+    return module.handle_result(json.dumps(message).encode())
+
+
 @pytest.mark.parametrize("ids", [[], [101, 102]])
-def test_empty_or_nonempty_callback_persists_and_next_context_is_valid(
+def test_empty_or_nonempty_result_persists_and_next_context_is_valid(
     tmp_path, monkeypatch, ids
 ):
     module, state, seen = harness(tmp_path, monkeypatch)
@@ -79,17 +93,9 @@ def test_empty_or_nonempty_callback_persists_and_next_context_is_valid(
                 "profileStatus": "COMPLETED",
                 "recommendedProductIds": ids,
             }
-            assert (
-                await http.post(
-                    "/api/internal/v1/recipients/42/profile", json=body, headers=auth
-                )
-            ).status_code == 200
+            assert deliver(module, body) == 200
             original = state.read_bytes()
-            assert (
-                await http.post(
-                    "/api/internal/v1/recipients/42/profile", json=body, headers=auth
-                )
-            ).status_code == 200
+            assert deliver(module, body) == 200
             assert state.read_bytes() == original
             data = (
                 await http.get("/fixture/recipients/42/chat-context", headers=auth)
@@ -104,7 +110,7 @@ def test_empty_or_nonempty_callback_persists_and_next_context_is_valid(
     asyncio.run(case())
 
 
-def test_wrong_auth_recipient_stale_and_invalid_ids_rejected(tmp_path, monkeypatch):
+def test_wrong_recipient_stale_and_invalid_ids_rejected(tmp_path, monkeypatch):
     module, state, seen = harness(tmp_path, monkeypatch)
     original = state.read_bytes()
 
@@ -119,20 +125,12 @@ def test_wrong_auth_recipient_stale_and_invalid_ids_rejected(tmp_path, monkeypat
                 "profileStatus": "COMPLETED",
                 "recommendedProductIds": [],
             }
-            path = "/api/internal/v1/recipients/42/profile"
-            assert (await http.post(path, json=body)).status_code == 401
-            assert (
-                await http.post(path, json=body | {"recipientUserId": 43}, headers=auth)
-            ).status_code == 400
-            assert (
-                await http.post(path, json=body | {"sourceVersion": 0}, headers=auth)
-            ).status_code == 409
+            # Broker account auth replaces the old bearer check on the callback route.
+            assert deliver(module, body | {"recipientUserId": 43}) == 400
+            assert deliver(module, body | {"sourceVersion": 0}) == 409
             for ids in [[True], [0], ["101"], [101, 101]]:
-                assert (
-                    await http.post(
-                        path, json=body | {"recommendedProductIds": ids}, headers=auth
-                    )
-                ).status_code == 400
+                assert deliver(module, body | {"recommendedProductIds": ids}) == 400
+            assert module.handle_result(b"{oops") == 400
 
     asyncio.run(case())
     assert state.read_bytes() == original and not seen
@@ -157,11 +155,7 @@ def test_completed_empty_input_has_none_context_without_empty_pool(
                 "profileStatus": "COMPLETED",
                 "recommendedProductIds": [],
             }
-            assert (
-                await http.post(
-                    "/api/internal/v1/recipients/42/profile", json=body, headers=auth
-                )
-            ).status_code == 200
+            assert deliver(module, body) == 200
             result = (
                 await http.get("/fixture/recipients/42/chat-context", headers=auth)
             ).json()
@@ -177,7 +171,7 @@ def test_completed_empty_input_has_none_context_without_empty_pool(
     asyncio.run(case())
 
 
-def test_bound_profile_commits_matching_preferences_and_version_only_on_callback(tmp_path, monkeypatch):
+def test_bound_profile_commits_matching_preferences_and_version_only_on_result(tmp_path, monkeypatch):
     module, state, _ = harness(tmp_path, monkeypatch)
 
     async def case():
@@ -195,7 +189,7 @@ def test_bound_profile_commits_matching_preferences_and_version_only_on_callback
             assert (await http.put(path, json=body | {'giftPreference': 'changed'}, headers=auth)).status_code == 409
             assert (await http.put(path, json=body | {'reviews': []}, headers=auth)).status_code == 409
             callback = {"recipientUserId": 42, "sourceVersion": 1, "profileStatus": "COMPLETED", "recommendedProductIds": [101]}
-            assert (await http.post('/api/internal/v1/recipients/42/profile', json=callback, headers=auth)).status_code == 200
+            assert deliver(module, callback) == 200
             context = (await http.get('/fixture/recipients/42/chat-context', headers=auth)).json()
             assert context['recipientContext']['giftPreference'] == body['giftPreference']
             assert context['recipientContext']['dislikedCategories'] == body['dislikedCategories']
@@ -204,14 +198,14 @@ def test_bound_profile_commits_matching_preferences_and_version_only_on_callback
             next_body = body | {'sourceVersion': 2, 'giftPreference': None, 'dislikedCategories': [], 'reviews': []}
             assert (await http.put(path, json=next_body, headers=auth)).status_code == 200
             assert (await http.get('/fixture/recipients/42/chat-context', headers=auth)).json() == context
-            assert (await http.post('/api/internal/v1/recipients/42/profile', json=callback | {'sourceVersion': 2, 'recommendedProductIds': []}, headers=auth)).status_code == 200
+            assert deliver(module, callback | {'sourceVersion': 2, 'recommendedProductIds': []}) == 200
             latest = (await http.get('/fixture/recipients/42/chat-context', headers=auth)).json()
             assert latest['recipientContext']['sourceVersion'] == 2
             assert latest['recipientContext']['status'] == 'NONE'
             assert latest['recipientContext']['giftPreference'] is None
             assert 'preparedContext' not in latest
             committed = state.read_bytes()
-            assert (await http.post('/api/internal/v1/recipients/42/profile', json=callback, headers=auth)).status_code == 409
+            assert deliver(module, callback) == 409
             assert (await http.put(path, json=body, headers=auth)).status_code == 409
             assert state.read_bytes() == committed
 
@@ -250,4 +244,36 @@ def test_invalid_profile_never_reserves_version_before_corrected_retry(tmp_path,
             assert (await http.put(path,json=valid|invalid,headers=auth)).status_code == 422
             assert state.read_bytes() == original
             assert (await http.put(path,json=valid,headers=auth)).status_code == 200
+    asyncio.run(case())
+
+
+def test_failed_result_is_recorded_without_touching_committed_context(tmp_path, monkeypatch):
+    module, state, seen = harness(tmp_path, monkeypatch)
+    body = {"recipientUserId": 42, "sourceVersion": 1, "profileStatus": "FAILED"}
+    assert deliver(module, body) == 200
+    saved = json.loads(state.read_text())
+    assert saved["callback"] is None and saved["lastFailure"] == {"sourceVersion": 1, "code": "ANALYSIS_FAILED"}
+    assert not seen
+
+
+def test_profile_request_requires_broker_and_the_same_bound_input(tmp_path, monkeypatch):
+    module, state, _ = harness(tmp_path, monkeypatch)
+    published = []
+
+    async def case():
+        auth = {"Authorization": "Bearer synthetic-token"}
+        body = {"recipientUserId": 42, "sourceVersion": 2, "giftPreference": "SYNTHETIC", "dislikedCategories": [], "reviews": []}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(module.app), base_url="http://synthetic") as http:
+            path = "/fixture/recipients/42/profile-request"
+            assert (await http.post(path, json=body, headers=auth)).status_code == 503      # no broker configured
+            monkeypatch.setattr(module, "AMQP_URL", "amqp://synthetic.invalid/gift")
+            monkeypatch.setattr(module, "publish_request", lambda rq: published.append(rq) or "rid")
+            assert (await http.post(path, json=body)).status_code == 401
+            assert (await http.post(path, json=body, headers=auth)).status_code == 409      # not bound yet
+            assert (await http.put("/fixture/recipients/42/profile-input", json=body, headers=auth)).status_code == 200
+            assert (await http.post(path, json=body | {"giftPreference": "other"}, headers=auth)).status_code == 409
+            sent = await http.post(path, json=body, headers=auth)
+            assert sent.status_code == 200 and sent.json()["requestId"] == "rid"
+        assert [rq.sourceVersion for rq in published] == [2]
+
     asyncio.run(case())
