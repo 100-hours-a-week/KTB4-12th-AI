@@ -14,6 +14,7 @@ JSON 강제(버전 3 추출)는 둘 중 하나:
 AI 서버 → Modal 은 Modal 프록시 인증(Modal-Key · Modal-Secret 헤더, 컨테이너를 켜기 전에 Modal 이 확인) + Bearer 키(컨테이너 안에서 확인).
 키는 헤더에만 싣고 로그 · 예외 · repr 에 남기지 않는다. 원문(프롬프트 · 출력)도 예외에 넣지 않는다.
 """
+import ipaddress
 import json
 import math
 import time
@@ -59,6 +60,19 @@ def _timeout(left: float) -> httpx.Timeout:
     return httpx.Timeout(left, connect=min(left, 10.0))
 
 
+def _origin(url: httpx.URL) -> tuple[str, str, int]:
+    return url.scheme, url.host, url.port or (443 if url.scheme == "https" else 80)
+
+
+def _loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def load_grammar(schema: dict[str, Any], name: str = "tag3disliked") -> str:
     """저장해 둔 EBNF — 규격의 스키마가 EBNF 를 만들 때와 같을 때만. 다르면 ValueError(규격을 바꿨으면 EBNF 를 다시 만들 것)."""
     saved = (GRAMMAR_DIR / f"{name}.schema.json").read_text(encoding="utf-8")
@@ -72,47 +86,71 @@ class V3Client:
                  transport: httpx.BaseTransport | None = None, sleep=time.sleep) -> None:
         if structured not in ("grammar", "json_schema"):
             raise ValueError(f"structured={structured!r}")
+        try:
+            url = httpx.URL(base_url)
+        except (httpx.InvalidURL, ValueError):
+            raise V3Unavailable("invalid_url") from None
+        if (url.scheme not in ("http", "https") or not url.host or url.port == 0
+                or url.userinfo or url.query or url.fragment):
+            raise V3Unavailable("invalid_url")
+        if (api_key or proxy_key or proxy_secret) and url.scheme != "https" and not _loopback(url.host):
+            raise V3Unavailable("invalid_url")
+        self._origin = _origin(url)
         self.structured = structured
         self._sleep = sleep
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         if proxy_key or proxy_secret:
             headers |= {"Modal-Key": proxy_key, "Modal-Secret": proxy_secret}
-        self._client = httpx.Client(base_url=base_url.rstrip("/"), transport=transport, trust_env=False, follow_redirects=False,
+        self._client = httpx.Client(base_url=str(url).rstrip("/"), transport=transport, trust_env=False, follow_redirects=False,
                                     headers=headers)   # 따라가기는 post_json 이 남은 기한으로(자동이면 기한을 처음부터 다시 셈)
 
     def __repr__(self) -> str:
         return f"V3Client(base_url={str(self._client.base_url)!r})"
 
+    def _check_origin(self, url: httpx.URL) -> None:
+        if url.userinfo or url.fragment or _origin(url) != self._origin:
+            raise V3Unavailable("unsafe_redirect")
+
     def post_json(self, path: str, body: dict, deadline: Deadline, label: str = "") -> tuple[dict, float]:
         """JSON 한 번 — 연결 실패는 몇 번, 502 · 503 · 504(켜지는 중)는 기한 안에서 다시. 그 밖의 4xx · 5xx 는 바로 V3Unavailable
         (상대가 {"error": 종류} 를 주면 kind = remote:<종류>).
         Modal 웹 주소는 150초가 넘으면 303 으로 같은 결과를 GET 하게 한다 — 따라갈 때마다 **남은** 기한을 쓴다
-        (11-03: httpx 자동 따라가기가 기한을 처음부터 다시 세서 240초 기한에 263초 기다림)."""
+        (11-03: httpx 자동 따라가기가 기한을 처음부터 다시 세서 240초 기한에 263초 기다림).
+        같은 origin 의 GET 리다이렉트만 허용한다. 접수 후에는 결과 GET 만 다시 시도하며 최초 POST 를 재제출하지 않는다."""
         t0 = time.perf_counter()
         tries = 0
+        hops = 0
         label = label or path
+        request = self._client.build_request("POST", path, json=body)
+        self._check_origin(request.url)
         while True:
             left = deadline.left()
             if left <= 0:
                 raise V3Unavailable("timeout", label)
+            request.extensions["timeout"] = _timeout(left).as_dict()
             try:
-                r = self._client.post(path, json=body, timeout=_timeout(left))
-                hops = 0
-                while r.is_redirect and r.next_request is not None:
-                    hops += 1
-                    left = deadline.left()
-                    if left <= 0 or hops > MAX_REDIRECTS:
-                        raise V3Unavailable("timeout", f"{label} redirect {hops}")
-                    nxt = r.next_request
-                    nxt.extensions["timeout"] = _timeout(left).as_dict()
-                    r = self._client.send(nxt)
+                r = self._client.send(request)
+            except httpx.InvalidURL:
+                raise V3Unavailable("unsafe_redirect") from None
             except httpx.TimeoutException as e:
                 raise V3Unavailable("timeout", f"{label} {type(e).__name__}") from e
             except httpx.TransportError as e:
                 tries += 1
-                if tries >= CONNECT_TRIES or deadline.left() <= RETRY_WAIT_S:
+                if ((request.method == "POST" and not isinstance(e, httpx.ConnectError))
+                        or tries >= CONNECT_TRIES or deadline.left() <= RETRY_WAIT_S):
                     raise V3Unavailable("connect", f"{label} {type(e).__name__}") from e
                 self._sleep(RETRY_WAIT_S)
+                continue
+            if r.is_redirect and r.next_request is not None:
+                hops += 1
+                if deadline.left() <= 0 or hops > MAX_REDIRECTS:
+                    raise V3Unavailable("timeout", f"{label} redirect {hops}")
+                nxt = r.next_request
+                self._check_origin(nxt.url)
+                if nxt.method != "GET":
+                    raise V3Unavailable("unsafe_redirect")
+                request = nxt
+                tries = 0
                 continue
             if r.status_code in RETRY_STATUS and deadline.left() > RETRY_WAIT_S:
                 self._sleep(RETRY_WAIT_S)
