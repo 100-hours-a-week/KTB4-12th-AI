@@ -482,8 +482,8 @@ def _extract_tags(rq: ProfileRequest, products: list[ProductRecord], tagger: Tag
     head = (f"recipient={rid} source_version={sv} model={tagger.model} prompt={spec.version} "
             f"reviews={len(rq.reviews)} pref={'y' if prep.has_pref else 'n'} prompt_chars={len(prompt)} "
             f"guard={g['version']}:{_counts(Counter(g['counts']))}")
-    if not tagging.worth_llm(prep):                  # 근거가 될 것(취향 문장 · 4~5점 리뷰)이 없다 — 부르지 않는다(비용 0, 결과는 어차피 빈 태그)
-        log.info("tag_extract skip_no_signal %s — 정리 뒤 취향 문장 없음 · 4~5점 리뷰 없음, LLM 안 부름", head)
+    if not tagging.worth_llm(prep, spec):            # 근거가 될 것(취향 문장 · 4~5점 리뷰 · 비선호 규격이면 1~3점 리뷰 글)이 없다 — 부르지 않는다(비용 0)
+        log.info("tag_extract skip_no_signal %s — 정리 뒤 취향 문장 없음 · 4~5점 리뷰 없음 · (비선호 규격) 리뷰 글 없음, LLM 안 부름", head)
         return TagRun(empty, [], pv, "skip_no_signal")
     engine = None
     if isinstance(tagger, V3Engine):

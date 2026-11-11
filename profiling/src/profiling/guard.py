@@ -4,8 +4,10 @@
   ② 개인정보    전화번호 · 이메일 · URL · 주민번호 꼴 · 카드/계좌 꼴(긴 숫자) → [연락처] · [이메일] · [링크] · [번호] 로 가림
   ③ 욕설        사전(띄어쓰기 · 숫자 · 기호 끼워 넣기 · 초성 변형까지) → 그 말만 [가림], 나머지 문장은 쓴다
   ④ 의미 없음   글자(한글 음절 · 영문) 비율이 낮음 · 자음/모음만(ㅋㅋㅋ) · 한두 글자 반복 · 키보드 막 치기 → 글을 버린다(별점은 그대로)
-  ⑤ 인젝션 의심 "무시해 · 지시 · system · ignore previous · 중괄호 JSON" 꼴 → **그 글은 버린다**(별점 · 상품 정보는 그대로). 처음엔 표시만 했으나
-               하네스(U13)에서 gemma4:12b 가 지시대로 태그를 만들어 검증기도 못 막았다(근거가 취향 문장이라) — 10-13 g2
+  ⑤ 인젝션 의심 "무시해 · 지시 · system · ignore previous · 중괄호 JSON" 꼴 → **그 문장 · 괄호 묶음만 버린다**(g7, 11-07), 남는 문장이 없으면
+               글을 버린다(별점 · 상품 정보는 그대로). 처음엔 표시만 했으나 하네스(U13)에서 gemma4:12b 가 지시대로 태그를 만들어 검증기도
+               못 막았다(근거가 취향 문장이라) — 10-13 g2 에서 글 통째로 버림 → 기록 368명에서 끝에 명령 한 줄 붙은 취향 글 16개가 통째로
+               버려져 정답 31개(12명은 리뷰도 없어 LLM 을 아예 안 부름)를 잃음 → g7 은 그 문장만. 남은 글에 지시문 꼴이 또 있으면 그때는 통째로 버린다
   ⑤′ 명령 문장   '[지시: …]' · 'AI 는 … 저장하세요' 처럼 AI 에게 태그를 시키는 **문장만** 뺀다(나머지 문장은 쓴다) — 10-29 g6.
                시험 300명에서 ⑤ 에 안 걸려 모델까지 갔고 E4B 가 16번 따랐다. 취향 글 전체를 버리면 "술 선물은 그만" 같은 정상 문장까지 잃는다
   ⑥ 길이 상한   가린 **뒤에** 글 하나 최대 MAX_TEXT_LEN 자(넘으면 앞부분만, truncated 표시) — 경계에 걸친 번호도 통째로 가려지고, 가림 표시로 늘어나도 넘지 않게
@@ -21,7 +23,7 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 
-GUARD_VERSION = "g6"   # g1: 인젝션 표시만 → g2: 인젝션 글 버림 → g3: 욕설 사전 갈래별 확장 + 오탐 예외 → g4: 주민 · 계좌 번호가 전화번호로 반만 가려지던 것 수정(10-13) → g5: 글 길이 상한(10-17) → g6: AI 에게 시키는 명령 문장만 빼기(10-29)
+GUARD_VERSION = "g7"   # g1: 인젝션 표시만 → g2: 인젝션 글 버림 → g3: 욕설 사전 갈래별 확장 + 오탐 예외 → g4: 주민 · 계좌 번호가 전화번호로 반만 가려지던 것 수정(10-13) → g5: 글 길이 상한(10-17) → g6: AI 에게 시키는 명령 문장만 빼기(10-29) → g7: 인젝션 의심도 그 문장 · 괄호 묶음만 빼기(11-07)
 MAX_TEXT_LEN = 1000    # 글 하나(취향 문장 · 리뷰 글) 최대 글자 수 — BE 칸은 TEXT 라 상한이 없다. 넘으면 앞부분만 LLM 에 보내고 정리본으로 저장(시험 자료 최대 300자)
 
 # ---------------------------------------------------------------- ② 개인정보
@@ -83,9 +85,40 @@ _PROFANITY_RE = [_word_pattern(w) for w in sorted(set(PROFANITY), key=len, rever
 INJECTION = re.compile(
     r"(이전|앞의|위의|모든)\s*(지시|명령|규칙|프롬프트)|지시\s*(를|는)?\s*무시|무시\s*하고|시스템\s*프롬프트|프롬프트\s*(를|는)?\s*(보여|알려|출력)|"
     r"태그(로|에)\s*.{0,10}(넣어|추가|만들어)|역할\s*을?\s*바꿔|너는\s*이제|"
+    r"(?:선호|비선호|결과)\s*(?:태그)?\s*(?:에|로)\s*[^.!?~\n]{0,20}?(?:기록|적으|적어|출력|작성|기입|등록|저장|추가)\s*(?:하|해|할|함|으)|"   # g7 — 문장을 나눠 '무시' 없이 시키는 것
     r"ignore\s+(all\s+)?(previous|above|prior)|system\s*prompt|you\s+are\s+now|\bassistant\s*:|\bsystem\s*:|\{\s*\"",
     re.IGNORECASE,
 )
+
+_INJ_GROUP = re.compile(r"\[[^\[\]\n]*\]|\{[^{}\n]*\}|\([^()\n]*\)|//[^\n]*?(?://|$)")   # 괄호 · 주석 묶음 — 문장 중간에 끼운 지시
+_SENTENCE = re.compile(r"[^.!?~。\n]+[.!?~。]*|[.!?~。]+")
+
+
+def drop_injection(t: str) -> tuple[str, int]:
+    """지시문 꼴(INJECTION)이 든 괄호 묶음 · 문장만 뺀다(g7) → (남은 글, 뺀 개수). 남은 글에 또 있으면 통째로("") — 문장 나누기를 피한 꼴."""
+    n = 0
+
+    def group(m: re.Match[str]) -> str:
+        nonlocal n
+        if INJECTION.search(m.group()):
+            n += 1
+            return " "
+        return m.group()
+
+    t = _INJ_GROUP.sub(group, t)
+    if INJECTION.search(t):
+        keep = []
+        for s in _SENTENCE.findall(t):
+            if INJECTION.search(s):
+                n += 1
+            else:
+                keep.append(s)
+        t = "".join(keep)
+    t = re.sub(r"\s+", " ", t).strip()
+    if n and (INJECTION.search(t) or not re.search(r"[가-힣A-Za-z]", t)):
+        return "", n
+    return t, n
+
 
 # ---------------------------------------------------------------- ⑤′ 명령 문장 (그 문장만 뺀다)
 _AI = r"(?<![A-Za-z])(?:AI|A\.I\.|에이아이|인공지능|챗봇|어시스턴트|assistant)(?![A-Za-z])"
@@ -183,11 +216,13 @@ def clean(text: str | None) -> GuardResult:
         if not t:
             res.text = None
             return res
-    if INJECTION.search(t):                      # 지시문 꼴 — 그 글은 LLM 으로 보내지 않는다(10-13 하네스: 표시만 했더니 gemma 가 지시대로 '루이비통 · 샤넬' 태그를 냄)
-        res.counts["injection_suspect"] += 1
+    t, n = drop_injection(t)                     # 지시문 꼴 — 그 문장 · 괄호 묶음은 LLM 으로 보내지 않는다(10-13 하네스: 표시만 했더니 gemma 가 지시대로
+    if n:                                        # '루이비통 · 샤넬' 태그를 냄). 남는 문장이 없으면 글을 버린다(g7, 11-07 — 전엔 글 통째로)
+        res.counts["injection_suspect"] += n
         res.flags.add("injection_suspect")
-        res.text = None
-        return res
+        if not t:
+            res.text = None
+            return res
     if is_gibberish(t):
         res.counts["gibberish"] += 1
         res.flags.add("gibberish")
