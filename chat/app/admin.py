@@ -31,10 +31,10 @@ async def login(body:Login,request:Request,response:Response):
 def logout(request:Request,response:Response,auth:Admin):
  response.delete_cookie('chat_admin',secure=SECURE,httponly=True,samesite='lax');return {'ok':True}
 @router.get('/admin/api/conversations')
-async def conversations(request:Request,auth:Admin,limit:Annotated[int,Query(ge=1,le=50)]=20,cursor:Annotated[str|None,Query(max_length=300)]=None,status:Literal['PROCESSING','COMPLETED','FAILED','CANCELLED']|None=None,since:datetime|None=None,until:datetime|None=None,q:Annotated[str,Query(max_length=200)]='',feedback:Literal['all','any','pending','reviewed']='all',sort:Literal['created','feedback']='created'):
+async def conversations(request:Request,auth:Admin,limit:Annotated[int,Query(ge=1,le=50)]=20,cursor:Annotated[str|None,Query(max_length=300)]=None,status:Literal['PROCESSING','COMPLETED','FAILED','CANCELLED']|None=None,since:datetime|None=None,until:datetime|None=None,q:Annotated[str,Query(max_length=200)]='',feedback:Literal['all','any','pending','reviewed']='all',sort:Literal['created','feedback','activity']='activity',issue:Literal['attention','slow']|None=None):
  if any(d is not None and d.tzinfo is None for d in [since,until]):raise APIError(400,'날짜에 시간대가 필요합니다.')
  if since and until and since>=until:raise APIError(400,'종료일은 시작일 이후여야 합니다.')
- data=await request.app.state.store.call('admin_conversations',limit=limit,cursor=cursor,status=status,since=since.isoformat() if since else None,until=until.isoformat() if until else None,q=q,feedback_state=feedback,sort=sort)
+ data=await request.app.state.store.call('admin_conversations',limit=limit,cursor=cursor,status=status,since=since.isoformat() if since else None,until=until.isoformat() if until else None,q=q,feedback_state=feedback,sort=sort,issue=issue)
  for row in data.get('items',[]):row['title']='[요청 원문 숨김]'
  return data
 @router.get('/admin/api/conversations/{cid}')

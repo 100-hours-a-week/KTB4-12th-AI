@@ -1,7 +1,7 @@
 const $ = s => document.querySelector(s), el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
 let next = null, current = null, detailPage = null, detailStart = 0, selectedFocus = null, allTurns = [], selectionVersion = 0, listVersion = 0, sessionVersion = 0;
 const labels = {COMPLETED: '완료', FAILED: '실패', CANCELLED: '취소', PROCESSING: '생성 중'};
-const when = s => new Date(s).toLocaleString('ko-KR');
+const when = s => s && Number.isFinite(Date.parse(s)) ? new Date(s).toLocaleString('ko-KR') : '미기록';
 function traceMessage(context) {
   const marker = context?.tracePersistence;
   if (marker === undefined || marker === null) return '추적 저장 상태 미기록(기존 자료)';
@@ -55,7 +55,7 @@ function report(e) { $('#status').textContent = e.message; $('#status').classNam
 function download(value, name) { const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], {type: 'application/json'})), a = el('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
 function filters() {
   const data = new FormData($('#filters')), p = new URLSearchParams();
-  for (const k of ['q', 'status', 'feedback', 'sort']) if (data.get(k)) p.set(k, data.get(k));
+  for (const k of ['q', 'status', 'feedback', 'sort', 'issue']) if (data.get(k)) p.set(k, data.get(k));
   for (const k of ['since', 'until']) if (data.get(k)) { const d = new Date(data.get(k) + 'T00:00:00'); if (k === 'until') d.setDate(d.getDate() + 1); p.set(k, d.toISOString()); }
   return p;
 }
@@ -74,6 +74,7 @@ async function load(reset = true) {
       const button = el('button', undefined, 'conversation'); button.dataset.id = row.id; button.setAttribute('aria-pressed', row.id === current);
       button.append(el('span', '대화 ' + row.id.slice(0, 8), 'title'), el('p', `${when(row.created)} · ${row.turnCount}턴`, 'meta'));
       if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`${t.status||'미기록'} · ${t.backend||'연결 미기록'} · ${t.model||'모델 미기록'} · 설정 v${t.connectionRevision??'?'} · ${t.sourceScope}`, 'meta'),el('p',`입/출 ${t.inputTokens??'?'}/${t.outputTokens??'?'} · ${t.elapsedMs??'?'}ms · ${t.costUsd??'?'} USD`,'meta'));}
+      if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`해당 요청 ${when(t.created)} · ${diagnosticLabel(t.diagnostic?.category)}`,'meta'));}
       if (row.latestFeedbackAt) button.append(el('p', `최근 의견 ${when(row.latestFeedbackAt)} · 미검토 ${row.pendingFeedbackCount}개`, 'meta'));
       if (row.failedCount) button.append(el('span', `실패 ${row.failedCount}건`, 'meta failed'));
       button.onclick = () => select(row.id, false, row.focusTurnId).catch(report); $('#items').append(button);
@@ -99,7 +100,7 @@ function render(data) {
   const tools = el('div', undefined, 'tools'), exportButton = el('button', '표시된 턴 JSON 저장'), refresh = el('button', '대화 새로고침');
   exportButton.onclick = () => download({...data, turns: allTurns, startCursor: detailStart, nextCursor: detailPage}, 'conversation-' + current + '.json');
   refresh.onclick = () => select(current, false, selectedFocus).catch(report); tools.append(exportButton, refresh);
-  if (detailStart) { const first = el('button', '처음부터 보기'); first.onclick = () => select(current).catch(report); tools.append(first); head.append(el('p', '의견이 달린 질문과 바로 앞 대화부터 표시합니다.', 'meta')); }
+  if (detailStart) { const first = el('button', '처음부터 보기'); first.onclick = () => select(current).catch(report); tools.append(first); head.append(el('p', '선택한 요청과 바로 앞 대화부터 표시합니다.', 'meta')); }
   head.append(tools); box.append(head); if (!allTurns.length) box.append(el('p', '아직 질문이 없는 대화입니다.', 'empty'));
   for (const turn of allTurns) {
     const article = el('article', undefined, 'turn' + (turn.turnId === selectedFocus ? ' focused-turn' : '')), top = el('div', undefined, 'turn-head');
@@ -138,6 +139,18 @@ $('#login').onsubmit = async e => { e.preventDefault(); try { await api('/admin/
 $('#logout').onclick = async () => { try { await api('/admin/logout', {method: 'POST'}); resetSession(); $('#status').textContent = '로그아웃했습니다.'; } catch (e) { report(e); } };
 load().then(()=>{if(!$('#workspace').hidden)return loadConnection();}).catch(report);
 
+function diagnosticLabel(category) {
+  return ({turn_deadline:'AI 전체 처리 제한 시간 초과',provider_read_timeout:'모델 응답 읽기 시간 초과',provider_connect_timeout:'모델 연결 시간 초과',provider_write_timeout:'모델 요청 전송 시간 초과',provider_pool_timeout:'모델 연결 풀 대기 시간 초과',dependency_timeout:'조회·외부 의존 작업 시간 초과',dependency_http_error:'조회·외부 의존 서버 HTTP 오류',provider_http_error:'모델 서버 HTTP 오류',interrupted:'처리 중단 · 중단 원인은 별도 확인',failed:'AI 처리 실패',in_progress:'처리 중 · 마지막 저장 기록',completed:'AI 완료 기록 있음'})[category]||'원인 정보 미기록';
+}
+function diagnosticPanel(trace) {
+  const d=trace.diagnostic||{},box=el('div',undefined,'trace-diagnostic');
+  box.append(el('strong',diagnosticLabel(d.category)),el('p',`단계 ${d.stage||'미기록'} · 오류 ${d.code||'미기록'}${d.httpStatus!=null?' · HTTP '+d.httpStatus:''}`,'meta'));
+  box.append(el('p',`AI 시작 ${when(d.startedAt)} · 마지막 기록 ${when(d.capturedAt)} · 전체 처리 제한 ${d.turnTimeoutSeconds??'미기록'}초`,'meta'));
+  box.append(el('p',`첫 답변 조각 생성 ${d.firstAnswerMs??'미기록'}ms · 첫 답변 저장 ${d.firstCommittedDeltaMs??'미기록'}ms`,'meta'));
+  if(d.checkpointWriteFailures)box.append(el('p',`중간 기록 저장 실패 ${d.checkpointWriteFailures}회 · 일부 진행 정보가 없을 수 있습니다.`,'meta'));
+  box.append(el('p','AI 저장 기록입니다. BE·사용자 수신 여부와 AI에 도달하지 않은 요청은 이 기록만으로 확인할 수 없습니다.','meta'));
+  return box;
+}
 function tracePanel(cid, turn) {
   const trace=turn.trace, box=el('section',undefined,'trace-panel');
   if(!trace){box.append(el('p','실행 근거 미수집 · 과거 기록은 재구성하지 않습니다.','meta'));return box;}
@@ -146,11 +159,13 @@ function tracePanel(cid, turn) {
   if(trace.executionMode==='mock')meta.prepend(el('span','합성 기록 · 모델 미호출','chip'));
   box.append(meta,el('p',`입력 ${totals.inputTokens??'미확인'} · 출력 ${totals.outputTokens??'미확인'} tokens · ${trace.elapsedMs??'미확인'}ms · 비용 ${totals.costUsd==null?'미확인':totals.costUsd+' USD'}`,'trace-totals'));
   box.append(el('p',`${trace.recording.calls==='not-recorded-legacy'?'모델 입출력 미기록':'마스킹된 모델 기록'} · 캐시/추론은 총 토큰에 포함됩니다.`,'meta'));
+  box.append(diagnosticPanel(trace));
   const timeline=el('ol',undefined,'trace-timeline');
-  for(const item of trace.timeline){const row=el('li');row.append(el('strong',item.kind==='model'?'모델 호출 '+item.index:item.name||'저장된 최종 상태'),el('span',`${item.status||'미기록'}${item.elapsedMs!==undefined?' · '+item.elapsedMs+' ms':''}`,'meta'));if(item.productIds)row.append(el('p','상품 후보 '+item.productIds.length+'개 · '+item.productIds.join(', '),'meta'));timeline.append(row);}
+  for(const item of trace.timeline){const row=el('li');row.append(el('strong',item.kind==='model'?'모델 호출 '+item.index:item.name||'저장된 상태'),el('span',`${item.status||'미기록'} · ${item.elapsedMs??'미기록'} ms${item.errorType?' · '+item.errorType:''}`,'meta'));if(item.kind==='model'){row.append(el('p',`HTTP ${item.httpStatus??'미기록'} · 헤더 ${item.headersMs??'미기록'}ms · 첫 패킷 ${item.firstPacketMs??'미기록'}ms · 첫 텍스트 ${item.firstTextMs??'미기록'}ms · 첫 도구 ${item.firstToolMs??'미기록'}ms`,'meta'),el('p',`모델 연결 제한 ${item.timeouts?.connectSeconds??'미기록'}초 · 읽기 제한 ${item.timeouts?.readSeconds??'미기록'}초 (응답 전체가 아닌 읽기 대기 제한)`,'meta'));}if(item.productIds)row.append(el('p','상품 후보 '+item.productIds.length+'개 · '+item.productIds.join(', '),'meta'));timeline.append(row);}
   box.append(timeline);
   const technical=el('details'),technicalTitle=el('summary','식별자·SSE 기록');technical.append(technicalTitle,el('p',`대화 ${cid} · 요청 ${turn.turnId} · ${trace.environment||'환경 미기록'} · 모델 ${trace.connection?.baseUrl||'주소 미기록'}`,'meta'));
   const sse=trace.sseEvents;technical.append(el('p',sse?.events?.length?(sse.basis?.startsWith('stored SSE')?'저장된 SSE: ':'합성/외부 기록 이벤트: ')+sse.events.map(e=>e.id+' '+e.event).join(' → ')+(sse.truncated?' · 앞 100개만 표시':''):'SSE 이벤트 목록 미수집 · 최종 상태로 브라우저 수신을 추정하지 않습니다.','meta'));box.append(technical);
+  const exportTrace=el('button','진단 기록 저장');exportTrace.onclick=()=>download(trace,'ai-trace-'+turn.turnId+'.json');box.append(exportTrace);
   const action=el('button','입출력 상세 열람'), detail=el('div'), state=el('p','','meta'); let open=false, busy=false;
   action.onclick=async()=>{
     if(busy)return;if(open){detail.replaceChildren();open=false;action.textContent='입출력 상세 열람';return;}
@@ -225,5 +240,5 @@ if(cf()?.elements&&$('#tab-traces')){
   const key=$('#modal-key').value;$('#modal-key').value='';
   await connectionAction('/admin/api/model-connection/activate',{revision:connectionSnapshot.revision,config:connectionInput(),key});
  };
- for(const [id,status] of [['requests-failed','FAILED'],['requests-cancelled','CANCELLED'],['requests-all','']])$('#'+id).onclick=()=>{$('#filters').elements.status.value=status;load().catch(report);};
+ for(const [id,status,issue] of [['requests-attention','','attention'],['requests-slow','','slow'],['requests-processing','PROCESSING',''],['requests-failed','FAILED',''],['requests-cancelled','CANCELLED',''],['requests-all','','']])$('#'+id).onclick=()=>{const f=$('#filters').elements;f.status.value=status;if(f.issue)f.issue.value=issue;if(f.sort)f.sort.value='activity';load().catch(report);};
 }

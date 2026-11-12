@@ -195,7 +195,7 @@ async def test_sent_card_description_role_keeps_personalized_choice_and_price_co
         assert '카탈로그 근거로 확인한 특징·용도·사용 느낌' in system
         assert '상품명·가격·수신자 취향·예산 적합성은 반복하지 않는다' in system
         assert raw in system
-        assert '순번의 이름·가격은 recall_gift(position)' in system
+        assert '특정 순번의 이름·가격만 묻는 경우는 recall_gift(position)' in system
     display_tools = [t['function'] for t in sent[1]['tools']
                      if t['function']['name'] in ('show_gifts', 'list_gifts')]
     assert {t['name'] for t in display_tools} == {'show_gifts', 'list_gifts'}
