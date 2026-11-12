@@ -117,6 +117,8 @@ jobs:
           context: .
           file: integration/containers/Dockerfile
           target: ${{ matrix.target }}
+          build-args: |
+            SOURCE_SHA=${{ github.sha }}
           platforms: linux/amd64
           load: true
           push: false

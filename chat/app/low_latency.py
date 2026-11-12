@@ -137,16 +137,21 @@ class LowLatencyRuntime(AgentRuntime):
   try:await self._generate(cid,tid,receipt)
   finally:TRACE.reset(token)
  async def _generate(self,cid,tid,receipt):
+  receipt['activeStage']='conversation_read'
   conversation=await self.store.call('read',cid=cid)
+  receipt['activeStage']='recipient_profile'
   snapshot=await self.recipient_profile(cid,tid);receipt['recipientProfile']=snapshot
   # Missing/expired/revoked consent disables private enrichment, not ordinary
   # message-only BE chat. Other lookup failures must remain visible failures.
   if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='UNAVAILABLE' and snapshot.get('accessStatus')!='NOT_AUTHORIZED':
+   receipt['agentFailureCode']='recipient_profile_unavailable'
    raise APIError(503,'수신자 취향의 조회 권한 또는 상태를 확인할 수 없습니다.')
   from app.profile import recipient_model_context
   model_profile=recipient_model_context(snapshot)
   if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='AVAILABLE' and model_profile is None:
+   receipt['agentFailureCode']='recipient_profile_stale'
    raise APIError(503,'수신자의 최신 취향 분석과 버전 확인이 필요합니다.')
+  receipt['activeStage']='context'
   previous=last_completed_turn(conversation['turns'],tid);old=await self.store.call('context',cid=cid,tid=previous['turnId']) if previous else {}
   prepared=self.admissions.get(tid,{}).get('prepared_context')
   # Metadata failure must not prevent a one-call ordinary conversation.

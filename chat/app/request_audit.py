@@ -86,8 +86,11 @@ def failure_diagnostics(status,context):
     model_stage=stage in {'model_1','model_2','responder','plan','answer'}
     model_http_status=call_diagnostics(last)['httpStatus']
     http_status=call_diagnostics({'httpStatus':context.get('failureStatus')})['httpStatus'] or (model_http_status if model_stage else None)
+    status_source=identifier(context.get('failureStatusSource')) if context.get('failureStatus') is not None else 'model_response' if model_stage and model_http_status is not None else None
     category='unrecorded'
     if status=='COMPLETED':category='completed'
+    elif code in {'recipient_profile_unavailable','recipient_profile_stale'}:category=code
+    elif status_source=='application' and http_status is not None:category='application_error'
     elif code=='turn_deadline_exceeded':category='turn_deadline'
     elif context.get('interrupted') or status=='CANCELLED':category='interrupted'
     elif code in ('ReadTimeout','ConnectTimeout','WriteTimeout','PoolTimeout'):
@@ -97,7 +100,7 @@ def failure_diagnostics(status,context):
     elif status=='PROCESSING':category='in_progress'
     return {'category':category,'code':code,'exceptionType':identifier(context.get('failure')),
             'stage':stage,
-            'httpStatus':http_status,'lastModelHttpStatus':model_http_status,'startedAt':context.get('startedAt'),'capturedAt':context.get('timingCapturedAt'),
+            'httpStatus':http_status,'httpStatusSource':status_source,'lastModelHttpStatus':model_http_status,'startedAt':context.get('startedAt'),'capturedAt':context.get('timingCapturedAt'),
             'turnTimeoutSeconds':numeric(context.get('turnTimeoutSeconds')),
             'firstAnswerMs':numeric(context.get('firstAnswerMs')),'firstCommittedDeltaMs':numeric(context.get('firstCommittedDeltaMs')),
             'checkpointWriteFailures':count(context.get('checkpointWriteFailures')),
@@ -105,7 +108,7 @@ def failure_diagnostics(status,context):
 
 def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
     calls=context.get('requestAudit') or [];diagnostics=context.get('diagnostics') or {};operations=diagnostics.get('operations') or []
-    result={'schema':'request-trace-v1','conversationId':cid,'turnId':turn['turnId'],'sourceScope':context.get('sourceScope','unclassified-legacy'),'synthetic':True if context.get('sourceScope')=='synthetic-local' or context.get('mode')=='mock' or context.get('externalCalls')==0 else None,'environment':identifier(context.get('environment')),'revision':identifier(context.get('revision')),'sourceIdentity':{'releaseLabel':identifier(context.get('revision')),'promptVersion':identifier(context.get('promptVersion')),'integrationSourceSha256':identifier((context.get('harnessProtocol') or {}).get('integrationSourceSha256')),'basis':'recorded release label and loaded-code fingerprints; not inferred Git HEAD'},'connection':context.get('connection') if isinstance(context.get('connection'),dict) else None,'status':turn['status'],'executionMode':context.get('executionMode','mock' if context.get('mode')=='mock' or context.get('externalCalls')==0 else 'unknown'),'elapsedMs':numeric(context.get('elapsedMs')),'lastEventId':count(turn.get('lastEventId')),'persistence':context.get('tracePersistence'),'modelCalls':[],'timeline':[],'recording':{'calls':'recorded-redacted' if calls else 'not-recorded-legacy','detailsRequested':details,'detailAccessWindowSeconds':DETAIL_TTL_SECONDS,'storedRecordRetention':'existing Chat store policy; no new deletion job','maxPreviewCharsPerCall':TRACE_LIMIT,'rawPrivatePrompts':False,'hiddenReasoning':False}}
+    result={'schema':'request-trace-v1','conversationId':cid,'turnId':turn['turnId'],'sourceScope':context.get('sourceScope','unclassified-legacy'),'synthetic':True if context.get('sourceScope')=='synthetic-local' or context.get('mode')=='mock' or context.get('externalCalls')==0 else None,'environment':identifier(context.get('environment')),'revision':identifier(context.get('revision')),'sourceIdentity':{'buildCommit':context.get('buildCommit') if isinstance(context.get('buildCommit'),str) and re.fullmatch(r'[0-9a-f]{40}',context['buildCommit']) else None,'releaseLabel':identifier(context.get('revision')),'promptVersion':identifier(context.get('promptVersion')),'integrationSourceSha256':identifier((context.get('harnessProtocol') or {}).get('integrationSourceSha256')),'basis':'recorded release label and loaded-code fingerprints; not inferred Git HEAD'},'connection':context.get('connection') if isinstance(context.get('connection'),dict) else None,'status':turn['status'],'executionMode':context.get('executionMode','mock' if context.get('mode')=='mock' or context.get('externalCalls')==0 else 'unknown'),'elapsedMs':numeric(context.get('elapsedMs')),'lastEventId':count(turn.get('lastEventId')),'persistence':context.get('tracePersistence'),'modelCalls':[],'timeline':[],'recording':{'calls':'recorded-redacted' if calls else 'not-recorded-legacy','detailsRequested':details,'detailAccessWindowSeconds':DETAIL_TTL_SECONDS,'storedRecordRetention':'existing Chat store policy; no new deletion job','maxPreviewCharsPerCall':TRACE_LIMIT,'rawPrivatePrompts':False,'hiddenReasoning':False}}
     result['diagnostic']=failure_diagnostics(turn['status'],context)
     for c in calls[:8]:
         item={k:c.get(k) for k in ('index','startedAt','status','elapsedMs','finishReason','truncated')};item['usage']=usage(c.get('usage'))
