@@ -70,18 +70,53 @@ def capture_request(body):
     if len(raw)>TRACE_LIMIT:return {'capture':'actual-send-time-redacted','model':value['model'],'messages':[{'role':m['role'],'originalChars':m['originalChars']} for m in messages],'truncated':True,'reason':'trace-preview-size-limit'}
     return value
 
+def call_diagnostics(call):
+    result={k:numeric(call.get(k)) for k in ('httpStatus','headersMs','firstPacketMs','firstTextMs','firstToolMs')}
+    if result['httpStatus'] is not None and not 100<=result['httpStatus']<=599:result['httpStatus']=None
+    result['errorType']=identifier(call.get('errorType'))
+    limits=call.get('timeouts') if isinstance(call.get('timeouts'),dict) else {}
+    result['timeouts']={k:numeric(limits.get(k)) for k in ('connectSeconds','readSeconds','writeSeconds','poolSeconds')}
+    return result
+
+def failure_diagnostics(status,context):
+    calls=context.get('requestAudit') or []
+    last=calls[-1] if calls and isinstance(calls[-1],dict) else context.get('lastModelCall') or {}
+    code=identifier(context.get('agentFailureCode')) or identifier(last.get('errorType')) or identifier(context.get('failure'))
+    stage=identifier(context.get('agentFailureStage')) or identifier(context.get('failureStage')) or identifier(context.get('activeStage'))
+    model_stage=stage in {'model_1','model_2','responder','plan','answer'}
+    model_http_status=call_diagnostics(last)['httpStatus']
+    http_status=call_diagnostics({'httpStatus':context.get('failureStatus')})['httpStatus'] or (model_http_status if model_stage else None)
+    category='unrecorded'
+    if status=='COMPLETED':category='completed'
+    elif code=='turn_deadline_exceeded':category='turn_deadline'
+    elif context.get('interrupted') or status=='CANCELLED':category='interrupted'
+    elif code in ('ReadTimeout','ConnectTimeout','WriteTimeout','PoolTimeout'):
+        category={'ReadTimeout':'provider_read_timeout','ConnectTimeout':'provider_connect_timeout','WriteTimeout':'provider_write_timeout','PoolTimeout':'provider_pool_timeout'}[code] if model_stage else 'dependency_timeout'
+    elif http_status is not None and 400<=http_status<=599:category='provider_http_error' if model_stage else 'dependency_http_error'
+    elif status=='FAILED':category='failed'
+    elif status=='PROCESSING':category='in_progress'
+    return {'category':category,'code':code,'exceptionType':identifier(context.get('failure')),
+            'stage':stage,
+            'httpStatus':http_status,'lastModelHttpStatus':model_http_status,'startedAt':context.get('startedAt'),'capturedAt':context.get('timingCapturedAt'),
+            'turnTimeoutSeconds':numeric(context.get('turnTimeoutSeconds')),
+            'firstAnswerMs':numeric(context.get('firstAnswerMs')),'firstCommittedDeltaMs':numeric(context.get('firstCommittedDeltaMs')),
+            'checkpointWriteFailures':count(context.get('checkpointWriteFailures')),
+            'delivery':'not-observed; stored AI events do not prove BE or client receipt'}
+
 def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
     calls=context.get('requestAudit') or [];diagnostics=context.get('diagnostics') or {};operations=diagnostics.get('operations') or []
     result={'schema':'request-trace-v1','conversationId':cid,'turnId':turn['turnId'],'sourceScope':context.get('sourceScope','unclassified-legacy'),'synthetic':True if context.get('sourceScope')=='synthetic-local' or context.get('mode')=='mock' or context.get('externalCalls')==0 else None,'environment':identifier(context.get('environment')),'revision':identifier(context.get('revision')),'sourceIdentity':{'releaseLabel':identifier(context.get('revision')),'promptVersion':identifier(context.get('promptVersion')),'integrationSourceSha256':identifier((context.get('harnessProtocol') or {}).get('integrationSourceSha256')),'basis':'recorded release label and loaded-code fingerprints; not inferred Git HEAD'},'connection':context.get('connection') if isinstance(context.get('connection'),dict) else None,'status':turn['status'],'executionMode':context.get('executionMode','mock' if context.get('mode')=='mock' or context.get('externalCalls')==0 else 'unknown'),'elapsedMs':numeric(context.get('elapsedMs')),'lastEventId':count(turn.get('lastEventId')),'persistence':context.get('tracePersistence'),'modelCalls':[],'timeline':[],'recording':{'calls':'recorded-redacted' if calls else 'not-recorded-legacy','detailsRequested':details,'detailAccessWindowSeconds':DETAIL_TTL_SECONDS,'storedRecordRetention':'existing Chat store policy; no new deletion job','maxPreviewCharsPerCall':TRACE_LIMIT,'rawPrivatePrompts':False,'hiddenReasoning':False}}
+    result['diagnostic']=failure_diagnostics(turn['status'],context)
     for c in calls[:8]:
         item={k:c.get(k) for k in ('index','startedAt','status','elapsedMs','finishReason','truncated')};item['usage']=usage(c.get('usage'))
+        item.update(call_diagnostics(c))
         if details:item.update(input=c.get('input'),output={'visibleText':text(c.get('visibleText')),'toolNames':c.get('toolNames',[]),'arguments':'not retained; final selected cards are shown separately'})
-        result['modelCalls'].append(item);result['timeline'].append({'kind':'model','index':c.get('index'),'at':c.get('startedAt'),'offsetMs':numeric(c.get('offsetMs')),'status':c.get('status'),'elapsedMs':numeric(c.get('elapsedMs'))})
+        result['modelCalls'].append(item);result['timeline'].append({'kind':'model','index':c.get('index'),'at':c.get('startedAt'),'offsetMs':numeric(c.get('offsetMs')),'status':c.get('status'),'elapsedMs':numeric(c.get('elapsedMs')),**call_diagnostics(c)})
     if not calls:
         # Old usage is evidence, but never synthesize send-time input/output.
         result['legacyUsage']=[usage(v) for v in context.get('usage',[])[:8]]
     for operation in operations[:40]:
-        row={'kind':'tool','name':identifier(operation.get('name')),'at':operation.get('startedAt'),'offsetMs':numeric(operation.get('turnOffsetMs')),'status':identifier(operation.get('status')),'elapsedMs':numeric(operation.get('elapsedMs'))}
+        row={'kind':'tool','name':identifier(operation.get('name')),'at':operation.get('startedAt'),'offsetMs':numeric(operation.get('turnOffsetMs')),'status':identifier(operation.get('status')),'elapsedMs':numeric(operation.get('elapsedMs')),'errorType':identifier(operation.get('errorType'))}
         raw=operation.get('result')
         if isinstance(raw,dict) and isinstance(raw.get('products'),list):row['productIds']=[identifier(str(p.get('product_id',p.get('productId','')))) for p in raw['products'][:30]]
         result['timeline'].append(row)
@@ -122,4 +157,4 @@ def list_summary(raw):
     if not isinstance(raw,dict):return None
     entries=raw.get('usage') if isinstance(raw.get('usage'),list) else []
     expected=count(raw.get('attemptCount'))
-    return {'turnId':identifier(raw.get('turnId')),'status':identifier(raw.get('status')),'environment':identifier(raw.get('environment')),'backend':identifier(raw.get('backend')),'connectionRevision':count(raw.get('connectionRevision')),'sourceScope':identifier(raw.get('sourceScope')) or 'unclassified-legacy','revision':identifier(raw.get('revision')),'promptVersion':identifier(raw.get('promptVersion')),'model':identifier(raw.get('model')),'elapsedMs':numeric(raw.get('elapsedMs')),'sourceVersion':count(raw.get('sourceVersion')),**usage_totals(entries,expected if expected is not None else 0)}
+    return {'turnId':identifier(raw.get('turnId')),'created':raw.get('created'),'diagnostic':failure_diagnostics(raw.get('status'),raw),'status':identifier(raw.get('status')),'environment':identifier(raw.get('environment')),'backend':identifier(raw.get('backend')),'connectionRevision':count(raw.get('connectionRevision')),'sourceScope':identifier(raw.get('sourceScope')) or 'unclassified-legacy','revision':identifier(raw.get('revision')),'promptVersion':identifier(raw.get('promptVersion')),'model':identifier(raw.get('model')),'elapsedMs':numeric(raw.get('elapsedMs')),'sourceVersion':count(raw.get('sourceVersion')),**usage_totals(entries,expected if expected is not None else 0)}

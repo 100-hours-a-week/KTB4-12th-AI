@@ -86,6 +86,7 @@ def test_admin_note_on_unreported_turn_is_durable_and_not_public(database):
         assert "reviews" not in json.dumps(public)
         before = note_rows(database)
         store.close()
+
         store = chat_store(database)
         repeated = store.admin_turn_review(cid, tid, review_id, "PRIVATE_ADMIN_NOTE_CANARY")
         assert repeated["duplicate"] and repeated["created"] == value["created"]
@@ -380,3 +381,64 @@ def test_recovery_marks_only_pending_trace_missing_and_preserves_legacy_unknown(
             assert "tracePersistence" not in json.dumps(events)
     finally:
         store.close()
+
+
+def test_incident_filter_focuses_failed_turn_even_after_later_success(database):
+    store=chat_store(database)
+    try:
+        cid,tid,owner=conversation(store,status='FAILED')
+        store.context(cid,tid,{'elapsedMs':45000,'agentFailureCode':'ReadTimeout','agentFailureStage':'model_1'})
+        later=str(uuid4());store.start(cid,later,'합성 후속 성공',owner)
+        store.emit(cid,later,'turn.finished',{'status':'COMPLETED'},owner)
+        for filters in ({'status':'FAILED'},{'issue':'attention'},{'issue':'slow'}):
+            rows=store.admin_conversations(sort='activity',**filters)['items']
+            row=next(r for r in rows if r['id']==cid)
+            assert row['focusTurnId']==tid and row['latestTrace']['turnId']==tid
+            assert row['latestTrace']['diagnostic']['category']=='provider_read_timeout'
+        assert store.admin_conversations(sort='activity')['items'][0]['latestTrace']['turnId']==later
+    finally:store.close()
+
+
+def test_activity_order_and_cursor_use_recent_matching_request_not_conversation_age(database):
+    store=chat_store(database)
+    try:
+        first,tid,owner=conversation(store)
+        second,_,_=conversation(store,owner=owner)
+        latest=str(uuid4());store.start(first,latest,'합성 오래된 대화의 새 요청',owner)
+        store.emit(first,latest,'turn.finished',{'status':'COMPLETED'},owner)
+        page=store.admin_conversations(sort='activity',limit=1)
+        assert page['items'][0]['id']==first
+        next_page=store.admin_conversations(sort='activity',limit=1,cursor=page['nextCursor'])
+        assert next_page['items'][0]['id']==second
+        assert store.admin_conversations(sort='created',limit=1)['items'][0]['id']==second
+    finally:store.close()
+
+
+def test_delay_filter_includes_completed_slow_and_stalled_processing_requests(database):
+    store=chat_store(database)
+    try:
+        cid,tid,owner=conversation(store)
+        store.context(cid,tid,{'elapsedMs':31000})
+        pending,pid,_=conversation(store,status='PROCESSING',owner=owner)
+        with psycopg.connect(database['owner']) as db:
+            db.execute("UPDATE ai_chat.turns SET created=now()-interval '40 seconds' WHERE id=%s",(pid,))
+        rows=store.admin_conversations(issue='slow',sort='activity')['items']
+        assert {r['id'] for r in rows}>={cid,pending}
+        assert next(r for r in rows if r['id']==pending)['latestTrace']['status']=='PROCESSING'
+    finally:store.close()
+
+
+def test_late_progress_cannot_replace_newer_progress_final_or_cancelled_trace(database):
+    store=chat_store(database)
+    try:
+        cid,tid,owner=conversation(store,status='PROCESSING')
+        assert store.context(cid,tid,{'elapsedMs':20,'activeStage':'model'},checkpoint=True)
+        assert not store.context(cid,tid,{'elapsedMs':10,'activeStage':'context'},checkpoint=True)
+        final={'elapsedMs':30,'outcome':'FAILED','agentFailureCode':'ReadTimeout'}
+        assert store.context(cid,tid,final)
+        assert not store.context(cid,tid,{'elapsedMs':40},checkpoint=True)
+        assert store.context(cid,tid)['outcome']=='FAILED'
+        store.emit(cid,tid,'turn.finished',{'status':'CANCELLED'},owner)
+        assert not store.context(cid,tid,{'elapsedMs':50},checkpoint=True)
+        assert store.context(cid,tid)['agentFailureCode']=='ReadTimeout'
+    finally:store.close()

@@ -49,15 +49,19 @@ class ProviderAdapter:
    from app.model_trace import attempted
    attempted(body,None)
   audit={'index':len(self.receipt.setdefault('requestAudit',[]))+1,'startedAt':timestamp(),'offsetMs':round((started-self.receipt['startedMonotonic'])*1000,2),'input':capture_request(body),'status':'running','visibleText':'','toolNames':[]}
+  timeout=http.timeout if connection is None else __import__('httpx').Timeout(connection.read_timeout,connect=connection.connect_timeout)
+  audit['timeouts']={'connectSeconds':timeout.connect,'readSeconds':timeout.read,'writeSeconds':timeout.write,'poolSeconds':timeout.pool}
   self.receipt['requestAudit'].append(audit)
   try:
    async with http.stream('POST','chat/completions',json=body,**({'timeout':__import__('httpx').Timeout(connection.read_timeout,connect=connection.connect_timeout)} if connection is not None else {})) as response:
+    audit.update(httpStatus=response.status_code,headersMs=round((time.monotonic()-started)*1000,2))
     if response.status_code!=200:raise ProviderError('provider_http_'+str(response.status_code))
     # OpenAI-compatible servers and Claude may narrate before a valid tool call.
     # Keep that narration out of durable answers, then consume usage to settle cost.
     hold_text=bool(tools) and (compatible or body['model']=='anthropic/claude-haiku-5.5')
     buffered=[];text_size=0;has_tool=False;text_released=False;finish=None;has_text=False
     async for packet in sse_json(response):
+     audit.setdefault('firstPacketMs',round((time.monotonic()-started)*1000,2))
      if not isinstance(packet,dict) or packet.get('error'):raise ProviderError('provider_packet_error')
      metadata={k:packet[k] for k in ('model','provider') if isinstance(packet.get(k),str)}
      if metadata and metadata not in self.receipt.setdefault('providerResponses',[]):self.receipt['providerResponses'].append(metadata)
@@ -74,6 +78,7 @@ class ProviderAdapter:
       if choice.get('finish_reason') is not None:audit['finishReason']=choice['finish_reason']
       if text_released and (delta.get('content') or delta.get('tool_calls')):raise ProviderError('provider_content_after_finish')
       if delta.get('content'):
+       audit.setdefault('firstTextMs',round((time.monotonic()-started)*1000,2))
        has_text=True
        if hold_text:
         value=delta['content']
@@ -83,6 +88,7 @@ class ProviderAdapter:
         buffered.append(value)
        else:yield {'kind':'text','value':delta['content']}
       for call in delta.get('tool_calls',[]):
+       audit.setdefault('firstToolMs',round((time.monotonic()-started)*1000,2))
        has_tool=True
        yield {'kind':'tool','value':call}
       if choice.get('finish_reason') is not None:
@@ -100,6 +106,7 @@ class ProviderAdapter:
    audit['status']='completed'
   except BaseException as exc:
    audit['status']='cancelled' if isinstance(exc,__import__('asyncio').CancelledError) else 'failed'
+   audit['errorType']=type(exc).__name__
    raise
   finally:
    from app.request_audit import text

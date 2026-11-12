@@ -99,3 +99,6 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--paper); pad
 .connection-grid {margin-top:14px;}.capability-grid {grid-column:1/-1;display:block;margin:0;}
 .connection-grid>p {grid-column:1/-1;margin:0;}.quick-filters {margin-top:14px;}
 @media(max-width:600px){.connection-switch button {flex:1 1 45%;}.connection-switch label {flex-basis:100%;}.active-connection {padding:18px;}}
+
+.trace-diagnostic { margin:14px 0; padding:14px; background:var(--paper); border:1px solid var(--line); border-radius:10px; }
+.trace-diagnostic p:last-child { margin-bottom:0; }

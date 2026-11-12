@@ -208,10 +208,18 @@ class Store:
    if after<0 or after>s['lastEventId']:raise APIError(409,'대화를 복구한 뒤 이벤트 번호를 다시 확인해 주세요.')
    rows=db.execute('SELECT seq,kind,payload FROM events WHERE turn=%s AND seq>%s ORDER BY seq',(tid,after)).fetchall()
    return [[{'id':r['seq'],'event':r['kind'],'data':r['payload']} for r in rows],s]
- def context(self,cid,tid,value=None):
-  with self.pool.connection() as db:
-   r=self._turn(db,cid,tid)
+ def context(self,cid,tid,value=None,checkpoint=False):
+  with self.pool.connection(**({'timeout':2} if checkpoint else {})) as db:
+   if checkpoint:
+    db.execute("SET LOCAL statement_timeout = '1s'")
+    db.execute("SET LOCAL lock_timeout = '1s'")
+   r=self._turn(db,cid,tid,value is not None)
    if value is not None:
+    # A cancelled asyncio.to_thread call may still commit later. Lock + guard
+    # prevent late progress from replacing final evidence or newer checkpoints.
+    old_elapsed=r['context'].get('elapsedMs')
+    if checkpoint and (r['state']['status']!='PROCESSING' or r['context'].get('outcome') or
+      type(old_elapsed) in (int,float) and old_elapsed>value.get('elapsedMs',0)):return False
     value=dict(value)
     if r['context'].get('recipientProfile',{}).get('source')=='AI_PROFILE_STORE':
      value['recipientProfile']=r['context']['recipientProfile']
@@ -370,19 +378,19 @@ class Store:
     created=db.execute('INSERT INTO turn_reviews(id,turn,note) VALUES(%s,%s,%s) RETURNING created',(review_id,tid,note)).fetchone()['created']
   return clean({'conversationId':cid,'turnId':tid,'reviewId':review_id,'note':note,'created':created.isoformat(),'saved':True,'duplicate':old is not None})
 
- def admin_conversations(self,limit=20,cursor=None,status=None,since=None,until=None,q='',feedback_state='all',sort='created'):
+ def admin_conversations(self,limit=20,cursor=None,status=None,since=None,until=None,q='',feedback_state='all',sort='created',issue=None):
   if not 1<=limit<=50:raise APIError(400,'잘못된 페이지 크기입니다.')
-  if feedback_state not in {'all','any','pending','reviewed'} or sort not in {'created','feedback'}:raise APIError(400,'잘못된 의견 필터입니다.')
-  clauses=[];args=[]
-  order_stamp="COALESCE(qa.latest_feedback,'1970-01-01T00:00:00Z'::timestamptz)" if sort=='feedback' else 'c.created'
+  if feedback_state not in {'all','any','pending','reviewed'} or sort not in {'created','feedback','activity'} or issue not in {None,'attention','slow'}:raise APIError(400,'잘못된 요청 필터입니다.')
+  clauses=[];args=[];cursor_args=[];cursor_state=feedback_state+(':'+issue if issue else '')
+  order_stamp="COALESCE(qa.latest_feedback,'1970-01-01T00:00:00Z'::timestamptz)" if sort=='feedback' else 'COALESCE(matched.created,c.created)' if sort=='activity' else 'c.created'
   if cursor:
    try:
     kind,state,stamp,ident=json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
     from uuid import UUID
     ident=str(UUID(ident));stamp=datetime.fromisoformat(stamp)
-    if kind!=sort or state!=feedback_state or stamp.tzinfo is None:raise ValueError('cursor does not match filters')
+    if kind!=sort or state!=cursor_state or stamp.tzinfo is None:raise ValueError('cursor does not match filters')
    except Exception:raise APIError(400,'잘못된 페이지 커서입니다.')
-   clauses.append('('+order_stamp+',c.id)<(%s,%s::uuid)');args.extend([stamp,ident])
+   clauses.append('('+order_stamp+',c.id)<(%s,%s::uuid)');cursor_args.extend([stamp,ident])
   conditions=['t.conversation=c.id']
   if status:
    if status not in TERMINAL|{'PROCESSING'}:raise APIError(400,'잘못된 상태입니다.')
@@ -396,31 +404,38 @@ class Store:
   if q:
    if len(q)>200:raise APIError(400,'검색어가 너무 깁니다.')
    conditions.append("position(lower(%s) in lower(t.state->>'message'))>0");args.append(q)
-  if status or since or until or q:clauses.append('EXISTS (SELECT 1 FROM turns t WHERE '+' AND '.join(conditions)+')')
+  if issue:
+   slow="(CASE WHEN t.state->>'status'='PROCESSING' THEN EXTRACT(EPOCH FROM (now()-t.created))*1000 WHEN jsonb_typeof(t.context->'elapsedMs')='number' THEN (t.context->>'elapsedMs')::double precision ELSE NULL END)>=30000"
+   conditions.append("(t.state->>'status' IN ('FAILED','CANCELLED') OR "+slow+")" if issue=='attention' else slow)
+  if status or since or until or q or issue:clauses.append('matched.id IS NOT NULL')
   if feedback_state!='all':clauses.append('qa.focus_turn IS NOT NULL')
   review_clause={'pending':' AND NOT f.reviewed','reviewed':' AND f.reviewed'}.get(feedback_state,'')
   query="""SELECT c.*,
-   (SELECT jsonb_build_object('turnId',id,'status',state->'status','environment',context->'environment',
+   (SELECT jsonb_build_object('turnId',id,'created',created,'status',state->'status','environment',context->'environment',
     'backend',context->'connection'->'kind','connectionRevision',context->'connection'->'revision','sourceScope',context->'sourceScope','revision',context->'revision','promptVersion',context->'promptVersion','model',context->'model',
     'elapsedMs',context->'elapsedMs','sourceVersion',context->'recipientProfile'->'inputSourceVersion',
     'attemptCount',CASE WHEN jsonb_typeof(context->'modelRequests')='array' THEN jsonb_array_length(context->'modelRequests') ELSE NULL END,
-    'usage',context->'usage') FROM turns WHERE conversation=c.id ORDER BY ordinal DESC LIMIT 1) latest_trace,
+    'usage',context->'usage','agentFailureCode',context->'agentFailureCode','failure',context->'failure',
+    'agentFailureStage',context->'agentFailureStage','failureStage',context->'failureStage','activeStage',context->'activeStage',
+    'startedAt',context->'startedAt','timingCapturedAt',context->'timingCapturedAt','turnTimeoutSeconds',context->'turnTimeoutSeconds',
+    'interrupted',context->'interrupted','failureStatus',context->'failureStatus',
+    'lastModelCall',jsonb_build_object('errorType',context->'requestAudit'->-1->'errorType','httpStatus',context->'requestAudit'->-1->'httpStatus')) FROM turns WHERE id=matched.id) latest_trace,
    (SELECT state->>'message' FROM turns WHERE conversation=c.id ORDER BY ordinal LIMIT 1) title,
    (SELECT count(*) FROM turns WHERE conversation=c.id) turn_count,
    (SELECT count(*) FROM turns WHERE conversation=c.id AND state->>'status'='FAILED') failed_count,
    (SELECT count(*) FROM feedback f JOIN turns t ON t.id=f.turn WHERE t.conversation=c.id) feedback_count,
    (SELECT count(*) FROM feedback f JOIN turns t ON t.id=f.turn WHERE t.conversation=c.id AND NOT f.reviewed) pending_count,
-   qa.latest_feedback,qa.focus_turn,"""+order_stamp+""" sort_stamp
-   FROM conversations c LEFT JOIN LATERAL (
+   qa.latest_feedback,"""+('qa.focus_turn' if feedback_state!='all' or sort=='feedback' else 'matched.id')+""" focus_turn,"""+order_stamp+""" sort_stamp
+   FROM conversations c LEFT JOIN LATERAL (SELECT t.id,t.created FROM turns t WHERE """+' AND '.join(conditions)+""" ORDER BY t.ordinal DESC LIMIT 1) matched ON true LEFT JOIN LATERAL (
     SELECT f.created latest_feedback,t.id focus_turn FROM feedback f JOIN turns t ON t.id=f.turn
     WHERE t.conversation=c.id"""+review_clause+" ORDER BY f.created DESC,f.id DESC LIMIT 1) qa ON true"
   if clauses:query+=' WHERE '+' AND '.join(clauses)
-  query+=' ORDER BY '+order_stamp+' DESC,c.id DESC LIMIT %s';args.append(limit+1)
+  query+=' ORDER BY '+order_stamp+' DESC,c.id DESC LIMIT %s';args.extend(cursor_args);args.append(limit+1)
   with self.pool.connection() as db:rows=db.execute(query,args).fetchall()
   more=len(rows)>limit;rows=rows[:limit];items=[]
   for r in rows:
    items.append({'id':str(r['id']),'senderUserId':r['sender'],'recipientUserId':r['recipient'],'created':r['created'].isoformat(),'title':r['title'] or '새 대화','turnCount':r['turn_count'],'failedCount':r['failed_count'],'feedbackCount':r['feedback_count'],'pendingFeedbackCount':r['pending_count'],'latestFeedbackAt':r['latest_feedback'].isoformat() if r['latest_feedback'] else None,'focusTurnId':str(r['focus_turn']) if r['focus_turn'] else None,'latestTrace':__import__('app.request_audit',fromlist=['list_summary']).list_summary(r['latest_trace'])})
-  next_cursor=base64.urlsafe_b64encode(json.dumps([sort,feedback_state,rows[-1]['sort_stamp'].isoformat(),str(rows[-1]['id'])]).encode()).decode() if more else None
+  next_cursor=base64.urlsafe_b64encode(json.dumps([sort,cursor_state,rows[-1]['sort_stamp'].isoformat(),str(rows[-1]['id'])]).encode()).decode() if more else None
   from app.diagnostics import clean
   return clean({'items':items,'nextCursor':next_cursor})
  def admin_conversation(self,cid,after=0,limit=20,focus_tid=None):
