@@ -181,7 +181,7 @@ def test_active_schema_requires_per_id_reasons_without_changing_legacy_pc_schema
     assert harness.parse_selection(selection([]), schema).product_ids == []
 
 
-async def test_sent_card_description_role_keeps_personalized_choice_and_price_conversation():
+async def test_sent_grounded_recommendation_role_keeps_personalized_choice_and_price_conversation():
     from test_ai_stored_preferences import snapshot
     raw = '합성 취향: 독서할 때 사용할 받침대를 좋아해요.'
     receipt, sent, store, search, _, tid = await fixture.run([
@@ -191,9 +191,11 @@ async def test_sent_card_description_role_keeps_personalized_choice_and_price_co
     assert len(sent) == 2
     for request in sent:
         system = '\n'.join(m['content'] for m in request['messages'] if m['role'] == 'system')
-        assert '기존 필드명 reason에는 상품 설명을 쓴다' in system
-        assert '카탈로그 근거로 확인한 특징·용도·사용 느낌' in system
-        assert '상품명·가격·수신자 취향·예산 적합성은 반복하지 않는다' in system
+        assert '기존 필드명 reason에는 선택을 돕는 추천 설명을 쓴다' in system
+        assert '카탈로그에서 확인한 특징' in system
+        assert '1~2문장(총 1–200자)' in system
+        assert '비공개 취향 원문·사생활·추론한 성격' in system
+        assert '차이를 알 수 없으면 억지로 장점을 만들지 않는다' in system
         assert raw in system
         assert '특정 순번의 이름·가격만 묻는 경우는 recall_gift(position)' in system
     display_tools = [t['function'] for t in sent[1]['tools']
@@ -202,8 +204,8 @@ async def test_sent_card_description_role_keeps_personalized_choice_and_price_co
     for tool in display_tools:
         properties = tool['parameters']['properties']
         description = properties['reasons']['items']['properties']['reason']['description']
-        assert description.startswith('상품 설명:')
-        assert '선택 이유' not in properties['message']['description']
+        assert description.startswith('추천 설명:')
+        assert '선택 기준·후보 간 차이·확인할 점' in properties['message']['description']
     assert all(20 in r['filters']['excludeCategoryIds'] for r in search.queries)
     assert receipt['selectedProducts'][0]['productId'] == 101
     assert store.states[tid]['blocks'] == [
@@ -515,3 +517,22 @@ async def test_brief_listing_remembers_only_the_cards_actually_displayed(reason_
  _,sent,*_=await fixture.run([fixture.text('이전에 표시한 상품 정보를 확인했어요.')],old=receipt,message='아까 보여준 상품을 알려줘')
  state=json.loads(sent[0]['messages'][0]['content'].split('STATE_JSON\n',1)[1])
  assert [p['product_id'] for p in state.get('last_displayed_products',[])]==reason_ids
+
+
+@pytest.mark.parametrize('operation', ['show_gifts', 'list_gifts'])
+async def test_two_sentence_reason_and_shared_guidance_survive_public_contract(
+        operation, synthetic_catalog, monkeypatch):
+    payload = selection(['101'], operation=operation)
+    payload['message'] = '책을 받쳐 읽을 용도로 골랐어요. 정확한 크기는 구매 전에 확인해 주세요.'
+    payload['reasons'][0]['reason'] = '책을 세워 둘 수 있는 받침대예요. 펼친 책을 보며 읽을 때 사용할 수 있어요.'
+    _, _, store, _, cid, tid = await fixture.run([
+        fixture.tool('gift_context', fixture.context()), fixture.tool(operation, payload),
+    ], message='책을 받쳐 읽을 선물 하나 추천해줘')
+    expected = [{'productId': 101, 'reason': payload['reasons'][0]['reason']}]
+    blocks = store.states[tid]['blocks']
+    assert next(b['products'] for b in blocks if b['type'] == 'cards') == expected
+    assert any(b['type'] == 'text' and payload['message'] in b['text'] for b in blocks)
+    await store.call('emit', cid=cid, tid=tid, kind='turn.finished', payload={'status': 'COMPLETED'})
+    snapshot, _, events = await public_read(store, cid, tid, monkeypatch)
+    assert snapshot['blocks'] == blocks
+    assert events[-1]['data'] == snapshot

@@ -43,12 +43,12 @@ class ProviderAdapter:
   http=connection.client if compatible else self.runtime.http
   self.receipt['activeStage']='responder'
   from app.request_audit import capture_request
-  from app.diagnostics import timestamp
+  from app.diagnostics import timestamp, FIELD_LIMIT, bounded
   started=time.monotonic()
   if compatible:
    from app.model_trace import attempted
    attempted(body,None)
-  audit={'index':len(self.receipt.setdefault('requestAudit',[]))+1,'startedAt':timestamp(),'offsetMs':round((started-self.receipt['startedMonotonic'])*1000,2),'input':capture_request(body),'status':'running','visibleText':'','toolNames':[]}
+  audit={'index':len(self.receipt.setdefault('requestAudit',[]))+1,'startedAt':timestamp(),'offsetMs':round((started-self.receipt['startedMonotonic'])*1000,2),'input':capture_request(body),'status':'running','visibleText':'','toolNames':[],'toolCalls':[]}
   timeout=http.timeout if connection is None else __import__('httpx').Timeout(connection.read_timeout,connect=connection.connect_timeout)
   audit['timeouts']={'connectSeconds':timeout.connect,'readSeconds':timeout.read,'writeSeconds':timeout.write,'poolSeconds':timeout.pool}
   self.receipt['requestAudit'].append(audit)
@@ -71,10 +71,24 @@ class ProviderAdapter:
      for choice in packet.get('choices',[]):
       if choice.get('error'):raise ProviderError('provider_choice_error')
       delta=choice.get('delta',{})
-      if isinstance(delta.get('content'),str):audit['visibleText']=(audit['visibleText']+delta['content'])[:4000]
+      if isinstance(delta.get('content'),str):
+       combined=audit['visibleText']+delta['content']
+       if len(combined)>FIELD_LIMIT:audit['truncated']=True
+       audit['visibleText']=combined[:FIELD_LIMIT]
       for tool in delta.get('tool_calls',[]):
        name=tool.get('function',{}).get('name')
        if name:audit['toolNames'].append(name[:80])
+       index=tool.get('index',0);choice_index=choice.get('index',0)
+       saved=next((v for v in audit['toolCalls'] if v['index']==index and v['choiceIndex']==choice_index),None)
+       if saved is None:
+        saved={'index':index,'choiceIndex':choice_index,'id':'','name':'','argumentsRaw':''};audit['toolCalls'].append(saved)
+       if tool.get('id'):saved['id']=tool['id']
+       for source,target in [('name','name'),('arguments','argumentsRaw')]:
+        fragment=tool.get('function',{}).get(source)
+        if isinstance(fragment,str):
+         combined=saved[target]+fragment
+         if len(combined)>FIELD_LIMIT:audit['truncated']=True
+         saved[target]=combined[:FIELD_LIMIT]
       if choice.get('finish_reason') is not None:audit['finishReason']=choice['finish_reason']
       if text_released and (delta.get('content') or delta.get('tool_calls')):raise ProviderError('provider_content_after_finish')
       if delta.get('content'):
@@ -110,7 +124,8 @@ class ProviderAdapter:
    raise
   finally:
    from app.request_audit import text
-   audit['visibleText']=text(audit['visibleText'])
+   audit['visibleText']=text(audit['visibleText'],FIELD_LIMIT)
+   audit['toolCalls']=bounded(audit['toolCalls'])
    audit['elapsedMs']=round((time.monotonic()-started)*1000,2)
  async def close(self):pass
 
@@ -137,16 +152,21 @@ class LowLatencyRuntime(AgentRuntime):
   try:await self._generate(cid,tid,receipt)
   finally:TRACE.reset(token)
  async def _generate(self,cid,tid,receipt):
+  receipt['activeStage']='conversation_read'
   conversation=await self.store.call('read',cid=cid)
+  receipt['activeStage']='recipient_profile'
   snapshot=await self.recipient_profile(cid,tid);receipt['recipientProfile']=snapshot
   # Missing/expired/revoked consent disables private enrichment, not ordinary
   # message-only BE chat. Other lookup failures must remain visible failures.
   if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='UNAVAILABLE' and snapshot.get('accessStatus')!='NOT_AUTHORIZED':
+   receipt['agentFailureCode']='recipient_profile_unavailable'
    raise APIError(503,'수신자 취향의 조회 권한 또는 상태를 확인할 수 없습니다.')
   from app.profile import recipient_model_context
   model_profile=recipient_model_context(snapshot)
   if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='AVAILABLE' and model_profile is None:
+   receipt['agentFailureCode']='recipient_profile_stale'
    raise APIError(503,'수신자의 최신 취향 분석과 버전 확인이 필요합니다.')
+  receipt['activeStage']='context'
   previous=last_completed_turn(conversation['turns'],tid);old=await self.store.call('context',cid=cid,tid=previous['turnId']) if previous else {}
   prepared=self.admissions.get(tid,{}).get('prepared_context')
   # Metadata failure must not prevent a one-call ordinary conversation.

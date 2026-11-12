@@ -10,14 +10,15 @@ from app import main,security
 NOW=datetime.now(timezone.utc).isoformat()
 def state():return {'turnId':str(uuid4()),'status':'COMPLETED','message':'합성 공개 질문','blocks':[{'type':'cards','products':[{'productId':101,'reason':'공개 상품의 용도와 맞습니다.'}]}],'lastEventId':3}
 def context():return {'sourceScope':'synthetic-local','environment':'local','revision':'e7383488','modelRequests':[{}],'requestAudit':[{'index':1,'startedAt':NOW,'offsetMs':1,'status':'completed','input':{'capture':'actual-send-time-redacted'},'usage':{'prompt_tokens':100,'completion_tokens':20,'cost':.001,'prompt_tokens_details':{'cached_tokens':80,'cache_write_tokens':10},'completion_tokens_details':{'reasoning_tokens':5}},'toolNames':['show_gifts']}],'usage':[],'diagnostics':{'operations':[{'name':'catalog.search','startedAt':NOW,'turnOffsetMs':2,'status':'completed','arguments':{'query':'PRIVATE_QUERY'},'result':{'products':[{'productId':101}]}}]}}
-def test_capture_discards_all_private_or_unknown_state_before_persistence():
+def test_capture_retains_preferences_and_tool_inputs_but_not_credentials():
  raw={'model':'synthetic','messages':[{'role':'system','content':'Policy\nSTATE_JSON\n'+json.dumps({'filters':{},'recipient_preferences':{'giftPreference':'PRIVATE_CANARY'},'cached_recipient':{'preferences':'ANOTHER_PRIVATE'},'unknown':{'secret':'PRIVATE_THIRD'}})},{'role':'assistant','tool_calls':[{'function':{'name':'gift_context','arguments':'PRIVATE_QUERY'}}]},{'role':'tool','content':json.dumps({'products':[{'product_id':'101','description':'公开 catalog'}],'queries':['PRIVATE_QUERY']})}],'tools':[]}
  recorded=capture_request(raw);value=json.dumps(recorded)
- assert not any(v in value for v in ('PRIVATE_CANARY','ANOTHER_PRIVATE','PRIVATE_THIRD','PRIVATE_QUERY'))
+ assert all(v in value for v in ('PRIVATE_CANARY','ANOTHER_PRIVATE','PRIVATE_QUERY'))
+ assert 'PRIVATE_THIRD' not in value
  assert '公开 catalog' in json.dumps(recorded,ensure_ascii=False)
 def test_bound_capture_and_literal_text_no_html_execution():
- r=capture_request({'messages':[{'role':'user','content':'x'*5000} for _ in range(32)]})
- assert r['truncated'] and len(json.dumps(r))<24000
+ r=capture_request({'messages':[{'role':'user','content':'x'*30000} for _ in range(32)]})
+ assert r['truncated'] and r['originalChars']>262144
  assert text('<img src=x onerror=bad()>')=='<img src=x onerror=bad()>'
 def test_totals_never_double_add_cache_or_reasoning():
  t=trace('cid',state(),context());assert t['totals']['inputTokens']==100 and t['totals']['outputTokens']==20
@@ -43,7 +44,7 @@ async def test_arbitrarily_named_registered_secret_is_redacted():
  client=httpx.AsyncClient(headers={'Authorization':'Bearer private-credential-with-neutral-env-name'})
  conn=AdmittedConnection('openai-compatible','http://127.0.0.1/v1','mock',1,client)
  token=ACTIVE_CONNECTION.set(conn)
- try:assert text('echo private-credential-with-neutral-env-name')=='echo [redacted]'
+ try:assert text('echo private-credential-with-neutral-env-name')=='echo [REDACTED]'
  finally:ACTIVE_CONNECTION.reset(token);await client.aclose()
 async def test_trace_route_requires_admin_and_exact_binding(monkeypatch):
  tid=str(uuid4());cid=str(uuid4());turn={**state(),'turnId':tid}
@@ -126,3 +127,39 @@ def test_connection_revision_is_recorded_setting_identity_not_release_or_inferre
  assert summary['revision']=='release-label'
  assert list_summary({})['connectionRevision'] is None
  assert list_summary({'connectionRevision':True})['connectionRevision'] is None
+
+
+def test_detail_retains_profile_and_complete_tool_evidence_only_with_admin_detail():
+ c=context();c['recipientProfile']={'preferences':{'giftPreference':'합성 취향'},'apiKey':'fake-key'}
+ c['diagnostics']['operations'][0]['result']['hits']=[{'title':'상품','description':'설명'}]
+ out=trace('cid',state(),c,details=True,created=NOW)
+ assert out['recipientProfile']['preferences']['giftPreference']=='합성 취향'
+ assert out['recipientProfile']['apiKey']=='[REDACTED]'
+ assert out['toolOperations'][0]['arguments']['query']=='PRIVATE_QUERY'
+ assert out['toolOperations'][0]['result']['hits'][0]['description']=='설명'
+ assert 'toolOperations' not in trace('cid',state(),c)
+ old=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()
+ assert 'toolOperations' not in trace('cid',state(),c,details=True,created=old)
+
+def test_json_tool_arguments_and_system_state_remove_credentials_not_preferences():
+ from app.diagnostics import clean
+ body={'messages':[{'role':'system','content':'policy\nSTATE_JSON\n'+json.dumps({'recipient_preferences':{'giftPreference':'tea'},'accessToken':'TOKEN_CANARY'})},
+  {'role':'assistant','reasoning':'HIDDEN_REASONING','tool_calls':[{'function':{'name':'search','arguments':json.dumps({'query':'tea','clientSecret':'SECRET_CANARY'})}}]}]}
+ output=capture_request(body);wire=json.dumps(output)
+ assert 'tea' in wire and 'TOKEN_CANARY' not in wire and 'SECRET_CANARY' not in wire
+ assert 'HIDDEN_REASONING' not in wire
+ assert clean({'refresh_token':'secret','Authorization':'Bearer x','private_key':'abc'})=={'refresh_token':'[REDACTED]','Authorization':'[REDACTED]','private_key':'[REDACTED]'}
+
+
+@pytest.mark.parametrize('raw,secret',[
+ ('Authorization: Basic dXNlcjpwYXNz','dXNlcjpwYXNz'),
+ ('password="two word secret"','word secret'),
+ ('https://u:fakepass@example.invalid','fakepass'),
+])
+def test_credential_prose_formats_are_filtered(raw,secret):
+ from app.diagnostics import clean
+ assert secret not in clean(raw)
+
+def test_deep_untrusted_json_cannot_crash_audit_capture():
+ result=capture_request({'messages':[{'role':'user','content':'['*1200+'0'+']'*1200}]})
+ assert result['messages'][0]['role']=='user'

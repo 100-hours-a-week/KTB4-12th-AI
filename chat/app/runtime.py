@@ -374,6 +374,7 @@ class Runtime:
   t0=time.monotonic();receipt={'startedMonotonic':t0,'model':self.model_config.model if self.model_config else self.model,'requestedModel':self.admissions.get(tid,{}).get('model'),'revision':__import__('app.release',fromlist=['revision']).revision(),'usage':[],**self.trace_config()}
   connection=ACTIVE_CONNECTION.get()
   if connection is not None:receipt['connection']=connection.public()
+  receipt['buildCommit']=__import__('app.release',fromlist=['build_commit']).build_commit()
   receipt['executionMode']=getattr(self,'execution_mode','unknown')
   receipt['environment']=os.getenv('AI_ENVIRONMENT','unknown')
   receipt['sourceScope']='synthetic-local' if os.getenv('INTEGRATION_SYNTHETIC_ONLY')=='1' else 'unclassified'
@@ -386,10 +387,13 @@ class Runtime:
   except asyncio.CancelledError:
    receipt['interrupted']=True;receipt['outcome']='INTERRUPTED';receipt['failureStage']=receipt.get('activeStage')
   except Exception as exc:
-   logging.warning('Generation failed turn=%s type=%s',tid,type(exc).__name__)
    if isinstance(exc,TimeoutError):receipt['agentFailureCode']='turn_deadline_exceeded'
    receipt['failureStage']=receipt.get('activeStage')
-   receipt['failureStatus']=getattr(getattr(exc,'response',None),'status_code',None);receipt['failure']=type(exc).__name__
+   receipt['failureStatus']=exc.status if isinstance(exc,APIError) else getattr(getattr(exc,'response',None),'status_code',None);receipt['failure']=type(exc).__name__
+   receipt['failureStatusSource']='application' if isinstance(exc,APIError) else 'upstream_response' if receipt['failureStatus'] is not None else None
+   from app.request_audit import failure_diagnostics
+   safe=failure_diagnostics('FAILED',receipt)
+   logging.warning('Generation failed conversation=%s turn=%s type=%s stage=%s code=%s status=%s statusSource=%s elapsedMs=%s buildCommit=%s',cid,tid,safe['exceptionType'],safe['stage'],safe['code'],safe['httpStatus'],safe['httpStatusSource'],round((time.monotonic()-t0)*1000),receipt['buildCommit'])
    terminal={'status':'FAILED','error':{'message':self.failure_message(exc)}}
   finally:
    checkpoints.cancel()

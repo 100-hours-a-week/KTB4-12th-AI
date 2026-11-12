@@ -55,9 +55,9 @@ data: {&quot;turnId&quot;:&quot;11111111-1111-4111-8111-111111111111&quot;,&quot
 <p>고정 응답으로 통신을 확인하는 방법은 <a href="#testing">연동 테스트</a>를 참고합니다.</p><h2 id="integration-5">5. 요청 제한과 자원 보호</h2>
 <p>생성 제한과 접수/SSE 자원 보호는 별도입니다. 아래 값은 설정 가능한 보호 기본값이며 측정된 처리량이나 응답 시간 약속이 아닙니다. 실행 버전은 <code>/healthz</code> revision과 해당 배포 검증 기록으로 확인합니다.</p>
 <div class="table-wrap"><table><thead><tr><th scope="col">범위</th><th scope="col">보호 기본 설정</th><th scope="col">복구</th></tr></thead><tbody>
-<tr><td>생성·24시간 턴</td><td>대화당 1, DB 전체 동시 <code>CHAT_MAX_ACTIVE=4</code>, 최근 24시간 <code>CHAT_DAILY_LIMIT=200</code></td><td>기존 409/429 유지. 실패·취소·무료 fixture 신규 턴 포함.</td></tr>
+<tr><td>생성·24시간 턴</td><td>전체 동시 생성 수 제한 없음, 대화당 1 유지, 최근 24시간 <code>CHAT_DAILY_LIMIT=200</code></td><td>기존 409/429 유지. 실패·취소·무료 fixture 신규 턴 포함.</td></tr>
 <tr><td>접수 전 작업</td><td><code>CHAT_MAX_PENDING_ADMISSIONS=8</code></td><td>새 작업/저장/모델 호출 전 503. 영속 FIFO 큐 없음.</td></tr>
-<tr><td>SSE 연결</td><td>전체 <code>CHAT_MAX_SSE_CONNECTIONS=32</code>, 턴당 <code>CHAT_MAX_SSE_PER_TURN=4</code></td><td>연결 시작 전 503. 기존 UUID·커서로 복구.</td></tr>
+<tr><td>SSE 연결</td><td>전체·턴별 연결 수 제한 없음</td><td>기존 UUID·커서로 복구. 저장소 작업 보호는 유지.</td></tr>
 <tr><td>자원 보호 재시도</td><td><code>CHAT_RESOURCE_RETRY_AFTER_SECONDS=2</code></td><td>Retry-After 이후 횟수를 제한해 재시도. 성공 시각 보장 아님.</td></tr>
 </tbody></table></div>
 <p>표의 값은 소스 기본값이며 실제 배포 설정을 확인합니다. 생성·24시간 한도는 Store 프로세스, 접수·SSE 제한은 단일 활성 Runtime에 적용됩니다. 통합 실행은 Chat 프로세스의 Store가 PostgreSQL에 연결합니다. 원격 Store를 사용하는 별도 배포에서는 해당 Store 프로세스에 생성·24시간 한도를 설정합니다. 설정값은 양의 정수여야 하며 worker 수를 늘려 용량이 비례한다고 가정하지 않습니다.</p>

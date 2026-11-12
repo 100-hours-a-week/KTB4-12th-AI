@@ -146,11 +146,9 @@ class Store:
      raise APIError(409,'QUICK_CHECK_NEW_CONVERSATION_REQUIRED')
     if not self.profile_lookup:raise APIError(409,'QUICK_CHECK_GRANT_REQUIRED')
    if db.execute("SELECT 1 FROM turns WHERE conversation=%s AND state->>'status'='PROCESSING'",(cid,)).fetchone():raise APIError(409,'이전 답변이 끝난 뒤 질문해 주세요.')
-   # Serialize global admission across distinct conversations.
+   # Serialize the remaining daily quota across distinct conversations.
    db.execute('SELECT pg_advisory_xact_lock(908428)')
-   n=db.execute("SELECT count(*) AS n FROM turns WHERE state->>'status'='PROCESSING'").fetchone()['n']
    if db.execute("SELECT count(*) AS n FROM turns WHERE created>now()-interval '24 hours'").fetchone()['n']>=int(os.getenv('CHAT_DAILY_LIMIT','200')):raise APIError(429,'체험 서버의 일일 사용량을 모두 사용했습니다.')
-   if n>=int(os.getenv('CHAT_MAX_ACTIVE','4')):raise APIError(429,'현재 요청이 많습니다. 잠시 후 다시 시도해 주세요.')
    if db.execute('SELECT paused FROM admission_control WHERE id=1 FOR SHARE').fetchone()['paused']:raise APIError(503,'배포를 위해 새 질문 접수를 잠시 중지했습니다. 같은 ID로 다시 시도해 주세요.')
    if quick_check:
     # Evaluate after potentially blocking admission locks, immediately before

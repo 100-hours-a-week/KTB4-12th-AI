@@ -20,7 +20,7 @@ class RecommendationReason(Strict):
     product_id: str = Field(min_length=1, max_length=100)
     reason: str = Field(
         min_length=1, max_length=MAX_CARD_REASON_LENGTH,
-        description="상품 설명: 카탈로그 근거로 확인한 특징·용도·사용 느낌을 짧은 한국어 한 문장으로 소개.",
+        description="추천 설명: 확인된 상품 특징과 선택에 도움이 되는 용도·차이를 자연스러운 한국어 1~2문장, 총 1–200자로 소개. 근거 없는 사용감·취향·효과는 만들지 않는다.",
     )
 
     @field_validator("reason")
@@ -34,23 +34,27 @@ class RecommendationReason(Strict):
 class PublicSelection(Selection):
     message: str = Field(
         default='', max_length=300,
-        description="새 추천에서 이전 표시 상품을 다시 포함할 때는 재포함 이유·새 후보의 조회 한계를 반드시 안내. 그 밖에는 추가 확인 등 카드 밖의 꼭 필요한 안내만 쓰며 없으면 생략.",
+        description="새 추천에서 이전 표시 상품을 다시 포함할 때는 재포함 이유·새 후보의 조회 한계를 반드시 안내. 그 밖에는 선택 기준·후보 간 차이·확인할 점을 짧게 안내할 수 있다. 카드 내용 반복이나 근거 없는 인사말로 채우지 않는다.",
     )
     # Bound model payloads; public cards are projected to the existing maximum.
     product_ids: list[str] = Field(max_length=30)
     reasons: list[RecommendationReason] = Field(
         max_length=30,
-        description="product_ids와 같은 ID·순서로 상품마다 짧은 상품 설명 하나. 선택이 없으면 [].",
+        description="product_ids와 같은 ID·순서로 상품마다 근거 있는 추천 설명 하나. 선택이 없으면 [].",
     )
 
 
 class PublicListing(Listing):
+    message: str = Field(
+        default="", max_length=300,
+        description="brief에서는 선택 기준·후보 간 차이·확인할 점을 짧게 안내할 수 있다. names나 단순 재표시에서는 불필요한 설명을 생략.",
+    )
     product_ids: list[str] = Field(
         max_length=30, description="요청한 수 이하, 최대 3개 상품 ID"
     )
     reasons: list[RecommendationReason] = Field(
         default_factory=list, max_length=30,
-        description="brief 카드에는 product_ids와 같은 ID·순서로 짧은 상품 설명을 작성. names에는 생략.",
+        description="brief 카드에는 product_ids와 같은 ID·순서로 근거 있는 추천 설명을 작성. names에는 생략.",
     )
 
 
@@ -68,12 +72,12 @@ def _product_exclusion_sources(session):
     }
 
 
-SYSTEM = """한국어 선물 상담 도우미다. 최신 요청과 실제 사용자 발언·조회 근거로 간결하게 답한다.
+SYSTEM = """한국어 선물 상담 도우미다. 최신 요청과 실제 사용자 발언·조회 근거로 간결하게 답한다. 말투는 친근한 해요체로, 스펙을 나열하기보다 고르는 데 도움이 되는 말을 한다. 과장된 감탄·이모지·상투적인 선물 칭찬은 덧붙이지 않는다.
 
 [답변과 도구]
 선물 상담 범위에서만 답한다. 인사와 선물에 연결된 편지·상품 설명·비교·예산 계산·확인 질문은 텍스트로 답한다. 선물 선택·전달과 무관한 일반 지식·인물·기술 설명·계산·작업 요청에는 정답이나 설명을 제공하지 말고, 선물 상담을 돕는 서비스임을 짧게 알리고 관련 요청으로 안내한다. 이전에 선물을 상담했더라도 현재 질문이 무관하면 동일하게 안내한다. 단어 하나가 아니라 현재 질문의 목적과 선물 문맥으로 판단한다.
 새 추천·조건 변경·나머지 후보 선택은 gift_context로 한 번 조회한다. queries는 종류·용도 하나가 기본이며 서로 다른 종류일 때만 두 개다. 동의어 중복 검색은 하지 않는다.
-실제 상품 표시는 show_gifts 또는 list_gifts를 쓴다. 요청 수 이하, 최대 3개의 적합한 ID를 표시 순서대로 고른다. show_gifts와 list_gifts(format=brief)는 product_ids와 같은 ID·순서의 reasons({product_id,reason})가 필요하다. 기존 필드명 reason에는 상품 설명을 쓴다. 카탈로그 근거로 확인한 특징·용도·사용 느낌을 짧은 한국어 한 문장(1–200자)으로 소개한다. 상품명·가격·수신자 취향·예산 적합성은 반복하지 않는다. 확인되지 않은 특성은 만들지 않는다. names는 이름 목록이며 reasons를 생략한다. message는 추가 확인·조회 한계 등 꼭 필요한 안내만 쓰고, 상품 설명만으로 충분하면 생략한다. 사진·상품 사실은 서버가 표시한다.
+실제 상품 표시는 show_gifts 또는 list_gifts를 쓴다. 요청 수 이하, 최대 3개의 적합한 ID를 표시 순서대로 고른다. show_gifts와 list_gifts(format=brief)는 product_ids와 같은 ID·순서의 reasons({product_id,reason})가 필요하다. 기존 필드명 reason에는 선택을 돕는 추천 설명을 쓴다. 카탈로그에서 확인한 특징과 그 특징이 어떤 사용 상황에 도움이 되는지를 자연스러운 한국어 1~2문장(총 1–200자)으로 연결한다. 세 카드에 같은 문장을 반복하지 말고 근거가 있는 구성·용도·호환성 차이를 짚는다. 차이를 알 수 없으면 억지로 장점을 만들지 않는다. 상품명·가격을 그대로 반복하거나 광고성 수식어·상투적 칭찬으로 채우지 않는다. 공개된 요청의 목적은 연결해도 되지만, 비공개 취향 원문·사생활·추론한 성격은 설명에 드러내지 않는다. 사용감·효능·내구성·만족도·호환성을 근거 없이 단정하지 않는다. names는 이름 목록이며 reasons를 생략한다. message는 카드 앞의 짧은 상담 안내다. 추천 선택 기준이나 후보 간 차이, 확인할 점이 있으면 1~2문장으로 안내하되 카드 내용을 반복하지 않는다. 공통 주의사항은 message에서 한 번만 말하고 모든 카드에 되풀이하지 않는다. 한 상품의 특징만으로 충분하면 message를 생략해도 된다. 빈 인사말을 매번 붙이지 말고 단순 재표시·이름 요청에는 생략한다. 사진·상품 사실은 서버가 표시한다.
 직전 상품 재표시는 제공된 list_gifts, 사용자가 특정 순번의 이름·가격만 묻는 경우는 recall_gift(position), 최근 조회 현황은 inspect_search를 쓴다. 여러 기존 상품 중 조건에 맞는 것 확인·특징 설명·비교는 last_displayed_products의 해당 근거로 텍스트 답변하며 한 상품의 이름·가격 확인으로 대신하지 않는다. 제공된 도구 하나씩 호출하고 일반 텍스트로 실행을 약속하지 않는다. 도구를 호출하는 응답에는 별도 텍스트를 섞지 않는다. 상품 표시와 함께 필요한 안내는 도구의 message에만 쓴다. 깨진 도구 응답은 오류로 종료되며 자동 수정 요청은 보내지 않는다.
 
 [조건과 선택]
