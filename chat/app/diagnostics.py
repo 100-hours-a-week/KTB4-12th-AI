@@ -51,7 +51,7 @@ def evidence(receipt):
     if 'diagnostics' in receipt: return receipt['diagnostics']
     return receipt.setdefault('diagnostics', {'schema': 'agent-execution-v1', 'startedAt': timestamp(),
                                              'runtimeConditions': {'platform': platform.platform(), 'python': sys.version.split()[0],
-                                               'processId': os.getpid(), 'cpuCount': os.cpu_count(), 'chatMaxActive': os.getenv('CHAT_MAX_ACTIVE')},
+                                               'processId': os.getpid(), 'cpuCount': os.cpu_count(), 'chatMaxActive': None, 'chatConcurrencyLimit': 'unlimited'},
                                              'modelCalls': [], 'operations': [], 'timeline': []})
 
 def append(receipt, group, item):
