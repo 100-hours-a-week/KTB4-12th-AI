@@ -144,8 +144,8 @@ function diagnosticLabel(category) {
 }
 function diagnosticPanel(trace) {
   const d=trace.diagnostic||{},box=el('div',undefined,'trace-diagnostic');
-  box.append(el('strong',diagnosticLabel(d.category)),el('p',`단계 ${d.stage||'미기록'} · 오류 ${d.code||'미기록'}${d.exceptionType&&d.exceptionType!==d.code?' · 예외 '+d.exceptionType:''} · ${d.httpStatusSource==='application'?'내부 상태':'HTTP 상태'} ${d.httpStatus??'미기록'}`,'meta'));
-  if(trace.status==='FAILED'&&(!d.stage||!d.code||d.httpStatus==null))box.append(el('p','일부 실패 정보가 저장되지 않았습니다. 누락된 원인은 이 기록만으로 복원할 수 없습니다.','meta'));
+  box.append(el('strong',diagnosticLabel(d.category)),el('p',`단계 ${d.stage||'미기록'} · 오류 ${d.code||'미기록'}${d.exceptionType&&d.exceptionType!==d.code?' · 예외 '+d.exceptionType:''} · ${d.httpStatusSource==='application'?'내부 상태':'HTTP 상태'} ${d.httpStatus??'응답 없음 또는 미기록'}`,'meta'));
+  if(trace.status==='FAILED'&&(!d.stage||!d.code))box.append(el('p','일부 실패 정보가 저장되지 않았습니다. 누락된 원인은 이 기록만으로 복원할 수 없습니다.','meta'));
   box.append(el('p',`AI 시작 ${when(d.startedAt)} · 마지막 기록 ${when(d.capturedAt)} · 전체 처리 제한 ${d.turnTimeoutSeconds??'미기록'}초`,'meta'));
   box.append(el('p',`첫 답변 조각 생성 ${d.firstAnswerMs??'미기록'}ms · 첫 답변 저장 ${d.firstCommittedDeltaMs??'미기록'}ms`,'meta'));
   if(d.checkpointWriteFailures)box.append(el('p',`중간 기록 저장 실패 ${d.checkpointWriteFailures}회 · 일부 진행 정보가 없을 수 있습니다.`,'meta'));
