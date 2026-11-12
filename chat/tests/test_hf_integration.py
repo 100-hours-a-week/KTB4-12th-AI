@@ -58,6 +58,7 @@ class FixtureStore:
   if method=='read':return {'conversationId':cid,'turns':[self.public(t) for t in self.states.values() if t['_cid']==cid]}
   if method=='recipient_context':return None
   if method=='context':
+   if a.get('checkpoint') and (self.states[tid]['status']!='PROCESSING' or self.traces.get(tid,{}).get('outcome') or self.traces.get(tid,{}).get('elapsedMs',0)>a['value'].get('elapsedMs',0)):return False
    if 'value' in a:self.traces[tid]=copy.deepcopy(a['value'])
    return copy.deepcopy(self.traces.get(tid,{}))
   if method in ('emit','replay'):

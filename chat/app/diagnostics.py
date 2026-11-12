@@ -178,6 +178,9 @@ def snapshot_receipt(receipt):
     if start is not None and not value.get('outcome'):
         value['elapsedMs'] = round((now - start) * 1000, 2)
     value['timingCapturedAt'] = timestamp()
+    for call in value.get('requestAudit', []):
+        if call.get('status') == 'running' and type(call.get('offsetMs')) in (int, float) and start is not None:
+            call['elapsedMs'] = round(max(0, (now - start) * 1000 - call['offsetMs']), 2)
     data = value.get('diagnostics', {})
     for record in data.get('modelCalls', []) + data.get('operations', []):
         start = record.pop('_startedMonotonic', None)

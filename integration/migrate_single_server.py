@@ -70,9 +70,12 @@ def migrate_connection(db, expected_database):
     if old:
         if old != (expected_database, VERSION):
             raise ValueError("Unexpected existing integration migration")
+        # state.sql also creates this additive table. Observe its old shape
+        # before applying the SQL so a repaired table reports changed=True.
+        reviews_existed = db.execute("SELECT to_regclass('ai_chat.turn_reviews')").fetchone()[0] is not None
         db.execute("SET LOCAL search_path=ai_chat,public")
         db.execute((ROOT / "chat/sql/state.sql").read_text())
-        changed = migrate_turn_reviews(db)
+        changed = migrate_turn_reviews(db) or not reviews_existed
         changed = migrate_recipient_data(db) or changed
         return {"database": name, "version": VERSION, "changed": changed}
     db.execute((ROOT / "product-search/sql/catalog.sql").read_text())

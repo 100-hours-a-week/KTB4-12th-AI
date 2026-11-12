@@ -359,6 +359,17 @@ class Runtime:
   # The existing lease recovery pauses admission and closes unfinished turns.
   self.require_recovery()
   return False
+ async def trace_checkpoints(self,cid,tid,receipt):
+  """Best-effort progress, independent of generation and terminal persistence."""
+  from app.diagnostics import snapshot_receipt
+  while True:
+   try:
+    value=snapshot_receipt(receipt)
+    value['tracePersistence']={'version':1,'status':'pending'}
+    async with asyncio.timeout(2):await self.store.call('context',cid=cid,tid=tid,value=value,checkpoint=True)
+   except Exception:
+    receipt['checkpointWriteFailures']=receipt.get('checkpointWriteFailures',0)+1
+   await asyncio.sleep(5)
  async def run(self,cid,tid):
   t0=time.monotonic();receipt={'startedMonotonic':t0,'model':self.model_config.model if self.model_config else self.model,'requestedModel':self.admissions.get(tid,{}).get('model'),'revision':__import__('app.release',fromlist=['revision']).revision(),'usage':[],**self.trace_config()}
   connection=ACTIVE_CONNECTION.get()
@@ -366,19 +377,28 @@ class Runtime:
   receipt['executionMode']=getattr(self,'execution_mode','unknown')
   receipt['environment']=os.getenv('AI_ENVIRONMENT','unknown')
   receipt['sourceScope']='synthetic-local' if os.getenv('INTEGRATION_SYNTHETIC_ONLY')=='1' else 'unclassified'
+  from app.diagnostics import timestamp
+  receipt.update(startedAt=timestamp(),turnTimeoutSeconds=self.TURN_TIMEOUT_SECONDS)
   terminal={'status':'COMPLETED'}
+  checkpoints=asyncio.create_task(self.trace_checkpoints(cid,tid,receipt))
   try:
    async with asyncio.timeout(self.TURN_TIMEOUT_SECONDS):await self.generate(cid,tid,receipt)
   except asyncio.CancelledError:
-   receipt['interrupted']=True;receipt['outcome']='INTERRUPTED';receipt['failureStage']=receipt.get('activeStage');receipt['elapsedMs']=round((time.monotonic()-t0)*1000);receipt.pop('startedMonotonic',None)
-   await self.save_context(cid,tid,receipt)
-   return
+   receipt['interrupted']=True;receipt['outcome']='INTERRUPTED';receipt['failureStage']=receipt.get('activeStage')
   except Exception as exc:
    logging.warning('Generation failed turn=%s type=%s',tid,type(exc).__name__)
    if isinstance(exc,TimeoutError):receipt['agentFailureCode']='turn_deadline_exceeded'
    receipt['failureStage']=receipt.get('activeStage')
    receipt['failureStatus']=getattr(getattr(exc,'response',None),'status_code',None);receipt['failure']=type(exc).__name__
    terminal={'status':'FAILED','error':{'message':self.failure_message(exc)}}
+  finally:
+   checkpoints.cancel()
+   try:await checkpoints
+   except asyncio.CancelledError:pass
+  if receipt.get('interrupted'):
+   receipt['elapsedMs']=round((time.monotonic()-t0)*1000);receipt.pop('startedMonotonic',None)
+   await self.save_context(cid,tid,receipt)
+   return
   receipt['outcome']=terminal['status']
   if terminal['status']=='COMPLETED':receipt['activeStage']='completed'
   receipt['elapsedMs']=round((time.monotonic()-t0)*1000);receipt.pop('startedMonotonic',None)
