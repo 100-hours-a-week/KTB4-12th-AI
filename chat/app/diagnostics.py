@@ -30,12 +30,46 @@ def clean(value):
         if current is not None: secrets.append(current.value)
     except ImportError:
         pass  # Standalone Chat images use their existing environment credential.
-    def visit(v):
+    try:
+        from app.llm_connection import ACTIVE_CONNECTION
+        connection = ACTIVE_CONNECTION.get()
+        if connection is not None and connection.client is not None:
+            auth = connection.client.headers.get('Authorization', '')
+            if auth.startswith('Bearer '): secrets.append(auth[7:])
+    except ImportError:
+        pass
+    credential_keys = {'authorization', 'apikey', 'password', 'secret', 'token',
+                       'accesstoken', 'refreshtoken', 'sessiontoken', 'clientsecret',
+                       'passwordhash', 'csrf', 'cookie', 'setcookie', 'session',
+                       'privatekey', 'credential', 'credentials'}
+    def visit(v, depth=0):
+        if depth > 64: return "[record nesting limit exceeded]"
         if isinstance(v, dict):
-            return {k: '[REDACTED]' if k.lower() in ('authorization', 'api_key', 'apikey', 'password', 'secret', 'access_token', 'passwordhash', 'password_hash', 'csrf', 'cookie', 'set-cookie', 'session') else visit(x) for k, x in v.items()}
-        if isinstance(v, (list, tuple)): return [visit(x) for x in v]
+            return {k: '[REDACTED]' if re.sub(r'[^a-z]', '', str(k).lower()) in credential_keys else visit(x, depth+1) for k, x in v.items()}
+        if isinstance(v, (list, tuple)): return [visit(x, depth+1) for x in v]
         if isinstance(v, str):
-            for secret in secrets: v = v.replace(secret, '[REDACTED]')
+            # Tool arguments and STATE_JSON often contain serialized JSON.
+            try:
+                decoded = json.loads(v)
+            except (ValueError, TypeError, RecursionError):
+                decoded = None
+            if isinstance(decoded, (dict, list)):
+                return json.dumps(visit(decoded, depth+1), ensure_ascii=False)
+            before, marker, after = v.partition('STATE_JSON\n')
+            if marker:
+                try: state = json.loads(after)
+                except (ValueError, RecursionError): state = None
+                if isinstance(state, (dict, list)):
+                    return visit(before, depth+1) + marker + json.dumps(visit(state, depth+1), ensure_ascii=False)
+            for secret in secrets:
+                if secret: v = v.replace(secret, '[REDACTED]')
+            v = re.sub(r'(?i)(?:authorization\s*[:=]\s*)?(?:basic|bearer)\s+[^\s\"\',;]+', '[REDACTED]', v)
+            v = re.sub(r'(?i)(https?://)[^\s/@]+@', r'\1[REDACTED]@', v)
+            v = re.sub(r"(?i)(?:api[_-]?key|password|secret|(?:access|refresh)[_-]?token|token|authorization|cookie)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*')", '[REDACTED]', v)
+            v = re.sub(r'(?i)bearer\s+[^\s\"\',;]+', '[REDACTED]', v)
+            v = re.sub(r'(?i)((?:api[_-]?key|password|secret|access[_-]?token|refresh[_-]?token|token|authorization|cookie)\s*[\"\']?\s*[:=]\s*[\"\']?)[^\s\"\',;}]+', r'\1[REDACTED]', v)
+            v = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----', '[REDACTED]', v, flags=re.S)
+            v = re.sub(r'\bsk-[A-Za-z0-9_-]{8,}', '[REDACTED]', v)
             v = re.sub(r'\bsk-or-v1-[A-Za-z0-9_-]{20,200}', '[REDACTED]', v)
             v = re.sub(r'\bwk-[A-Za-z0-9_-]{4,200}\.ws-[A-Za-z0-9_-]{4,300}', '[REDACTED]', v)
         return v

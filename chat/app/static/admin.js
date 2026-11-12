@@ -159,7 +159,7 @@ function tracePanel(cid, turn) {
   for(const value of [trace.sourceScope,trace.environment||'환경 미기록','코드 지문 '+(trace.sourceIdentity?.promptVersion||trace.sourceIdentity?.integrationSourceSha256||'미기록').slice(0,12),'빌드 커밋 '+(trace.sourceIdentity?.buildCommit||'미기록').slice(0,12),trace.connection?.model||turn.context?.model||'모델 미기록','설정 v'+(trace.connection?.revision??'미기록')])meta.append(el('span',value,'chip'));
   if(trace.executionMode==='mock')meta.prepend(el('span','합성 기록 · 모델 미호출','chip'));
   box.append(meta,el('p',`입력 ${totals.inputTokens??'미확인'} · 출력 ${totals.outputTokens??'미확인'} tokens · ${trace.elapsedMs??'미확인'}ms · 비용 ${totals.costUsd==null?'미확인':totals.costUsd+' USD'}`,'trace-totals'));
-  box.append(el('p',`${trace.recording.calls==='not-recorded-legacy'?'모델 입출력 미기록':'마스킹된 모델 기록'} · 캐시/추론은 총 토큰에 포함됩니다.`,'meta'));
+  box.append(el('p',`${trace.recording.calls==='not-recorded-legacy'?'모델 입출력 미기록':'인증정보 제외 모델 기록'} · 캐시/추론은 총 토큰에 포함됩니다.`,'meta'));
   box.append(diagnosticPanel(trace));
   const timeline=el('ol',undefined,'trace-timeline');
   for(const item of trace.timeline){const row=el('li');row.append(el('strong',item.kind==='model'?'모델 호출 '+item.index:item.name||'저장된 상태'),el('span',`${item.status||'미기록'} · ${item.elapsedMs??'미기록'} ms${item.errorType?' · '+item.errorType:''}`,'meta'));if(item.kind==='model'){row.append(el('p',`HTTP ${item.httpStatus??'미기록'} · 헤더 ${item.headersMs??'미기록'}ms · 첫 패킷 ${item.firstPacketMs??'미기록'}ms · 첫 텍스트 ${item.firstTextMs??'미기록'}ms · 첫 도구 ${item.firstToolMs??'미기록'}ms`,'meta'),el('p',`모델 연결 제한 ${item.timeouts?.connectSeconds??'미기록'}초 · 읽기 제한 ${item.timeouts?.readSeconds??'미기록'}초 (응답 전체가 아닌 읽기 대기 제한)`,'meta'));}if(item.productIds)row.append(el('p','상품 후보 '+item.productIds.length+'개 · '+item.productIds.join(', '),'meta'));timeline.append(row);}
@@ -171,21 +171,25 @@ function tracePanel(cid, turn) {
   const action=el('button','입출력 상세 열람'), detail=el('div'), state=el('p','','meta'); let open=false, busy=false;
   action.onclick=async()=>{
     if(busy)return;if(open){detail.replaceChildren();open=false;action.textContent='입출력 상세 열람';return;}
-    const generation=selectionVersion;busy=true;action.disabled=true;state.textContent='마스킹된 상세를 불러오는 중…';
-    try{const data=await api(`/admin/api/conversations/${cid}/turns/${turn.turnId}/trace?details=true`);if(generation!==selectionVersion||!box.isConnected)return;detail.append(traceDetail(data));state.textContent=data.recording.detailState==='bounded-redacted'?(data.executionMode==='mock'?'합성 저장 예시 · 실제 모델 미호출':'실제 저장 기록 · 비공개 취향/비밀/추론 원문 제외'):'원문 보존 기간 만료 또는 과거 미기록';open=true;action.textContent='상세 닫기';}
+    const generation=selectionVersion;busy=true;action.disabled=true;state.textContent='관리자 상세를 불러오는 중…';
+    try{const data=await api(`/admin/api/conversations/${cid}/turns/${turn.turnId}/trace?details=true`);if(generation!==selectionVersion||!box.isConnected)return;detail.append(traceDetail(data));state.textContent=data.recording.detailState==='bounded-credential-filtered'?(data.executionMode==='mock'?'합성 저장 예시 · 실제 모델 미호출':'실제 저장 기록 · 취향/검색 도구 포함, 인증정보/숨겨진 추론 제외'):'원문 보존 기간 만료 또는 과거 미기록';open=true;action.textContent='상세 닫기';}
     catch(e){state.textContent=e.message;}finally{busy=false;action.disabled=false;}
   };box.append(action,state,detail);return box;
 }
 function traceDetail(data){
   const root=el('div',undefined,'io-detail');
+  const save=el('button','상세 JSON 저장');save.onclick=()=>download(data,'ai-trace-detail-'+data.turnId+'.json');root.append(save);
   if(data.publicInput!==undefined){root.append(el('h3','사용자 입력'),el('p',data.publicInput,'io-message'),el('h3','최종 응답'));
     for(const block of data.publicOutput||[]){if(block.text)root.append(el('p',block.text,'io-message'));for(const card of block.products||[]){const row=el('div',undefined,'io-card');row.append(el('strong','상품 '+card.productId),el('p',card.reason));root.append(row);}}
   }else root.append(el('p','원문 열람 기간이 지났거나 생성 시각이 기록되지 않았습니다.','meta'));
   if(data.noteRecords?.truncated)root.append(el('p',`메모·의견 일부만 표시됩니다. 검토 메모 ${data.noteRecords.reviewsTotal}개, 의견 ${data.noteRecords.feedbackTotal}개 중 종류별 최근 ${data.noteRecords.limitPerKind}개까지 표시합니다.`,'meta'));
   for(const [title,notes] of [['검토 메모',data.reviewNotes],['사용자 의견',data.feedbackNotes]]){if(notes?.length){root.append(el('h3',title));for(const note of notes)root.append(el('p',[note.verdict,note.note].filter(Boolean).join(' · '),'io-message'));}}
-  for(const call of data.modelCalls||[]){const detail=el('details'),sum=el('summary',`모델 호출 ${call.index} · ${call.status||'미기록'} · ${call.usage?.inputTokens??'?'} → ${call.usage?.outputTokens??'?'} tokens`);detail.append(sum,el('h4',call.input?.capture==='actual-send-time-redacted'?'실제 전송 시점의 마스킹 입력':'저장된 입력 · 실제 전송 여부 미확인'),el('pre',call.input?JSON.stringify(call.input,null,2):'미기록 또는 열람 기간 만료'),el('h4','모델 반환 기록'),el('pre',call.output?JSON.stringify(call.output,null,2):'미기록 또는 열람 기간 만료'));root.append(detail);}
+  for(const call of data.modelCalls||[]){const detail=el('details'),sum=el('summary',`모델 호출 ${call.index} · ${call.status||'미기록'} · ${call.usage?.inputTokens??'?'} → ${call.usage?.outputTokens??'?'} tokens`);detail.append(sum,el('h4',call.input?.capture==='actual-send-time-credential-filtered'?'실제 전송 입력 · 인증정보 제외':call.input?.capture==='actual-send-time-redacted'?'과거 마스킹 입력 · 삭제된 정보 복원 불가':'저장된 입력 · 실제 전송 여부 미확인'),el('pre',call.input?JSON.stringify(call.input,null,2):'미기록 또는 열람 기간 만료'),el('h4','모델 반환 기록'),el('pre',call.output?JSON.stringify(call.output,null,2):'미기록 또는 열람 기간 만료'));root.append(detail);}
   if(!data.modelCalls?.length)root.append(el('p','과거 모델 입출력은 기록되지 않았습니다. 사용량 영수증만 별도로 확인할 수 있습니다.','meta'));
-  root.append(el('p','비공개 취향·비밀·추론 원문과 도구 인자 본문은 이 상세에 포함하지 않습니다.','meta'));return root;
+  if(data.recipientProfile!==undefined)root.append(el('h3','수신자 취향 조회 기록'),el('pre',JSON.stringify(data.recipientProfile,null,2)));
+  for(const operation of data.toolOperations||[]){const detail=el('details');detail.append(el('summary',`${operation.name||'도구'} · ${operation.status||'미기록'}`),el('pre',JSON.stringify(operation,null,2)));root.append(detail);}
+  if(data.recording?.operationsTruncated)root.append(el('p','저장 한도를 넘어 일부 도구 기록이 생략됐습니다.','meta'));
+  root.append(el('p','관리자 전용: 취향과 검색 입력·결과를 포함합니다. 인증정보와 숨겨진 추론은 제외합니다. 과거에 저장하지 않은 정보는 복원하지 않습니다.','meta'));return root;
 }
 let connectionSnapshot=null, connectionBusy=false, connectionVersion=0, connectionUncertain=false;
 const cf=()=>$('#connection-form');
