@@ -95,3 +95,22 @@ async def test_chat_credential_endpoint_exposes_only_current_process_evidence(tm
             assert runtime.provider_key.snapshot().value not in response.text
     finally:
         await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_stream_trace_keeps_tool_arguments_and_filters_credentials(tmp_path, monkeypatch):
+    fragments = ['{"query":"synthetic tea",', '"apiKey":"canary-private-key"}']
+    packets = [{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-one","function":{"name":"catalog_search","arguments":fragments[0]}}]}}]},
+               {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":fragments[1]}}]},"finish_reason":"tool_calls"}]}]
+    response = "".join("data: " + json.dumps(p) + "\n\n" for p in packets) + "data: [DONE]\n\n"
+    runtime = await runtime_with(tmp_path, monkeypatch, lambda _: httpx.Response(200,text=response))
+    receipt={"startedMonotonic":time.monotonic()}
+    try:
+        async for _ in ProviderAdapter(runtime,receipt).stream([],[],"synthetic/model"): pass
+        audit=receipt['requestAudit'][0]
+        assert audit['toolCalls'][0]['name']=='catalog_search'
+        args=json.loads(audit['toolCalls'][0]['argumentsRaw'])
+        assert args['query']=='synthetic tea' and args['apiKey']=='[REDACTED]'
+        assert 'canary-private-key' not in json.dumps(audit)
+    finally:
+        await runtime.close()

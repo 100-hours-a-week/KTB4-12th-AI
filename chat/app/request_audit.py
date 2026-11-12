@@ -1,8 +1,8 @@
-"""Bounded administrator projection. No credentials, private profile or reasoning export."""
+"""Bounded administrator projection. Preferences and tool evidence; credentials and hidden reasoning excluded."""
 import copy, json, math, re, time
 from datetime import datetime, timezone
 from typing import cast
-from app.diagnostics import clean
+from app.diagnostics import clean, bounded, FIELD_LIMIT
 
 DETAIL_TTL_SECONDS=86400
 TEXT_LIMIT=4000
@@ -43,32 +43,13 @@ def usage_totals(entries,expected=None):
     }
 
 def capture_request(body):
-    """Actual send-time projection. Private fields are discarded before persistence."""
-    messages=[]
-    for m in body.get('messages',[])[:32]:
-        role=m.get('role');value=m.get('content')
-        entry={'role':role,'originalChars':len(value) if isinstance(value,str) else 0}
-        if role=='system' and isinstance(value,str):
-            before,sep,after=value.partition('STATE_JSON\n')
-            if sep:
-                try:
-                    state=json.loads(after)
-                    public={'filters','prepared_candidates','last_products','last_displayed_products','last_search','last_queries','persistent_product_exclusion_origins'}
-                    state={k:(v if k in public else '[private or unrecognized state redacted before recording]') for k,v in state.items()}
-                    value=before+sep+json.dumps(state,ensure_ascii=False)
-                except ValueError:value=before+sep+'[state unavailable for safe projection]'
-            else:value='[system input not recorded by this projection]'
-        elif role=='tool':
-            try:
-                obj=json.loads(value);value=json.dumps({k:obj[k] for k in ('products','filters','retrieved_count','server_constraints') if k in obj},ensure_ascii=False)
-            except (ValueError,TypeError):value='[tool data unavailable]'
-        entry['content']=text(value)
-        if m.get('tool_calls'):entry['toolNames']=[identifier(c.get('function',{}).get('name')) for c in m['tool_calls'][:4]]
-        messages.append(entry)
-    value={'capture':'actual-send-time-redacted','model':identifier(body.get('model')),'messages':messages,'tools':[identifier(t.get('function',{}).get('name')) for t in body.get('tools',[])[:8]],'privateData':'not retained; tool argument bodies and hidden reasoning excluded'}
-    raw=json.dumps(value,ensure_ascii=False)
-    if len(raw)>TRACE_LIMIT:return {'capture':'actual-send-time-redacted','model':value['model'],'messages':[{'role':m['role'],'originalChars':m['originalChars']} for m in messages],'truncated':True,'reason':'trace-preview-size-limit'}
-    return value
+    """Record actual model input for authenticated diagnostics, excluding credentials."""
+    value={'capture':'actual-send-time-credential-filtered',
+           'model':identifier(body.get('model')),
+           'messages':[{k:v for k,v in m.items() if k in {'role','content','tool_calls','tool_call_id','name'}} for m in body.get('messages',[])], 'tools':body.get('tools',[]),
+           'privateData':'preferences and tool arguments retained; credentials excluded'}
+    return bounded(value)
+
 
 def call_diagnostics(call):
     result={k:numeric(call.get(k)) for k in ('httpStatus','headersMs','firstPacketMs','firstTextMs','firstToolMs')}
@@ -86,8 +67,11 @@ def failure_diagnostics(status,context):
     model_stage=stage in {'model_1','model_2','responder','plan','answer'}
     model_http_status=call_diagnostics(last)['httpStatus']
     http_status=call_diagnostics({'httpStatus':context.get('failureStatus')})['httpStatus'] or (model_http_status if model_stage else None)
+    status_source=identifier(context.get('failureStatusSource')) if context.get('failureStatus') is not None else 'model_response' if model_stage and model_http_status is not None else None
     category='unrecorded'
     if status=='COMPLETED':category='completed'
+    elif code in {'recipient_profile_unavailable','recipient_profile_stale'}:category=code
+    elif status_source=='application' and http_status is not None:category='application_error'
     elif code=='turn_deadline_exceeded':category='turn_deadline'
     elif context.get('interrupted') or status=='CANCELLED':category='interrupted'
     elif code in ('ReadTimeout','ConnectTimeout','WriteTimeout','PoolTimeout'):
@@ -97,7 +81,7 @@ def failure_diagnostics(status,context):
     elif status=='PROCESSING':category='in_progress'
     return {'category':category,'code':code,'exceptionType':identifier(context.get('failure')),
             'stage':stage,
-            'httpStatus':http_status,'lastModelHttpStatus':model_http_status,'startedAt':context.get('startedAt'),'capturedAt':context.get('timingCapturedAt'),
+            'httpStatus':http_status,'httpStatusSource':status_source,'lastModelHttpStatus':model_http_status,'startedAt':context.get('startedAt'),'capturedAt':context.get('timingCapturedAt'),
             'turnTimeoutSeconds':numeric(context.get('turnTimeoutSeconds')),
             'firstAnswerMs':numeric(context.get('firstAnswerMs')),'firstCommittedDeltaMs':numeric(context.get('firstCommittedDeltaMs')),
             'checkpointWriteFailures':count(context.get('checkpointWriteFailures')),
@@ -105,17 +89,17 @@ def failure_diagnostics(status,context):
 
 def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
     calls=context.get('requestAudit') or [];diagnostics=context.get('diagnostics') or {};operations=diagnostics.get('operations') or []
-    result={'schema':'request-trace-v1','conversationId':cid,'turnId':turn['turnId'],'sourceScope':context.get('sourceScope','unclassified-legacy'),'synthetic':True if context.get('sourceScope')=='synthetic-local' or context.get('mode')=='mock' or context.get('externalCalls')==0 else None,'environment':identifier(context.get('environment')),'revision':identifier(context.get('revision')),'sourceIdentity':{'releaseLabel':identifier(context.get('revision')),'promptVersion':identifier(context.get('promptVersion')),'integrationSourceSha256':identifier((context.get('harnessProtocol') or {}).get('integrationSourceSha256')),'basis':'recorded release label and loaded-code fingerprints; not inferred Git HEAD'},'connection':context.get('connection') if isinstance(context.get('connection'),dict) else None,'status':turn['status'],'executionMode':context.get('executionMode','mock' if context.get('mode')=='mock' or context.get('externalCalls')==0 else 'unknown'),'elapsedMs':numeric(context.get('elapsedMs')),'lastEventId':count(turn.get('lastEventId')),'persistence':context.get('tracePersistence'),'modelCalls':[],'timeline':[],'recording':{'calls':'recorded-redacted' if calls else 'not-recorded-legacy','detailsRequested':details,'detailAccessWindowSeconds':DETAIL_TTL_SECONDS,'storedRecordRetention':'existing Chat store policy; no new deletion job','maxPreviewCharsPerCall':TRACE_LIMIT,'rawPrivatePrompts':False,'hiddenReasoning':False}}
+    result={'schema':'request-trace-v1','conversationId':cid,'turnId':turn['turnId'],'sourceScope':context.get('sourceScope','unclassified-legacy'),'synthetic':True if context.get('sourceScope')=='synthetic-local' or context.get('mode')=='mock' or context.get('externalCalls')==0 else None,'environment':identifier(context.get('environment')),'revision':identifier(context.get('revision')),'sourceIdentity':{'buildCommit':context.get('buildCommit') if isinstance(context.get('buildCommit'),str) and re.fullmatch(r'[0-9a-f]{40}',context['buildCommit']) else None,'releaseLabel':identifier(context.get('revision')),'promptVersion':identifier(context.get('promptVersion')),'integrationSourceSha256':identifier((context.get('harnessProtocol') or {}).get('integrationSourceSha256')),'basis':'recorded release label and loaded-code fingerprints; not inferred Git HEAD'},'connection':context.get('connection') if isinstance(context.get('connection'),dict) else None,'status':turn['status'],'executionMode':context.get('executionMode','mock' if context.get('mode')=='mock' or context.get('externalCalls')==0 else 'unknown'),'elapsedMs':numeric(context.get('elapsedMs')),'lastEventId':count(turn.get('lastEventId')),'persistence':context.get('tracePersistence'),'modelCalls':[],'timeline':[],'recording':{'calls':'recorded-credential-filtered' if calls else 'not-recorded-legacy','detailsRequested':details,'detailAccessWindowSeconds':DETAIL_TTL_SECONDS,'storedRecordRetention':'existing Chat store policy; no new deletion job','maxPreviewCharsPerCall':FIELD_LIMIT,'preferencesAndToolData':True,'rawPrivatePrompts':True,'hiddenReasoning':False}}
     result['diagnostic']=failure_diagnostics(turn['status'],context)
     for c in calls[:8]:
         item={k:c.get(k) for k in ('index','startedAt','status','elapsedMs','finishReason','truncated')};item['usage']=usage(c.get('usage'))
         item.update(call_diagnostics(c))
-        if details:item.update(input=c.get('input'),output={'visibleText':text(c.get('visibleText')),'toolNames':c.get('toolNames',[]),'arguments':'not retained; final selected cards are shown separately'})
+        if details:item.update(input=bounded(c.get('input')),output={'visibleText':text(c.get('visibleText'),FIELD_LIMIT),'toolNames':c.get('toolNames',[]),'toolCalls':bounded(c.get('toolCalls',[]))})
         result['modelCalls'].append(item);result['timeline'].append({'kind':'model','index':c.get('index'),'at':c.get('startedAt'),'offsetMs':numeric(c.get('offsetMs')),'status':c.get('status'),'elapsedMs':numeric(c.get('elapsedMs')),**call_diagnostics(c)})
     if not calls:
         # Old usage is evidence, but never synthesize send-time input/output.
         result['legacyUsage']=[usage(v) for v in context.get('usage',[])[:8]]
-    for operation in operations[:40]:
+    for operation in operations:
         row={'kind':'tool','name':identifier(operation.get('name')),'at':operation.get('startedAt'),'offsetMs':numeric(operation.get('turnOffsetMs')),'status':identifier(operation.get('status')),'elapsedMs':numeric(operation.get('elapsedMs')),'errorType':identifier(operation.get('errorType'))}
         raw=operation.get('result')
         if isinstance(raw,dict) and isinstance(raw.get('products'),list):row['productIds']=[identifier(str(p.get('product_id',p.get('productId','')))) for p in raw['products'][:30]]
@@ -133,7 +117,10 @@ def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
             result['recording']['detailState']='expired-or-creation-time-unavailable'
             for c in result['modelCalls']:c.pop('input',None);c.pop('output',None)
         else:
-            result['recording']['detailState']='bounded-redacted'
+            result['recording']['detailState']='bounded-credential-filtered'
+            result['recipientProfile']=bounded(context.get('recipientProfile'))
+            result['toolOperations']=[bounded(o) for o in operations]
+            result['recording']['operationsTruncated']=bool(diagnostics.get('truncated'))
             result['publicInput']=text(turn.get('message'))
             result['noteRecords']={'reviewsTotal':len(reviews),'feedbackTotal':len(feedback),'limitPerKind':40,'truncated':len(reviews)>40 or len(feedback)>40,'order':'latest retained records in stored order'}
             result['reviewNotes']=[{'note':text(r.get('note'))} for r in reviews[-40:]]

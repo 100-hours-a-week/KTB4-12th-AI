@@ -181,26 +181,19 @@ async def close_started(response):
     await response.body_iterator.aclose()
 
 
-async def test_per_turn_and_total_caps_reject_before_storage_and_release_on_close(sse):
+async def test_stream_counts_do_not_limit_connections_and_release_on_close(sse):
     store, runtime = sse
     tid = uuid.uuid4()
-    a, b = await open_stream(tid), await open_stream(tid)
-    count = len(store.calls)
-    with pytest.raises(APIError) as error:
-        await open_stream(tid)
-    assert error.value.status == 503 and error.value.headers['Retry-After'] == '2'
-    assert len(store.calls) == count
-    c = await open_stream(uuid.uuid4())
-    count = len(store.calls)
-    with pytest.raises(APIError):
-        await open_stream(uuid.uuid4())
-    assert len(store.calls) == count
-    await close_started(a)
-    d = await open_stream(tid)
-    for response in (b, c, d):
+    # Exceed both old defaults and explicitly configured legacy env values.
+    responses = [await open_stream(tid) for _ in range(40)]
+    responses += [await open_stream(uuid.uuid4()) for _ in range(40)]
+    assert runtime.resource_limits.total_streams == 80
+    assert runtime.resource_limits.streams[str(tid)] == 40
+    for response in responses:
         await close_started(response)
     assert runtime.resource_limits.total_streams == 0
     assert not runtime.resource_limits.streams and not runtime.signals
+
 
 
 async def test_stream_disconnect_never_cancels_generation_and_keeps_active_signal(sse):
@@ -271,12 +264,12 @@ async def test_completed_replays_do_not_accumulate_turn_resources(sse):
     assert runtime.resource_limits.total_streams == 0 and not runtime.cache
 
 
-async def test_overload_preserves_http_error_schema_and_auth_boundary(sse):
+async def test_storage_overload_preserves_http_error_schema_and_auth_boundary(sse):
     store, runtime = sse
     tid = uuid.uuid4()
     a, b = await open_stream(tid), await open_stream(tid)
     url = f'{main.BASE}/{uuid.uuid4()}/turns/{tid}/events'
-    count = len(store.calls)
+    store.failure = runtime.resource_limits.unavailable()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url='https://test') as client:
         assert (await client.get(url)).status_code == 401
         response = await client.get(url, headers={'Authorization': 'Bearer ' + main.TOKEN})
@@ -284,7 +277,7 @@ async def test_overload_preserves_http_error_schema_and_auth_boundary(sse):
         assert set(response.json()) == {'message', 'error'}
         assert set(response.json()['error']) == {'code', 'traceId'}
         assert response.json()['error']['code'] == 'SERVICE_UNAVAILABLE'
-    assert len(store.calls) == count
+    store.failure = None
     await close_started(a)
     await close_started(b)
     assert not runtime.signals
@@ -304,8 +297,7 @@ async def test_demo_proxy_preserves_existing_retry_after_and_error_body(monkeypa
     assert json.loads(response.body) == body
 
 
-@pytest.mark.parametrize('name', ['CHAT_MAX_PENDING_ADMISSIONS', 'CHAT_MAX_SSE_CONNECTIONS',
-                                 'CHAT_MAX_SSE_PER_TURN', 'CHAT_RESOURCE_RETRY_AFTER_SECONDS'])
+@pytest.mark.parametrize('name', ['CHAT_MAX_PENDING_ADMISSIONS', 'CHAT_RESOURCE_RETRY_AFTER_SECONDS'])
 @pytest.mark.parametrize('value', ['0', '-1', 'invalid'])
 def test_invalid_protective_configuration_fails_explicitly(monkeypatch, name, value):
     monkeypatch.setenv(name, value)

@@ -22,15 +22,10 @@ def positive_setting(name, default):
 
 class ResourceLimits:
     def __init__(self):
-        # Headroom for metadata/storage admission beside the existing four
-        # generating turns. These are protective defaults, not throughput claims.
+        # Storage admission protection is independent of generation counts.
         self.pending_admissions = positive_setting('CHAT_MAX_PENDING_ADMISSIONS', 8)
         self.preflight_limit = positive_setting('CHAT_MAX_PREFLIGHT_READS', 8)
         self.preflight_reads = 0
-        # Four views per turn allow a proxy plus tab/reconnect overlap. Total32
-        # leaves headroom beyond four generating turns; no storage capacity claim.
-        self.stream_total = positive_setting('CHAT_MAX_SSE_CONNECTIONS', 32)
-        self.stream_per_turn = positive_setting('CHAT_MAX_SSE_PER_TURN', 4)
         self.retry_after = positive_setting('CHAT_RESOURCE_RETRY_AFTER_SECONDS', 2)
         self.streams = Counter()
         self.total_streams = 0
@@ -64,8 +59,7 @@ class ResourceLimits:
             raise self.unavailable()
 
     def acquire_stream(self, runtime, tid):
-        if self.total_streams >= self.stream_total or self.streams[tid] >= self.stream_per_turn:
-            raise self.unavailable()
+        # Track lifecycle for cleanup without rejecting by connection count.
         self.total_streams += 1
         self.streams[tid] += 1
         return StreamLease(self, runtime, tid)

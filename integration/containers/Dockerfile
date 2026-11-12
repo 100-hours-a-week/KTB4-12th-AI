@@ -85,6 +85,8 @@ RUN uv sync --project chat --frozen --no-dev --no-install-project \
  && install -d -m 0700 -o 10001 -g 10001 /run/provider-key \
  && install -m 0600 -o 10001 -g 10001 /dev/null /run/provider-key/.volume-layout
 COPY chat/app /workspace/chat/app
+ARG SOURCE_SHA
+RUN printf '%s' "$SOURCE_SHA" > /workspace/chat/app/build-revision.txt
 COPY profiling/src/profiling/__init__.py profiling/src/profiling/vocab.py /workspace/profiling/src/profiling/
 COPY profiling/src/profiling/vocab_data /workspace/profiling/src/profiling/vocab_data
 COPY chat/*.md /workspace/chat/
