@@ -59,6 +59,29 @@ const text=e=>e.textContent+' '+e.children.map(text).join(' ');
  sandbox.record={status:'FAILED',diagnostic:{code:'APIError',stage:'context'}};const old=text(run('diagnosticPanel(record)'));assert(old.includes('HTTP 상태 응답 없음 또는 미기록'));assert(!old.includes('일부 실패 정보가 저장되지 않았습니다'));
  sandbox.record={status:'FAILED',diagnostic:{}};assert(text(run('diagnosticPanel(record)')).includes('누락된 원인은 이 기록만으로 복원할 수 없습니다'));
  sandbox.record={};assert(text(run('diagnosticPanel(record)')).includes('원인 정보 미기록'));
+ sandbox.record={status:'FAILED',publicInput:'안녕',publicOutput:[],modelCalls:[],recording:{calls:'not-started'},diagnostic:{},timeline:[],totals:{}};
+ const early=text(run('traceDetail(record)'));
+ assert(early.includes('저장된 최종 응답이 없습니다.'));
+ assert(early.includes('모델 호출이 시작되지 않았습니다.'));
+ assert(!early.includes('과거 모델 입출력'));
+ assert(text(run('tracePanel("cid",{turnId:"tid",trace:record})')).includes('모델 호출 시작 전'));
+ sandbox.record={modelCalls:[],recording:{calls:'not-recorded-legacy'}};
+ const unknown=text(run('traceDetail(record)'));
+ assert(unknown.includes('모델 호출 여부나 실패 원인을 판단할 수 없습니다.'));
+ assert(!unknown.includes('사용량 영수증만'));
+ sandbox.record.recipientProfile=null;
+ assert(text(run('traceDetail(record)')).includes('취향 조회 결과가 저장되지 않았습니다.'));
+ sandbox.record.legacyUsage=[{inputTokens:1}];
+ assert(text(run('traceDetail(record)')).includes('남아 있는 사용량 영수증'));
+ sandbox.record={status:'FAILED',diagnostic:{category:'recipient_profile_stale',code:'recipient_profile_stale',stage:'recipient_profile',httpStatus:503,httpStatusSource:'application',
+   profile:{status:'AVAILABLE',analysisStatus:'PENDING',analysisCurrent:false,inputSourceVersion:12,analysisSourceVersion:11,dataSourceVersion:12},
+   frames:[{module:'app.low_latency',function:'_generate',line:160}]},recording:{calls:'not-started'},timeline:[{kind:'preparation',name:'conversation_read',status:'completed',elapsedMs:2},{kind:'preparation',name:'recipient_profile',status:'failed',elapsedMs:5,errorType:'APIError'}],totals:{}};
+ const explained=text(run('tracePanel("cid",{turnId:"tid",trace:record})'));
+ for(const expected of ['현재 취향 입력과 분석 결과','다음 확인:','입력 버전 12','분석 버전 11','대기 중 (PENDING)','대화 읽기','수신자 취향 조회·검증','실패 · 5 ms','app.low_latency._generate:160'])assert(explained.includes(expected),expected);
+ sandbox.record={status:'FAILED',diagnostic:{},recording:{calls:'not-recorded-legacy'},timeline:[],totals:{}};
+ const missing=text(run('tracePanel("cid",{turnId:"tid",trace:record})'));
+ assert(missing.includes('이 기록만으로 원인을 특정할 수 없습니다.'));
+ assert(!missing.includes('Profiler의 처리 결과'));
  console.log('Incident filters and diagnostic rendering passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """

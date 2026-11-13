@@ -59,6 +59,30 @@ def call_diagnostics(call):
     result['timeouts']={k:numeric(limits.get(k)) for k in ('connectSeconds','readSeconds','writeSeconds','poolSeconds')}
     return result
 
+def profile_diagnostics(value):
+    """State/version evidence only; preference prose stays in explicit detail."""
+    value=value if isinstance(value,dict) else {}
+    data=value.get('data') if isinstance(value.get('data'),dict) else {}
+    def state(key,allowed):return value.get(key) if value.get(key) in allowed else None
+    return {'status':state('status',('AVAILABLE','UNAVAILABLE','NONE','NOT_PROVIDED','TEAM_SESSION','COMPLETED','PENDING','PROCESSING','FAILED')),
+            'accessStatus':state('accessStatus',('NOT_AUTHORIZED','UNAVAILABLE','INVALID','AUTHORIZED')),
+            'analysisStatus':state('analysisStatus',('PENDING','PROCESSING','COMPLETED','FAILED','UNAVAILABLE')),
+            'analysisCurrent':value.get('analysisCurrent') if type(value.get('analysisCurrent')) is bool else None,
+            'inputSourceVersion':count(value.get('inputSourceVersion')),
+            'analysisSourceVersion':count(value.get('analysisSourceVersion')),
+            'dataSourceVersion':count(data.get('sourceVersion'))}
+
+def frame_diagnostics(value):
+    result=[]
+    for frame in value[:8] if isinstance(value,list) else []:
+        if not isinstance(frame,dict):continue
+        module=identifier(frame.get('module'));function=frame.get('function');line=count(frame.get('line'))
+        if (module and module.startswith(('app.','integration.','profiling.','search.'))
+                and isinstance(function,str) and re.fullmatch(r'[A-Za-z0-9_.<>]{1,100}',function)
+                and line is not None and line>0):
+            result.append({'module':module,'function':function,'line':line})
+    return result
+
 def failure_diagnostics(status,context):
     calls=context.get('requestAudit') or []
     last=calls[-1] if calls and isinstance(calls[-1],dict) else context.get('lastModelCall') or {}
@@ -80,7 +104,8 @@ def failure_diagnostics(status,context):
     elif status=='FAILED':category='failed'
     elif status=='PROCESSING':category='in_progress'
     return {'category':category,'code':code,'exceptionType':identifier(context.get('failure')),
-            'stage':stage,
+            'stage':stage,'profile':profile_diagnostics(context.get('recipientProfile')),
+            'frames':frame_diagnostics(context.get('failureFrames')),
             'httpStatus':http_status,'httpStatusSource':status_source,'lastModelHttpStatus':model_http_status,'startedAt':context.get('startedAt'),'capturedAt':context.get('timingCapturedAt'),
             'turnTimeoutSeconds':numeric(context.get('turnTimeoutSeconds')),
             'firstAnswerMs':numeric(context.get('firstAnswerMs')),'firstCommittedDeltaMs':numeric(context.get('firstCommittedDeltaMs')),
@@ -91,6 +116,13 @@ def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
     calls=context.get('requestAudit') or [];diagnostics=context.get('diagnostics') or {};operations=diagnostics.get('operations') or []
     result={'schema':'request-trace-v1','conversationId':cid,'turnId':turn['turnId'],'sourceScope':context.get('sourceScope','unclassified-legacy'),'synthetic':True if context.get('sourceScope')=='synthetic-local' or context.get('mode')=='mock' or context.get('externalCalls')==0 else None,'environment':identifier(context.get('environment')),'revision':identifier(context.get('revision')),'sourceIdentity':{'buildCommit':context.get('buildCommit') if isinstance(context.get('buildCommit'),str) and re.fullmatch(r'[0-9a-f]{40}',context['buildCommit']) else None,'releaseLabel':identifier(context.get('revision')),'promptVersion':identifier(context.get('promptVersion')),'integrationSourceSha256':identifier((context.get('harnessProtocol') or {}).get('integrationSourceSha256')),'basis':'recorded release label and loaded-code fingerprints; not inferred Git HEAD'},'connection':context.get('connection') if isinstance(context.get('connection'),dict) else None,'status':turn['status'],'executionMode':context.get('executionMode','mock' if context.get('mode')=='mock' or context.get('externalCalls')==0 else 'unknown'),'elapsedMs':numeric(context.get('elapsedMs')),'lastEventId':count(turn.get('lastEventId')),'persistence':context.get('tracePersistence'),'modelCalls':[],'timeline':[],'recording':{'calls':'recorded-credential-filtered' if calls else 'not-recorded-legacy','detailsRequested':details,'detailAccessWindowSeconds':DETAIL_TTL_SECONDS,'storedRecordRetention':'existing Chat store policy; no new deletion job','maxPreviewCharsPerCall':FIELD_LIMIT,'preferencesAndToolData':True,'rawPrivatePrompts':True,'hiddenReasoning':False}}
     result['diagnostic']=failure_diagnostics(turn['status'],context)
+    # Empty audit data alone says nothing about whether a model was called.
+    # The instrumented tool loop records both counters before any preparation.
+    not_started=(context.get('agent')=='gift-tool-loop-v1'
+                 and type(context.get('modelAttempts')) is int and context['modelAttempts']==0
+                 and context.get('modelRequests')==[] and not calls
+                 and not context.get('usage') and not diagnostics.get('modelCalls'))
+    if not_started:result['recording']['calls']='not-started'
     for c in calls[:8]:
         item={k:c.get(k) for k in ('index','startedAt','status','elapsedMs','finishReason','truncated')};item['usage']=usage(c.get('usage'))
         item.update(call_diagnostics(c))
@@ -99,6 +131,11 @@ def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
     if not calls:
         # Old usage is evidence, but never synthesize send-time input/output.
         result['legacyUsage']=[usage(v) for v in context.get('usage',[])[:8]]
+    for step in context.get('preparationSteps',[])[:32]:
+        result['timeline'].append({'kind':'preparation','name':identifier(step.get('name')),
+            'at':step.get('startedAt'),'offsetMs':numeric(step.get('turnOffsetMs')),
+            'status':identifier(step.get('status')),'elapsedMs':numeric(step.get('elapsedMs')),
+            'errorType':identifier(step.get('errorType'))})
     for operation in operations:
         row={'kind':'tool','name':identifier(operation.get('name')),'at':operation.get('startedAt'),'offsetMs':numeric(operation.get('turnOffsetMs')),'status':identifier(operation.get('status')),'elapsedMs':numeric(operation.get('elapsedMs')),'errorType':identifier(operation.get('errorType'))}
         raw=operation.get('result')
@@ -108,7 +145,7 @@ def trace(cid,turn,context,*,details=False,created=None,reviews=(),feedback=()):
     result['timeline'].append({'kind':'stored-terminal-state','status':turn['status'],'lastEventId':count(turn.get('lastEventId')),'basis':'stored turn state; not independent proof every client received SSE'})
     entries=[c.get('usage') for c in calls] if calls else context.get('usage',[])
     expected=len(context['modelRequests']) if isinstance(context.get('modelRequests'),list) else None
-    result['totals']={**usage_totals(entries,expected),'attemptsObserved':len(calls) if calls else None}
+    result['totals']={**usage_totals(entries,expected),'attemptsObserved':len(calls) if calls else 0 if not_started else None}
     if details:
         expired=False
         try:expired=(datetime.now(timezone.utc)-datetime.fromisoformat(created.replace('Z','+00:00'))).total_seconds()>DETAIL_TTL_SECONDS if created else True

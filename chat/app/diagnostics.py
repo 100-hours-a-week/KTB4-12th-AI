@@ -8,6 +8,7 @@ import platform
 import sys
 import time
 from contextvars import ContextVar
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 ACTIVE_CALL = ContextVar('diagnostic_model_call', default=None)
@@ -16,6 +17,35 @@ RECORD_LIMIT = 512
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat()
+
+def failure_frames(exc):
+    """Code locations only: no exception message, source text, locals or paths."""
+    frames=[]
+    tb=exc.__traceback__
+    while tb is not None:
+        module=tb.tb_frame.f_globals.get('__name__','')
+        if isinstance(module,str) and module.startswith(('app.','integration.','profiling.','search.')):
+            frames.append({'module':module,'function':tb.tb_frame.f_code.co_name,'line':tb.tb_lineno})
+        tb=tb.tb_next
+    return frames[-8:]
+
+@asynccontextmanager
+async def preparation_step(receipt, name):
+    """Time preparation without retaining its inputs or results."""
+    receipt['activeStage']=name
+    start=time.monotonic()
+    record={'name':name,'status':'running','startedAt':timestamp(),'_startedMonotonic':start,
+            'turnOffsetMs':round((start-receipt['startedMonotonic'])*1000,2)}
+    receipt.setdefault('preparationSteps',[]).append(record)
+    try:
+        yield record
+        if record['status']=='running':record['status']='completed'
+    except BaseException as exc:
+        record.update(status='cancelled' if isinstance(exc,asyncio.CancelledError) else 'failed',errorType=type(exc).__name__)
+        raise
+    finally:
+        record.update(endedAt=timestamp(),elapsedMs=round((time.monotonic()-start)*1000,2),elapsedFinal=True)
+        record.pop('_startedMonotonic',None)
 
 def clean(value):
     """Remove credentials, including ones accidentally echoed in provider output."""
@@ -216,7 +246,7 @@ def snapshot_receipt(receipt):
         if call.get('status') == 'running' and type(call.get('offsetMs')) in (int, float) and start is not None:
             call['elapsedMs'] = round(max(0, (now - start) * 1000 - call['offsetMs']), 2)
     data = value.get('diagnostics', {})
-    for record in data.get('modelCalls', []) + data.get('operations', []):
+    for record in data.get('modelCalls', []) + data.get('operations', []) + value.get('preparationSteps', []):
         start = record.pop('_startedMonotonic', None)
         if record['status'] == 'running' and start is not None:
             record.update(elapsedMs=round((now - start) * 1000, 2), elapsedFinal=False)

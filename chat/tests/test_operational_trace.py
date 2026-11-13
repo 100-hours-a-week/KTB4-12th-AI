@@ -109,3 +109,26 @@ def test_search_timeout_is_not_attributed_to_model_server():
 def test_search_http_error_is_not_replaced_by_previous_model_success():
  out=trace('cid',{'turnId':'tid','status':'FAILED'}, {'failureStatus':503,'agentFailureStage':'context','requestAudit':[{'status':'completed','httpStatus':200}]})
  assert out['diagnostic']['category']=='dependency_http_error' and out['diagnostic']['httpStatus']==503
+
+
+async def test_running_preparation_checkpoint_records_elapsed_without_inputs_or_results():
+ import time
+ from app.diagnostics import preparation_step,snapshot_receipt
+ receipt={'startedMonotonic':time.monotonic()}
+ async with preparation_step(receipt,'recipient_profile'):
+  frozen=snapshot_receipt(receipt)
+  step=frozen['preparationSteps'][0]
+  assert step['status']=='running' and step['elapsedMs']>=0 and step['elapsedFinal'] is False
+  assert '_startedMonotonic' not in step and 'result' not in step and 'arguments' not in step
+ assert receipt['preparationSteps'][0]['status']=='completed'
+
+
+async def test_optional_metadata_failure_is_visible_without_blocking_ordinary_chat(monkeypatch):
+ from test_low_latency import run,text,Search
+ async def unavailable(self):raise httpx.ConnectError('PRIVATE_METADATA_CANARY')
+ monkeypatch.setattr(Search,'metadata',unavailable)
+ receipt,sent,store,_,cid,tid=await run([text('안녕하세요.')])
+ out=trace(cid,store.public(store.states[tid]),receipt)
+ step=next(s for s in out['timeline'] if s.get('name')=='catalog_metadata')
+ assert step['status']=='unavailable' and step['errorType']=='ConnectError'
+ assert len(sent)==1 and 'PRIVATE_METADATA_CANARY' not in json.dumps(out)

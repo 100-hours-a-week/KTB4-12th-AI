@@ -74,7 +74,7 @@ async function load(reset = true) {
       const button = el('button', undefined, 'conversation'); button.dataset.id = row.id; button.setAttribute('aria-pressed', row.id === current);
       button.append(el('span', '대화 ' + row.id.slice(0, 8), 'title'), el('p', `${when(row.created)} · ${row.turnCount}턴`, 'meta'));
       if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`${t.status||'미기록'} · ${t.backend||'연결 미기록'} · ${t.model||'모델 미기록'} · 설정 v${t.connectionRevision??'?'} · ${t.sourceScope}`, 'meta'),el('p',`입/출 ${t.inputTokens??'?'}/${t.outputTokens??'?'} · ${t.elapsedMs??'?'}ms · ${t.costUsd??'?'} USD`,'meta'));}
-      if (row.latestTrace) {const t=row.latestTrace;button.append(el('p',`해당 요청 ${when(t.created)} · ${diagnosticLabel(t.diagnostic?.category)}`,'meta'));}
+      if (row.latestTrace) {const t=row.latestTrace,d=t.diagnostic||{};button.append(el('p',`해당 요청 ${when(t.created)} · ${diagnosticLabel(d.category)}`,'meta'));if(d.stage||d.code)button.append(el('p',`${stageLabel(d.stage)} · ${d.code||'오류 코드 미기록'}${d.httpStatus!=null?' · '+(d.httpStatusSource==='application'?'내부 상태 ':'HTTP ')+d.httpStatus:''}`,'meta'));}
       if (row.latestFeedbackAt) button.append(el('p', `최근 의견 ${when(row.latestFeedbackAt)} · 미검토 ${row.pendingFeedbackCount}개`, 'meta'));
       if (row.failedCount) button.append(el('span', `실패 ${row.failedCount}건`, 'meta failed'));
       button.onclick = () => select(row.id, false, row.focusTurnId).catch(report); $('#items').append(button);
@@ -142,9 +142,42 @@ load().then(()=>{if(!$('#workspace').hidden)return loadConnection();}).catch(rep
 function diagnosticLabel(category) {
   return ({recipient_profile_unavailable:'수신자 취향 조회 실패',recipient_profile_stale:'수신자 취향 분석 버전 확인 필요',application_error:'AI 내부 처리 오류',turn_deadline:'AI 전체 처리 제한 시간 초과',provider_read_timeout:'모델 응답 읽기 시간 초과',provider_connect_timeout:'모델 연결 시간 초과',provider_write_timeout:'모델 요청 전송 시간 초과',provider_pool_timeout:'모델 연결 풀 대기 시간 초과',dependency_timeout:'조회·외부 의존 작업 시간 초과',dependency_http_error:'조회·외부 의존 서버 HTTP 오류',provider_http_error:'모델 서버 HTTP 오류',interrupted:'처리 중단 · 중단 원인은 별도 확인',failed:'AI 처리 실패',in_progress:'처리 중 · 마지막 저장 기록',completed:'AI 완료 기록 있음'})[category]||'원인 정보 미기록';
 }
+function stageLabel(stage) {
+  return ({conversation_read:'대화 읽기',recipient_profile:'수신자 취향 조회·검증',history_context:'이전 대화 상태 읽기',catalog_metadata:'상품 분류·검색 메타데이터 조회',recipient_binding:'수신자 연결 확인',harness_setup:'모델 요청 준비',context:'문맥·검색 처리',prepare:'요청 준비',plan:'검색 계획',search:'상품 검색',select:'상품 선택',responder:'모델 응답',model_1:'첫 번째 모델 호출',model_2:'두 번째 모델 호출',answer:'답변 생성',validation:'응답 검증',completed:'완료'})[stage]||stage||'미기록';
+}
+function diagnosticExplanation(d,status) {
+  const known={
+    recipient_profile_unavailable:['수신자의 저장 취향을 사용할 수 없어 처리를 중단했습니다.','취향 조회 상태와 접근 상태를 확인하세요.'],
+    recipient_profile_stale:['현재 취향 입력과 분석 결과의 일치 여부를 확인하지 못해 처리를 중단했습니다.','분석 상태와 입력·분석 버전을 확인하고 Profiler의 처리 결과를 대조하세요.'],
+    application_error:['AI 내부 처리에서 요청을 거부하거나 필수 조건을 확인하지 못했습니다.','실패 단계와 오류 코드, 오류 발생 코드 위치를 확인하세요. 내부 상태는 모델 서버의 HTTP 응답이 아닙니다.'],
+    turn_deadline:['요청 전체 처리 제한 시간에 도달했습니다.','아래 처리 흐름에서 마지막 진행 단계와 대기 시간을 확인하세요.'],
+    provider_read_timeout:['모델 응답을 읽는 도중 대기 시간이 초과됐습니다.','해당 모델 호출의 HTTP 상태와 마지막 패킷·텍스트 기록을 확인하세요.'],
+    provider_connect_timeout:['모델 서버에 연결하는 동안 제한 시간이 초과됐습니다.','모델 연결 주소와 해당 호출의 연결 제한 시간을 확인하세요.'],
+    provider_write_timeout:['모델 요청을 전송하는 동안 제한 시간이 초과됐습니다.','모델 연결과 요청 전송 제한 시간을 확인하세요.'],
+    provider_pool_timeout:['모델 연결을 확보하기 위한 대기 시간이 초과됐습니다.','동시 모델 요청과 연결 풀 사용 상태를 확인하세요.'],
+    provider_http_error:['모델 서버가 오류 HTTP 상태를 반환했습니다.','해당 모델 호출의 HTTP 상태와 연결 설정을 확인하세요.'],
+    dependency_timeout:['모델 응답 외의 조회·의존 작업에서 대기 시간이 초과됐습니다.','실패한 준비·검색 단계와 오류 유형을 확인하세요.'],
+    dependency_http_error:['조회·의존 서버가 오류 HTTP 상태를 반환했습니다.','실패 단계와 해당 의존 서버의 상태를 확인하세요.']
+  };
+  if(known[d.category])return known[d.category];
+  if(status==='FAILED')return [d.code?`오류 ${d.code}가 기록됐지만 구체적인 원인은 추가 확인이 필요합니다.`:'실패 상태만 남아 있어 이 기록만으로 원인을 특정할 수 없습니다.','아래 식별자·SSE 기록의 요청 ID로 서버 로그를 대조하세요. 저장되지 않은 과거 정보는 복원할 수 없습니다.'];
+  if(status==='CANCELLED')return ['처리가 중단됐습니다. 이 기록만으로 중단을 요청한 주체를 확정할 수 없습니다.','마지막 저장 단계와 서버 로그를 대조하세요.'];
+  return null;
+}
 function diagnosticPanel(trace) {
   const d=trace.diagnostic||{},box=el('div',undefined,'trace-diagnostic');
-  box.append(el('strong',diagnosticLabel(d.category)),el('p',`단계 ${d.stage||'미기록'} · 오류 ${d.code||'미기록'}${d.exceptionType&&d.exceptionType!==d.code?' · 예외 '+d.exceptionType:''} · ${d.httpStatusSource==='application'?'내부 상태':'HTTP 상태'} ${d.httpStatus??'응답 없음 또는 미기록'}`,'meta'));
+  box.append(el('strong',diagnosticLabel(d.category)));
+  const explanation=diagnosticExplanation(d,trace.status);
+  if(explanation)box.append(el('p',explanation[0]));
+  box.append(el('p',`단계 ${stageLabel(d.stage)}${d.stage?' ('+d.stage+')':''} · 오류 ${d.code||'미기록'}${d.exceptionType&&d.exceptionType!==d.code?' · 예외 '+d.exceptionType:''} · ${d.httpStatusSource==='application'?'내부 상태':'HTTP 상태'} ${d.httpStatus??'응답 없음 또는 미기록'}`,'meta'));
+  const p=d.profile||{},state={AVAILABLE:'취향 있음',UNAVAILABLE:'조회 불가',NONE:'등록 취향 없음',NOT_PROVIDED:'전달 없음',TEAM_SESSION:'팀 테스트',COMPLETED:'완료',PENDING:'대기 중',PROCESSING:'처리 중',FAILED:'실패'};
+  if(p.status||p.analysisStatus||d.category==='recipient_profile_stale'){
+    box.append(el('p',`취향 상태 ${state[p.status]||'미기록'} · 분석 ${state[p.analysisStatus]||'미기록'}${p.analysisStatus?' ('+p.analysisStatus+')':''} · 최신 분석 ${p.analysisCurrent===true?'확인됨':p.analysisCurrent===false?'아님':'미기록'}`,'meta'));
+    box.append(el('p',`입력 버전 ${p.inputSourceVersion??'미기록'} · 분석 버전 ${p.analysisSourceVersion??'미기록'} · 취향 데이터 버전 ${p.dataSourceVersion??'미기록'}`,'meta'));
+    if(p.accessStatus)box.append(el('p','취향 접근 상태 '+p.accessStatus,'meta'));
+  }
+  if(explanation)box.append(el('p','다음 확인: '+explanation[1],'diagnostic-next'));
+  if(d.frames?.length){const location=el('details'),rows=el('ol');location.append(el('summary','오류 발생 코드 위치 · 메시지·변수 값 제외'));for(const f of d.frames)rows.append(el('li',`${f.module}.${f.function}:${f.line}`));location.append(rows);box.append(location);}
   if(trace.status==='FAILED'&&(!d.stage||!d.code))box.append(el('p','일부 실패 정보가 저장되지 않았습니다. 누락된 원인은 이 기록만으로 복원할 수 없습니다.','meta'));
   box.append(el('p',`AI 시작 ${when(d.startedAt)} · 마지막 기록 ${when(d.capturedAt)} · 전체 처리 제한 ${d.turnTimeoutSeconds??'미기록'}초`,'meta'));
   box.append(el('p',`첫 답변 조각 생성 ${d.firstAnswerMs??'미기록'}ms · 첫 답변 저장 ${d.firstCommittedDeltaMs??'미기록'}ms`,'meta'));
@@ -159,10 +192,11 @@ function tracePanel(cid, turn) {
   for(const value of [trace.sourceScope,trace.environment||'환경 미기록','코드 지문 '+(trace.sourceIdentity?.promptVersion||trace.sourceIdentity?.integrationSourceSha256||'미기록').slice(0,12),'빌드 커밋 '+(trace.sourceIdentity?.buildCommit||'미기록').slice(0,12),trace.connection?.model||turn.context?.model||'모델 미기록','설정 v'+(trace.connection?.revision??'미기록')])meta.append(el('span',value,'chip'));
   if(trace.executionMode==='mock')meta.prepend(el('span','합성 기록 · 모델 미호출','chip'));
   box.append(meta,el('p',`입력 ${totals.inputTokens??'미확인'} · 출력 ${totals.outputTokens??'미확인'} tokens · ${trace.elapsedMs??'미확인'}ms · 비용 ${totals.costUsd==null?'미확인':totals.costUsd+' USD'}`,'trace-totals'));
-  box.append(el('p',`${trace.recording.calls==='not-recorded-legacy'?'모델 입출력 미기록':'인증정보 제외 모델 기록'} · 캐시/추론은 총 토큰에 포함됩니다.`,'meta'));
+  box.append(el('p',`${trace.recording.calls==='not-started'?'모델 호출 시작 전':trace.recording.calls==='not-recorded-legacy'?'모델 입출력 미기록':'인증정보 제외 모델 기록'} · 캐시/추론은 총 토큰에 포함됩니다.`,'meta'));
   box.append(diagnosticPanel(trace));
+  box.append(el('h3','처리 흐름'));
   const timeline=el('ol',undefined,'trace-timeline');
-  for(const item of trace.timeline){const row=el('li');row.append(el('strong',item.kind==='model'?'모델 호출 '+item.index:item.name||'저장된 상태'),el('span',`${item.status||'미기록'} · ${item.elapsedMs??'미기록'} ms${item.errorType?' · '+item.errorType:''}`,'meta'));if(item.kind==='model'){row.append(el('p',`HTTP ${item.httpStatus??'미기록'} · 헤더 ${item.headersMs??'미기록'}ms · 첫 패킷 ${item.firstPacketMs??'미기록'}ms · 첫 텍스트 ${item.firstTextMs??'미기록'}ms · 첫 도구 ${item.firstToolMs??'미기록'}ms`,'meta'),el('p',`모델 연결 제한 ${item.timeouts?.connectSeconds??'미기록'}초 · 읽기 제한 ${item.timeouts?.readSeconds??'미기록'}초 (응답 전체가 아닌 읽기 대기 제한)`,'meta'));}if(item.productIds)row.append(el('p','상품 후보 '+item.productIds.length+'개 · '+item.productIds.join(', '),'meta'));timeline.append(row);}
+  for(const item of trace.timeline){const row=el('li');row.append(el('strong',item.kind==='model'?'모델 호출 '+item.index:item.kind==='preparation'?stageLabel(item.name):item.name||'저장된 최종 상태'),el('span',`${({completed:'완료',failed:'실패',running:'진행 중',cancelled:'중단',unavailable:'조회 불가'})[item.status]||item.status||'미기록'} · ${item.elapsedMs??'미기록'} ms${item.errorType?' · '+item.errorType:''}`,'meta'));if(item.kind==='model'){row.append(el('p',`HTTP ${item.httpStatus??'미기록'} · 헤더 ${item.headersMs??'미기록'}ms · 첫 패킷 ${item.firstPacketMs??'미기록'}ms · 첫 텍스트 ${item.firstTextMs??'미기록'}ms · 첫 도구 ${item.firstToolMs??'미기록'}ms`,'meta'),el('p',`모델 연결 제한 ${item.timeouts?.connectSeconds??'미기록'}초 · 읽기 제한 ${item.timeouts?.readSeconds??'미기록'}초 (응답 전체가 아닌 읽기 대기 제한)`,'meta'));}if(item.productIds)row.append(el('p','상품 후보 '+item.productIds.length+'개 · '+item.productIds.join(', '),'meta'));timeline.append(row);}
   box.append(timeline);
   const technical=el('details'),technicalTitle=el('summary','식별자·SSE 기록');technical.append(technicalTitle,el('p',`대화 ${cid} · 요청 ${turn.turnId} · ${trace.environment||'환경 미기록'} · 모델 ${trace.connection?.baseUrl||'주소 미기록'}`,'meta'));
   technical.append(el('p',`빌드 커밋 ${trace.sourceIdentity?.buildCommit||'미기록'} · 코드 지문은 Git 커밋이 아닙니다. 과거 빌드는 당시 이미지 태그·digest로 확인하세요.`,'meta'));
@@ -181,12 +215,13 @@ function traceDetail(data){
   const save=el('button','상세 JSON 저장');save.onclick=()=>download(data,'ai-trace-detail-'+data.turnId+'.json');root.append(save);
   if(data.publicInput!==undefined){root.append(el('h3','사용자 입력'),el('p',data.publicInput,'io-message'),el('h3','최종 응답'));
     for(const block of data.publicOutput||[]){if(block.text)root.append(el('p',block.text,'io-message'));for(const card of block.products||[]){const row=el('div',undefined,'io-card');row.append(el('strong','상품 '+card.productId),el('p',card.reason));root.append(row);}}
+    if(!data.publicOutput?.length)root.append(el('p','저장된 최종 응답이 없습니다.','meta'));
   }else root.append(el('p','원문 열람 기간이 지났거나 생성 시각이 기록되지 않았습니다.','meta'));
   if(data.noteRecords?.truncated)root.append(el('p',`메모·의견 일부만 표시됩니다. 검토 메모 ${data.noteRecords.reviewsTotal}개, 의견 ${data.noteRecords.feedbackTotal}개 중 종류별 최근 ${data.noteRecords.limitPerKind}개까지 표시합니다.`,'meta'));
   for(const [title,notes] of [['검토 메모',data.reviewNotes],['사용자 의견',data.feedbackNotes]]){if(notes?.length){root.append(el('h3',title));for(const note of notes)root.append(el('p',[note.verdict,note.note].filter(Boolean).join(' · '),'io-message'));}}
   for(const call of data.modelCalls||[]){const detail=el('details'),sum=el('summary',`모델 호출 ${call.index} · ${call.status||'미기록'} · ${call.usage?.inputTokens??'?'} → ${call.usage?.outputTokens??'?'} tokens`);detail.append(sum,el('h4',call.input?.capture==='actual-send-time-credential-filtered'?'실제 전송 입력 · 인증정보 제외':call.input?.capture==='actual-send-time-redacted'?'과거 마스킹 입력 · 삭제된 정보 복원 불가':'저장된 입력 · 실제 전송 여부 미확인'),el('pre',call.input?JSON.stringify(call.input,null,2):'미기록 또는 열람 기간 만료'),el('h4','모델 반환 기록'),el('pre',call.output?JSON.stringify(call.output,null,2):'미기록 또는 열람 기간 만료'));root.append(detail);}
-  if(!data.modelCalls?.length)root.append(el('p','과거 모델 입출력은 기록되지 않았습니다. 사용량 영수증만 별도로 확인할 수 있습니다.','meta'));
-  if(data.recipientProfile!==undefined)root.append(el('h3','수신자 취향 조회 기록'),el('pre',JSON.stringify(data.recipientProfile,null,2)));
+  if(!data.modelCalls?.length)root.append(el('p',data.recording?.calls==='not-started'?'이 기록의 저장 시점에는 모델 호출이 시작되지 않았습니다.':data.legacyUsage?.length?'모델 입출력 원문은 저장되지 않았습니다. 남아 있는 사용량 영수증을 확인해 주세요.':'저장된 모델 입출력이 없습니다. 이 사실만으로 모델 호출 여부나 실패 원인을 판단할 수 없습니다.','meta'));
+  if(data.recipientProfile!==undefined)root.append(el('h3','수신자 취향 조회 기록'),el('pre',data.recipientProfile==null?'취향 조회 결과가 저장되지 않았습니다.':JSON.stringify(data.recipientProfile,null,2)));
   for(const operation of data.toolOperations||[]){const detail=el('details');detail.append(el('summary',`${operation.name||'도구'} · ${operation.status||'미기록'}`),el('pre',JSON.stringify(operation,null,2)));root.append(detail);}
   if(data.recording?.operationsTruncated)root.append(el('p','저장 한도를 넘어 일부 도구 기록이 생략됐습니다.','meta'));
   root.append(el('p','관리자 전용: 취향과 검색 입력·결과를 포함합니다. 인증정보와 숨겨진 추론은 제외합니다. 과거에 저장하지 않은 정보는 복원하지 않습니다.','meta'));return root;

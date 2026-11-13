@@ -388,6 +388,8 @@ class Runtime:
    receipt['interrupted']=True;receipt['outcome']='INTERRUPTED';receipt['failureStage']=receipt.get('activeStage')
   except Exception as exc:
    if isinstance(exc,TimeoutError):receipt['agentFailureCode']='turn_deadline_exceeded'
+   from app.diagnostics import failure_frames
+   receipt['failureFrames']=failure_frames(exc)
    receipt['failureStage']=receipt.get('activeStage')
    receipt['failureStatus']=exc.status if isinstance(exc,APIError) else getattr(getattr(exc,'response',None),'status_code',None);receipt['failure']=type(exc).__name__
    receipt['failureStatusSource']='application' if isinstance(exc,APIError) else 'upstream_response' if receipt['failureStatus'] is not None else None

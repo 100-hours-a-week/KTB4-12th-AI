@@ -399,6 +399,24 @@ def test_incident_filter_focuses_failed_turn_even_after_later_success(database):
     finally:store.close()
 
 
+def test_incident_list_preserves_internal_status_and_safe_profile_versions(database):
+    store=chat_store(database)
+    try:
+        cid,tid,_=conversation(store,status='FAILED')
+        store.context(cid,tid,{'failureStatus':503,'failureStatusSource':'application',
+            'failureStage':'recipient_profile','failure':'APIError',
+            'recipientProfile':{'status':'AVAILABLE','analysisStatus':'PENDING',
+                'inputSourceVersion':12,'analysisSourceVersion':11,
+                'data':{'sourceVersion':12,'giftPreference':'PRIVATE_PREFERENCE_CANARY'}}})
+        row=next(r for r in store.admin_conversations(status='FAILED')['items'] if r['id']==cid)
+        d=row['latestTrace']['diagnostic']
+        assert d['category']=='application_error' and d['httpStatusSource']=='application'
+        assert d['profile']['inputSourceVersion']==12 and d['profile']['analysisSourceVersion']==11
+        assert d['profile']['dataSourceVersion']==12 and d['profile']['analysisStatus']=='PENDING'
+        assert 'PRIVATE_PREFERENCE_CANARY' not in json.dumps(row)
+    finally:store.close()
+
+
 def test_activity_order_and_cursor_use_recent_matching_request_not_conversation_age(database):
     store=chat_store(database)
     try:

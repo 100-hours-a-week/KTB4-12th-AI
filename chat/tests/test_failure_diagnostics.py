@@ -40,9 +40,60 @@ async def test_profile_early_failure_has_safe_reason(status,code):
   async def recipient_profile(self,cid,tid):return {'source':'AI_PROFILE_STORE','status':status,'data':{}}
  runtime=object.__new__(Runtime);runtime.init_state(store,None,'owner');runtime.model='synthetic'
  await runtime.run(cid,tid)
- d=trace(cid,store.public(store.states[tid]),store.traces[tid])['diagnostic']
+ saved=trace(cid,store.public(store.states[tid]),store.traces[tid])
+ d=saved['diagnostic']
  assert d['stage']=='recipient_profile' and d['code']==code and d['category']==code
  assert d['httpStatus']==503 and d['httpStatusSource']=='application'
+ assert saved['recording']['calls']=='not-started' and saved['totals']['attemptsObserved']==0
+ assert [(s['name'],s['status']) for s in saved['timeline'] if s['kind']=='preparation']==[
+  ('conversation_read','completed'),('recipient_profile','failed')]
+
+
+async def test_early_store_error_retains_stage_timing_and_code_location_without_private_values():
+ class BrokenStore(Store):
+  async def call(self,method,**kwargs):
+   if method=='read':raise RuntimeError('PRIVATE_ERROR_CANARY')
+   return await super().call(method,**kwargs)
+ store=BrokenStore();cid,tid=str(uuid4()),str(uuid4())
+ await store.call('conversation',cid=cid,sender=7,recipient=42)
+ await store.call('start',cid=cid,tid=tid,message='PRIVATE_INPUT_CANARY')
+ runtime=object.__new__(LowLatencyRuntime);runtime.init_state(store,None,'owner');runtime.model='synthetic'
+ await runtime.run(cid,tid)
+ saved=trace(cid,store.public(store.states[tid]),store.traces[tid])
+ assert saved['diagnostic']['stage']=='conversation_read'
+ assert saved['recording']['calls']=='not-started'
+ step=saved['timeline'][0]
+ assert step['kind']=='preparation' and step['status']=='failed' and step['elapsedMs']>=0
+ assert step['errorType']=='RuntimeError'
+ frame=saved['diagnostic']['frames'][-1]
+ assert frame['module']=='app.low_latency' and frame['function']=='_generate' and frame['line']>0
+ assert 'PRIVATE_ERROR_CANARY' not in json.dumps(saved) and 'PRIVATE_INPUT_CANARY' not in json.dumps(saved)
+
+
+def test_profile_state_and_versions_survive_projection_without_preferences():
+ from app.request_audit import list_summary
+ ctx={'agentFailureCode':'recipient_profile_stale','agentFailureStage':'recipient_profile',
+      'failureStatus':503,'failureStatusSource':'application',
+      'recipientProfile':{'status':'AVAILABLE','analysisStatus':'PENDING','analysisCurrent':False,
+        'inputSourceVersion':12,'analysisSourceVersion':11,
+        'data':{'sourceVersion':12,'giftPreference':'PRIVATE_PREFERENCE_CANARY'}}}
+ detailed=trace('cid',{'turnId':'tid','status':'FAILED'},ctx)['diagnostic']
+ summary=list_summary({'status':'FAILED',**ctx})['diagnostic']
+ assert summary==detailed
+ assert summary['profile']['inputSourceVersion']==12 and summary['profile']['analysisSourceVersion']==11
+ assert summary['profile']['analysisStatus']=='PENDING'
+ assert 'PRIVATE_PREFERENCE_CANARY' not in json.dumps(summary)
+ assert summary['httpStatusSource']=='application'
+
+
+def test_bad_profile_metadata_and_frames_are_not_promoted_to_diagnostic_evidence():
+ ctx={'recipientProfile':{'status':'PRIVATE_CANARY','analysisCurrent':1,'inputSourceVersion':True},
+      'failureFrames':[{'module':'untrusted.secret','function':'PRIVATE_CANARY','line':5},
+                       {'module':'app.runtime','function':'run','line':True}]}
+ d=trace('cid',{'turnId':'tid','status':'FAILED'},ctx)['diagnostic']
+ assert d['profile']['status'] is None and d['profile']['inputSourceVersion'] is None
+ assert d['profile']['analysisCurrent'] is None and d['frames']==[]
+ assert 'PRIVATE_CANARY' not in json.dumps(d)
 
 
 def test_build_identity_does_not_infer_from_fingerprint(tmp_path,monkeypatch):

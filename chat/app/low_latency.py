@@ -11,7 +11,7 @@ from app.gift_core.contracts import Filters,Profile
 from app.gift_core.harness import Session
 from app.gift_core.provider import sse_json,ProviderError
 from app.gift_adapter import CatalogAdapter,ContextAdapter,PublicHarness,view,hf_facts
-from app.diagnostics import operation,event
+from app.diagnostics import operation,event,preparation_step
 from app.public_answer import PUBLIC_ANSWER_VERSION,previous_public_products
 from app.conversation_memory import history_messages,last_completed_turn
 from app.model_trace import TRACE
@@ -152,26 +152,30 @@ class LowLatencyRuntime(AgentRuntime):
   try:await self._generate(cid,tid,receipt)
   finally:TRACE.reset(token)
  async def _generate(self,cid,tid,receipt):
-  receipt['activeStage']='conversation_read'
-  conversation=await self.store.call('read',cid=cid)
-  receipt['activeStage']='recipient_profile'
-  snapshot=await self.recipient_profile(cid,tid);receipt['recipientProfile']=snapshot
-  # Missing/expired/revoked consent disables private enrichment, not ordinary
-  # message-only BE chat. Other lookup failures must remain visible failures.
-  if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='UNAVAILABLE' and snapshot.get('accessStatus')!='NOT_AUTHORIZED':
-   receipt['agentFailureCode']='recipient_profile_unavailable'
-   raise APIError(503,'수신자 취향의 조회 권한 또는 상태를 확인할 수 없습니다.')
-  from app.profile import recipient_model_context
-  model_profile=recipient_model_context(snapshot)
-  if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='AVAILABLE' and model_profile is None:
-   receipt['agentFailureCode']='recipient_profile_stale'
-   raise APIError(503,'수신자의 최신 취향 분석과 버전 확인이 필요합니다.')
-  receipt['activeStage']='context'
-  previous=last_completed_turn(conversation['turns'],tid);old=await self.store.call('context',cid=cid,tid=previous['turnId']) if previous else {}
+  async with preparation_step(receipt,'conversation_read'):
+   conversation=await self.store.call('read',cid=cid)
+  async with preparation_step(receipt,'recipient_profile'):
+   snapshot=await self.recipient_profile(cid,tid);receipt['recipientProfile']=snapshot
+   # Missing/expired/revoked consent disables private enrichment, not ordinary
+   # message-only BE chat. Other lookup failures must remain visible failures.
+   if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='UNAVAILABLE' and snapshot.get('accessStatus')!='NOT_AUTHORIZED':
+    receipt['agentFailureCode']='recipient_profile_unavailable'
+    raise APIError(503,'수신자 취향의 조회 권한 또는 상태를 확인할 수 없습니다.')
+   from app.profile import recipient_model_context
+   model_profile=recipient_model_context(snapshot)
+   if snapshot.get('source')=='AI_PROFILE_STORE' and snapshot.get('status')=='AVAILABLE' and model_profile is None:
+    receipt['agentFailureCode']='recipient_profile_stale'
+    raise APIError(503,'수신자의 최신 취향 분석과 버전 확인이 필요합니다.')
+  async with preparation_step(receipt,'history_context'):
+   previous=last_completed_turn(conversation['turns'],tid);old=await self.store.call('context',cid=cid,tid=previous['turnId']) if previous else {}
   prepared=self.admissions.get(tid,{}).get('prepared_context')
   # Metadata failure must not prevent a one-call ordinary conversation.
-  meta,meta_error,_=await self.planning_metadata()
+  async with preparation_step(receipt,'catalog_metadata') as step:
+   meta,meta_error,metadata_status=await self.planning_metadata()
+   receipt['metadataStatus']=metadata_status
+   if meta_error:step.update(status='unavailable',errorType=type(meta_error).__name__)
   if meta is None:meta={'snapshotId':'unavailable','categories':[]}
+  receipt['activeStage']='harness_setup'
   catalog=CatalogAdapter(self.search,meta,receipt)
   data=snapshot.get('data') or {};raw_preferences='';disliked=[];disliked_tags=[]
   if snapshot.get('source') in {'BACKEND_REQUEST','AI_PROFILE_STORE'} and snapshot.get('status')=='AVAILABLE':
@@ -190,7 +194,9 @@ class LowLatencyRuntime(AgentRuntime):
    disliked=[c['category_id'] for c in catalog.categories if c['category'] in tags or c['category_group'] in tags]
   disliked=list(dict.fromkeys(disliked))
   raw_preferences=raw_preferences[:500]
-  binding=await self.store.call('binding',cid=cid)
+  async with preparation_step(receipt,'recipient_binding'):
+   binding=await self.store.call('binding',cid=cid)
+  receipt['activeStage']='harness_setup'
   identity=hashlib.sha256(str(binding['recipientUserId']).encode()).hexdigest()
   prior_state=old.get('lowLatencyState',{}) if old.get('agent') in {'gift-tool-loop-v1',self.agent_name} else {}
   same=prior_state.get('recipientIdentity')==identity
