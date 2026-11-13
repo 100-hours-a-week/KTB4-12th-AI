@@ -102,3 +102,6 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--paper); pad
 
 .trace-diagnostic { margin:14px 0; padding:14px; background:var(--paper); border:1px solid var(--line); border-radius:10px; }
 .trace-diagnostic p:last-child { margin-bottom:0; }
+.trace-diagnostic li { overflow-wrap:anywhere; }
+.trace-panel>h3 { font-size:14px; margin-top:20px; }
+.diagnostic-next { font-size:13px; }

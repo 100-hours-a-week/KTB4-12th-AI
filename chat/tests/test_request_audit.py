@@ -32,6 +32,27 @@ def test_legacy_and_missing_receipt_not_fabricated():
  t=trace('cid',state(),{});assert t['recording']['calls']=='not-recorded-legacy' and t['modelCalls']==[] and t['totals']['costUsd'] is None
  c=context();c['modelRequests'].append({});assert trace('cid',state(),c)['totals']['inputTokens'] is None
  c['requestAudit'][0].pop('usage');assert trace('cid',state(),c)['totals']['costUsd'] is None
+
+def test_explicit_zero_attempts_distinguish_pre_model_failure_from_missing_records():
+ c={'agent':'gift-tool-loop-v1','modelAttempts':0,'modelRequests':[],
+    'usage':[],'outcome':'FAILED','failureStage':'context','failure':'APIError'}
+ t=trace('cid',{**state(),'status':'FAILED'},c)
+ assert t['recording']['calls']=='not-started'
+ assert t['totals']['attemptsObserved']==0 and t['modelCalls']==[]
+ assert t['totals']['inputTokens'] is None and t['totals']['costUsd'] is None
+ assert t['diagnostic']['stage']=='context' and t['diagnostic']['code']=='APIError'
+
+@pytest.mark.parametrize('changes',[
+ {'modelAttempts':None},{'modelAttempts':False},{'modelAttempts':1},
+ {'modelRequests':None},{'modelRequests':[{}]},{'agent':'unknown'},
+ {'usage':[{'prompt_tokens':1,'completion_tokens':1}]},
+ {'diagnostics':{'modelCalls':[{'status':'failed'}]}},
+])
+def test_incomplete_or_conflicting_evidence_never_claims_model_not_started(changes):
+ c={'agent':'gift-tool-loop-v1','modelAttempts':0,'modelRequests':[],**changes}
+ t=trace('cid',state(),c)
+ assert t['recording']['calls']=='not-recorded-legacy'
+ assert t['totals']['attemptsObserved'] is None
 def test_details_expire_without_claiming_persisted_data_deletion():
  old=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat();t=trace('cid',state(),context(),details=True,created=old)
  assert 'publicInput' not in t and 'input' not in t['modelCalls'][0]
